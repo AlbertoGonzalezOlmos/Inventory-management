@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HCRM — Shop Catalogue</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div id="app" v-cloak>
+
+  <!-- ================= Header / navigation ================= -->
+  <header class="topbar">
+    <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">HCRM <span>Shop</span></a>
+
+    <nav v-if="user" class="nav">
+      <a href="#/catalogue" :class="{active: currentView === 'catalogue'}">Catalogue</a>
+      <a v-if="isStaff" href="#/table" :class="{active: currentView === 'table'}">Table</a>
+      <a v-if="isStaff" href="#/admin" :class="{active: currentView === 'admin'}">Admin</a>
+      <a href="#/account" :class="{active: currentView === 'account'}">Account</a>
+    </nav>
+
+    <div class="userbox">
+      <template v-if="user">
+        <span class="user-name">{{ user.name }} <small>({{ user.role }})</small></span>
+        <button class="btn ghost" @click="logout">Log out</button>
+      </template>
+      <template v-else>
+        <a href="#/login" class="btn ghost">Log in</a>
+        <a href="#/register" class="btn">Sign up</a>
+      </template>
+    </div>
+  </header>
+
+  <main>
+    <!-- ================= Login ================= -->
+    <section v-if="currentView === 'login'" class="auth-card">
+      <h1>Log in</h1>
+      <p class="muted">Members: browse and select items. Staff: manage the catalogue.</p>
+      <form @submit.prevent="doLogin">
+        <label>Email
+          <input type="email" v-model="loginForm.email" required autofocus />
+        </label>
+        <label>Password
+          <input type="password" v-model="loginForm.password" required />
+        </label>
+        <p v-if="loginError" class="error">{{ loginError }}</p>
+        <button class="btn block" :disabled="busy">Log in</button>
+      </form>
+      <p class="muted">No account yet? <a href="#/register">Create a member account</a></p>
+    </section>
+
+    <!-- ================= Register (member signup) ================= -->
+    <section v-else-if="currentView === 'register'" class="auth-card">
+      <h1>Create your member account</h1>
+      <form @submit.prevent="doRegister">
+        <label>Full name
+          <input type="text" v-model="registerForm.name" required />
+        </label>
+        <label>Email
+          <input type="email" v-model="registerForm.email" required />
+        </label>
+        <label>Password (min. 8 characters)
+          <input type="password" v-model="registerForm.password" minlength="8" required />
+        </label>
+        <p v-if="registerError" class="error">{{ registerError }}</p>
+        <button class="btn block" :disabled="busy">Sign up</button>
+      </form>
+      <p class="muted">Already a member? <a href="#/login">Log in</a></p>
+    </section>
+
+    <!-- ================= Catalogue (browse + select) ================= -->
+    <section v-else-if="currentView === 'catalogue'" class="catalogue-layout">
+      <div class="catalogue-main">
+        <div class="toolbar">
+          <input
+            class="search"
+            type="search"
+            v-model="search"
+            placeholder="Search the catalogue…"
+          />
+          <button
+            class="btn toggle"
+            :class="{on: semantic}"
+            :title="'Semantic search uses AI embeddings of item descriptions'"
+            @click="toggleSemantic"
+          >✨ Semantic</button>
+          <select v-model="category">
+            <option value="">All categories</option>
+            <option v-for="c in categories" :key="c" :value="c">{{ c }}</option>
+          </select>
+        </div>
+        <p v-if="semantic && search.trim()" class="muted">
+          Semantic search: results ranked by meaning-similarity to “{{ search }}”.
+        </p>
+
+        <p v-if="!loading && items.length === 0" class="empty">
+          No items found. <span v-if="isStaff">Add some in the Admin section.</span>
+        </p>
+
+        <div class="item-grid">
+          <article
+            v-for="item in items"
+            :key="item.id"
+            class="item-card"
+            @click="addToPurchase(item)"
+          >
+            <button class="details-btn" title="View details" @click.stop="openDetail(item)">ℹ</button>
+            <div class="item-thumb">
+              <img v-if="item.image_url" :src="item.image_url" :alt="item.name" loading="lazy" />
+              <span v-else class="placeholder-icon">📦</span>
+            </div>
+            <div class="item-body">
+              <h3>{{ item.name }}</h3>
+              <p class="muted">{{ item.category }} · {{ item.sku }}</p>
+              <div class="item-footer">
+                <strong>{{ formatPrice(item.price_cents) }}</strong>
+                <span v-if="item.similarity !== undefined" class="sim-badge">
+                  {{ Math.round(item.similarity * 100) }}% relevance
+                </span>
+                <span class="stock" :class="{out: item.stock === 0}">
+                  {{ item.stock > 0 ? item.stock + ' in stock' : 'out of stock' }}
+                </span>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <!-- infinite-scroll sentinel -->
+        <div id="sentinel" v-show="hasMore"></div>
+        <p v-if="loading" class="muted loading-note">Loading…</p>
+      </div>
+
+      <!-- Purchase list sidebar -->
+      <aside class="selection-panel">
+        <h2>Purchase list</h2>
+        <p v-if="purchase.length === 0" class="muted">
+          Click items in the catalogue to add them to your purchase list.
+        </p>
+        <ul class="selection-list">
+          <li v-for="entry in purchase" :key="entry.item.id">
+            <div class="sel-info">
+              <span>{{ entry.item.name }}</span>
+              <small>{{ formatPrice(entry.item.price_cents) }} each</small>
+            </div>
+            <div class="sel-controls">
+              <button class="btn tiny" @click="decPurchase(entry.item.id)" :disabled="entry.qty <= 1">−</button>
+              <span class="qty">{{ entry.qty }}</span>
+              <button class="btn tiny" @click="incPurchase(entry.item.id)">+</button>
+              <button class="btn tiny danger" @click="removeFromPurchase(entry.item.id)">✕</button>
+            </div>
+          </li>
+        </ul>
+        <div class="selection-actions" v-if="purchase.length">
+          <button class="btn ghost block" @click="clearPurchase">Clear list</button>
+          <button class="btn block" @click="requestPurchase">Request items</button>
+        </div>
+        <div class="selection-total" v-if="purchase.length">
+          <span>Total</span>
+          <strong>{{ formatPrice(purchaseTotalCents) }}</strong>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ================= Account (change password) ================= -->
+    <section v-else-if="currentView === 'account'" class="auth-card">
+      <h1>Account</h1>
+      <p class="muted">{{ user.name }} · {{ user.email }} · role: {{ user.role }}</p>
+      <p v-if="user.must_change_password" class="error">
+        You are using a default or admin-issued password — you must change it
+        before using the app.
+      </p>
+      <h2>Change password</h2>
+      <form @submit.prevent="changePassword">
+        <label>Current password
+          <input type="password" v-model="pwForm.current_password" required />
+        </label>
+        <label>New password (min. 8 characters)
+          <input type="password" v-model="pwForm.new_password" minlength="8" required />
+        </label>
+        <p v-if="pwError" class="error">{{ pwError }}</p>
+        <p v-if="pwOk" class="ok">Password updated. Other sessions were signed out.</p>
+        <button class="btn block" :disabled="busy">Change password</button>
+      </form>
+    </section>
+
+    <!-- ================= Table view (items + export + analysis) ================= -->
+    <section v-else-if="currentView === 'table'" class="data-view">
+      <div class="data-toolbar">
+        <h1>Items in the database</h1>
+        <div class="data-actions">
+          <button class="btn ghost" @click="loadDataPage">↻ Reload</button>
+          <button class="btn ghost" @click="clearDataSelection">Clear selection</button>
+          <button class="btn" @click="exportCSV">⬇ CSV</button>
+          <button class="btn" @click="exportPDF">⬇ PDF</button>
+        </div>
+      </div>
+
+      <p class="muted hint">
+        Click a row or a column header to select it · Shift-click for a range ·
+        Ctrl/Cmd-click to add/remove · analysis and exports use the current selection
+        (or everything shown if nothing is selected).
+      </p>
+
+      <div class="table-wrap card">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th class="rowmarker"></th>
+              <th
+                v-for="col in allColumns"
+                :key="col.key"
+                :class="{sel: selectedCols.includes(col.key)}"
+                @click.exact="selectColumn(col.key)"
+                @click.shift.prevent="selectColumnRange(col.key)"
+                @click.ctrl.prevent="toggleColumn(col.key)"
+                @click.meta.prevent="toggleColumn(col.key)"
+                title="Click to select column · Shift-click for a range · Ctrl/Cmd-click to add/remove"
+              >
+                <span v-if="selectedCols.includes(col.key)" class="tick">✓</span>
+                {{ col.label }}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in dataRows"
+              :key="row.id"
+              :class="{sel: selectedRowIds.includes(row.id)}"
+              @click.exact="selectRow(row.id)"
+              @click.shift.prevent="selectRowRange(row.id)"
+              @click.ctrl.prevent="toggleRow(row.id)"
+              @click.meta.prevent="toggleRow(row.id)"
+            >
+              <td class="rowmarker" @click.stop="toggleRow(row.id)">
+                <input type="checkbox" :checked="selectedRowIds.includes(row.id)" />
+              </td>
+              <td
+                v-for="col in allColumns"
+                :key="col.key"
+                :class="{'col-sel': selectedCols.includes(col.key)}"
+              >{{ cellValue(row, col.key) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="dataLoading" class="muted loading-note">Loading…</p>
+        <p v-if="!dataLoading && dataRows.length === 0" class="empty">No items.</p>
+      </div>
+
+      <div class="data-pagination">
+        <button class="btn ghost" :disabled="dataPage === 0" @click="dataPage--; loadDataPage()">← Previous</button>
+        <span class="muted">Page {{ dataPage + 1 }}</span>
+        <button class="btn ghost" :disabled="dataRows.length < dataLimit" @click="dataPage++; loadDataPage()">Next →</button>
+      </div>
+
+      <!-- Analysis panel -->
+      <div class="analysis card">
+        <h2>
+          Analysis
+          <small v-if="selectedRowIds.length" class="muted">
+            ({{ selectedRowIds.length }} selected row{{ selectedRowIds.length > 1 ? 's' : '' }}
+            × {{ exportCols.length }} column{{ exportCols.length > 1 ? 's' : '' }})
+          </small>
+          <small v-else class="muted">(all {{ dataRows.length }} rows shown)</small>
+        </h2>
+
+        <div class="stat-grid">
+          <div class="stat"><span>Items</span><strong>{{ analysis.count }}</strong></div>
+          <div class="stat"><span>Inventory value</span><strong>{{ formatPrice(analysis.inventoryValueCents) }}</strong></div>
+          <div class="stat"><span>Avg price</span><strong>{{ formatPrice(analysis.priceMean) }}</strong></div>
+          <div class="stat"><span>Median price</span><strong>{{ formatPrice(analysis.priceMedian) }}</strong></div>
+          <div class="stat"><span>Min / Max price</span><strong>{{ formatPrice(analysis.priceMin) }} / {{ formatPrice(analysis.priceMax) }}</strong></div>
+          <div class="stat"><span>Price σ</span><strong>{{ formatPrice(analysis.priceStd) }}</strong></div>
+          <div class="stat"><span>Total stock</span><strong>{{ analysis.stockSum }}</strong></div>
+          <div class="stat"><span>Avg stock</span><strong>{{ analysis.stockMean.toFixed(1) }}</strong></div>
+          <div class="stat"><span>Min / Max stock</span><strong>{{ analysis.stockMin }} / {{ analysis.stockMax }}</strong></div>
+        </div>
+
+        <h3>By category</h3>
+        <div class="cat-bars">
+          <div v-for="c in analysis.categories" :key="c.name" class="cat-row">
+            <span class="cat-name">{{ c.name }}</span>
+            <div class="cat-bar-track">
+              <div class="cat-bar" :style="{width: (c.count / analysis.maxCatCount * 100) + '%'}"></div>
+            </div>
+            <span class="cat-count">{{ c.count }} · {{ formatPrice(c.valueCents) }}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= Admin (staff: item input + members) ================= -->
+    <section v-else-if="currentView === 'admin'" class="admin">
+      <div class="admin-tabs">
+        <button :class="{active: adminTab === 'items'}" @click="adminTab = 'items'">Catalogue input</button>
+        <button :class="{active: adminTab === 'members'}" @click="adminTab = 'members'">Members</button>
+      </div>
+
+      <!-- Items management -->
+      <div v-if="adminTab === 'items'" class="admin-split">
+        <form class="card" @submit.prevent="submitItem">
+          <h2>{{ itemEditingId ? 'Edit item #' + itemEditingId : 'Input new item' }}</h2>
+          <label>SKU
+            <input v-model="itemForm.sku" required :disabled="!!itemEditingId" />
+          </label>
+          <label>Name
+            <input v-model="itemForm.name" required />
+          </label>
+          <label>Category
+            <input v-model="itemForm.category" list="category-list" placeholder="general" />
+            <datalist id="category-list">
+              <option v-for="c in categories" :key="c" :value="c" />
+            </datalist>
+          </label>
+          <label>Description
+            <textarea v-model="itemForm.description" rows="3"
+              placeholder="Used for both keyword and AI semantic search"></textarea>
+          </label>
+          <div class="row">
+            <label>Price (€)
+              <input type="number" v-model.number="itemForm.price" step="0.01" min="0" required />
+            </label>
+            <label>Stock
+              <input type="number" v-model.number="itemForm.stock" min="0" required />
+            </label>
+          </div>
+          <label>Image URL (optional)
+            <input v-model="itemForm.image_url" placeholder="https://…" />
+          </label>
+          <p v-if="itemError" class="error">{{ itemError }}</p>
+          <div class="row">
+            <button class="btn" :disabled="busy">{{ itemEditingId ? 'Save changes' : 'Add to catalogue' }}</button>
+            <button v-if="itemEditingId" type="button" class="btn ghost" @click="resetItemForm">Cancel</button>
+          </div>
+          <p class="muted">Descriptions are embedded automatically for semantic search.</p>
+        </form>
+
+        <div class="card">
+          <h2>Catalogue ({{ adminItems.length }})</h2>
+          <table class="table">
+            <thead>
+              <tr><th>SKU</th><th>Name</th><th>Category</th><th>Price</th><th>Stock</th><th>AI</th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="it in adminItems" :key="it.id">
+                <td>{{ it.sku }}</td>
+                <td>{{ it.name }}</td>
+                <td>{{ it.category }}</td>
+                <td>{{ formatPrice(it.price_cents) }}</td>
+                <td>{{ it.stock }}</td>
+                <td>{{ it.has_embedding ? '✓' : '—' }}</td>
+                <td class="actions">
+                  <button class="btn tiny" @click="editItem(it)">Edit</button>
+                  <button class="btn tiny danger" @click="deleteItem(it)">Delete</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Members management -->
+      <div v-else class="admin-split">
+        <form class="card" @submit.prevent="createMember">
+          <h2>Create member account</h2>
+          <label>Name
+            <input v-model="memberForm.name" required />
+          </label>
+          <label>Email
+            <input type="email" v-model="memberForm.email" required />
+          </label>
+          <label>Temporary password (min. 8 chars)
+            <input v-model="memberForm.password" minlength="8" required />
+          </label>
+          <label>Role
+            <select v-model="memberForm.role">
+              <option value="member">Member (buyer)</option>
+              <option value="staff">Staff (can input items)</option>
+              <option v-if="user && user.role === 'admin'" value="admin">Admin</option>
+            </select>
+          </label>
+          <p v-if="memberError" class="error">{{ memberError }}</p>
+          <button class="btn" :disabled="busy">Create account</button>
+        </form>
+
+        <div class="card">
+          <h2>Members ({{ members.length }})</h2>
+          <table class="table">
+            <thead>
+              <tr><th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="m in members" :key="m.id">
+                <td>{{ m.name }}</td>
+                <td>{{ m.email }}</td>
+                <td>{{ m.role }}</td>
+                <td>{{ formatDate(m.created_at) }}</td>
+                <td class="actions">
+                  <button
+                    v-if="user && user.role === 'admin' && m.id !== user.id"
+                    class="btn tiny"
+                    @click="resetMemberPassword(m)"
+                  >Reset PW</button>
+                  <button
+                    v-if="user && user.role === 'admin' && m.id !== user.id"
+                    class="btn tiny danger"
+                    @click="deleteMember(m)"
+                  >Delete</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ================= Item detail modal ================= -->
+  <div class="modal-backdrop" v-if="detailItem" @click.self="closeDetail">
+    <div class="modal">
+      <button class="modal-close" @click="closeDetail">✕</button>
+      <div class="item-thumb large">
+        <img v-if="detailItem.image_url" :src="detailItem.image_url" :alt="detailItem.name" />
+        <span v-else class="placeholder-icon">📦</span>
+      </div>
+      <h2>{{ detailItem.name }}</h2>
+      <p class="muted">{{ detailItem.category }} · SKU {{ detailItem.sku }}</p>
+      <p>{{ detailItem.description || 'No description.' }}</p>
+      <div v-if="similar.length" class="similar">
+        <h3>Similar items</h3>
+        <ul>
+          <li v-for="s in similar" :key="s.id" @click="openDetail(s)">
+            {{ s.name }}
+            <small class="muted">{{ Math.round(s.similarity * 100) }}% · {{ formatPrice(s.price_cents) }}</small>
+          </li>
+        </ul>
+      </div>
+      <div class="modal-footer">
+        <strong>{{ formatPrice(detailItem.price_cents) }}</strong>
+        <button
+          class="btn"
+          :disabled="detailItem.stock === 0"
+          @click="addToPurchase(detailItem)"
+        >
+          {{ detailItem.stock === 0 ? 'Out of stock' : 'Add to purchase list' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= Toast ================= -->
+  <transition name="fade">
+    <div class="toast" v-if="toast">{{ toast }}</div>
+  </transition>
+</div>
+
+<!-- Vendored locally (pinned versions) so the app works fully offline. -->
+<script src="/vendor/vue.global.prod.js"></script>
+<script src="/vendor/jspdf.umd.min.js"></script>
+<script src="/vendor/jspdf.plugin.autotable.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
