@@ -90,7 +90,7 @@
             :class="{on: semantic}"
             :title="'Semantic search uses AI embeddings of item descriptions'"
             @click="toggleSemantic"
-          >✨ Semantic</button>
+          >Search</button>
           <select v-model="category">
             <option value="">All categories</option>
             <option v-for="c in categories" :key="c" :value="c">{{ c }}</option>
@@ -322,7 +322,7 @@
           </label>
           <label>Description
             <textarea v-model="itemForm.description" rows="3"
-              placeholder="Used for both keyword and AI semantic search"></textarea>
+              placeholder="Please, enter a brief description of the product"></textarea>
           </label>
           <div class="row">
             <label>Price (€)
@@ -340,7 +340,7 @@
             <button class="btn" :disabled="busy">{{ itemEditingId ? 'Save changes' : 'Add to catalogue' }}</button>
             <button v-if="itemEditingId" type="button" class="btn ghost" @click="resetItemForm">Cancel</button>
           </div>
-          <p class="muted">Descriptions are embedded automatically for semantic search.</p>
+          <p class="muted"></p>
         </form>
 
         <div class="card">
