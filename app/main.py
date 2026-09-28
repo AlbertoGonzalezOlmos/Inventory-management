@@ -5,6 +5,7 @@ Run with:  uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -108,10 +109,25 @@ async def lifespan(app: FastAPI):
     yield
 
 
+# Interactive docs are dev-only tooling: they load jsdelivr assets and an
+# inline bootstrap script, which the app CSP below forbids. They are exempt
+# from the CSP header, or disabled outright with HCRM_DOCS=0. openapi_url
+# MUST be nulled together with docs_url/redoc_url: FastAPI gates all three
+# on openapi_url, so nulling only the two visible ones leaves /openapi.json
+# (the full endpoint schema) public (PLAN-v2 §1, verified empirically).
+DOCS_ENABLED = os.environ.get("HCRM_DOCS", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
 app = FastAPI(
     title="HCRM - Shop Catalogue & Members",
     version="0.3.0",
     lifespan=lifespan,
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 
 app.include_router(auth.router)
@@ -123,22 +139,48 @@ app.include_router(members.router)
 _vector_status: bool | None = None
 
 
+# Docs-only paths: exempt from the CSP header (they load jsdelivr assets
+# and an inline bootstrap script; see DOCS_ENABLED above). Prefix matching
+# also covers /docs/oauth2-redirect and friends.
+_DOCS_PATH_PREFIXES = ("/docs", "/redoc")
+
+# Why 'unsafe-eval' is unavoidable: the frontend deliberately uses Vue's
+# FULL build (vendored vue.global.prod.js, no build step) with an in-DOM
+# template, so the runtime compiler generates render functions via
+# new Function() — which script-src 'self' alone forbids. A policy without
+# 'unsafe-eval' shipped here once and blanked the entire SPA (PLAN-v2 §0,
+# B2). The cost: 'unsafe-eval' substantially negates the CSP's protection
+# against injected scripts; the tracked endgame is precompiled render
+# functions (PLAN-v2 W7.2, README "Tracked issues").
+CSP_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https:; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    """Baseline browser hardening. CSP allows inline style *attributes* only
-    because Vue binds :style for the analysis bar chart; scripts are strictly
-    same-origin (everything is vendored under /static/vendor).
+    """Baseline browser hardening on every response.
+
+    CSP is skipped only for the docs routes (dev tooling; see DOCS_ENABLED)
+    — everything the product actually serves, including the SPA and every
+    API response, carries the full policy. 'unsafe-inline' in style-src is
+    for Vue's :style bindings (the analysis bar chart), not for scripts.
     """
     response: Response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https:; connect-src 'self'; "
-        "frame-ancestors 'none'"
-    )
+    path = request.url.path
+    if not (path.startswith(_DOCS_PATH_PREFIXES) or path == "/openapi.json"):
+        response.headers["Content-Security-Policy"] = CSP_POLICY
     return response
 
 
