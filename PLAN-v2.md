@@ -913,3 +913,72 @@ green". Gates for W2.3 (all must be in the commit message): probe marks
 exits **1** under Chrome 131 *and* Chrome 150 (today Chrome 150 exits 0 — §8.2 F1);
 pre-fix tree exits 1 under both; parser fixtures green under `pytest` with no browser
 installed (`HCRM_BROWSER=/nonexistent` must not skip them).
+
+---
+
+## 10. Round 5d — execution log (branch `round5-remediation`)
+
+Implemented by B on the owner's instruction ("work on all the items you point
+out; use your recommendation when you ask for input"). Nine commits, one
+workstream each (ground rule 4). Suite: **102 passed, forward and reverse**.
+
+| Item | Commit | Gate evidence (all executed) |
+|---|---|---|
+| W1.4 backup + run.sh guard | `2a37b64` | `backup_db.sh` on the live `./data`: checkpoint ok, backup verified (`users=2 items=12 integrity=ok`), main file now self-contained (WAL 0 B). 5 tests incl. an in-test WAL rollback reproduction. `HCRM_SCRATCH=1` boot leaves `./data` byte-identical |
+| W2.4 docs-exemption bound | `f18cc94` | `/docs.html` + `/redocx.html` now carry the CSP (before: served with none); `_is_docs_path` unit-tested over 14 paths |
+| W2.5 500 hardening | `f18cc94` | raising route → 500 **with** all four headers (before: none); docstring corrected |
+| W3.1 shared contract | `82569dd` | used by ui_check/load/smoke; `call()` cannot raise on 4xx/5xx or a dead socket |
+| W2.3 detector | `cee785d` | probe marks `chrome-headless-shell` **BLIND** → exit 4; injected-CSP-violation page → exit **1** under Chrome 131 *and* Chrome 150 (was exit 0 on 150); pre-fix tree → exit 1; `--self-host` → exit 0; unreachable → exit 2; 11 parser fixtures, no browser needed |
+| W3.2 load_test | `2db1a35` | stubbed failure → exit **1** (C); two consecutive external runs → both exit **0** (D); `changeme` → **401** afterwards (E); default run leaves `./data` md5+mtime unchanged |
+| W3.3 smoke_test | `2db1a35` | degraded → `[FAIL]`/`[SKIP]` lines, **no traceback**, exit 1 (N4); `--allow-degraded` → exit 0; real model → **21/21** exit 0 |
+| W5.3 script contract | `2db1a35` | 10 tests pinning all of the above, order-independent |
+| W4.1 published passwords | `e51271e` | B10 closed: change/reset/register/create to `changeme` → **400**, to `admin` → **422** (schema layer); flag unchanged, session alive |
+| W4.2 staff-issued flag | `e51271e` | B9 closed: created account flagged → `/api/items` **403** until its own change-password; conftest contract preserved |
+| N5 broadened scan | `e51271e` | legacy rows planted directly in the DB are flagged; marker-gated in the new `app_meta` table (cost: one PBKDF2 verification per account per policy, not per boot) |
+| W4.4 race tests | `e51271e` | faulthandler-proven hang fixed: no lifespan in worker threads, barrier/join timeouts, `abort()` on worker exit. 0.76 s, 10 consecutive runs clean |
+| W4.3 single-flight retry | `97fb932` | 20 concurrent callers past the cooldown → exactly **1** load attempt, none blocked; 10 consecutive runs, 0 flakes |
+| W4.5 index + FK decision | `97fb932` | `EXPLAIN QUERY PLAN` uses `ix_auth_tokens_expires_at`; migration adds it to existing DBs; D4 documented in `database.py` |
+| W5.4/W5.5 metadata tests | `e3fa14d` | version drift, `HCRM_DOCS=0` (404×3), CSP on API responses, hygiene (no `copy`/`data/` tracked, no db blob reachable from any ref) |
+| W6.0/W6.1 README | `e3fa14d` | banner removed, `BEGIN IMMEDIATE` claim replaced by triggers + an explicit "do not reintroduce" warning, CSP cost stated, docs CDN/kill-switch documented, Tracked issues table added |
+| W7.1 CI | `8ecf681` | every command in the workflow executed locally: sync, suite forward+reverse, hygiene one-liners, parser fixtures, `ui_check --self-host` → 0, `load_test --fast-hashing` → 0, `smoke_test --allow-degraded` → 0 |
+
+### Defects this round's own work introduced, caught by its own tests
+
+Recorded because they are the argument for the gates, not against them:
+
+1. **Order-dependent script tests.** The first version of W5.3 shared a mutable
+   credential across the module; a reverse-order run failed 6 tests. Fixed by
+   planting a known flagged admin per test (`_reset_flagged_admin`) and asserting
+   the precondition instead of inheriting state. The suite now passes in both
+   orders.
+2. **Two races in the W4.3 "single-flight" fix.** (a) The cooldown check sat
+   outside the scheduling lock, so a caller descheduled between check and
+   schedule re-armed an attempt the instant the previous one finished — 5
+   attempts from 20 callers. (b) `Thread.is_alive()` is **False** between
+   construction and `start()`, and the thread was started outside the lock, so a
+   caller in that window scheduled a second retry — 3-4 attempts, flakily. Both
+   were found by the concurrency test, not by reading the code; the guard is now
+   an explicit `_retry_scheduled` flag set and cleared under the same lock, with
+   `start()` inside it.
+
+### Still open
+
+- **W1.3 (owner + A)** — the GitHub purge. `git fetch origin 07d879e…` succeeded
+  on the public remote during the round-5c review and re-yielded the admin hash
+  and three plaintext tokens; a force-push does not GC unreachable objects. Needs
+  a GitHub Support "remove sensitive data" request, then the gate
+  (`git fetch origin 07d879e…` must fail). Exposure is low (tokens inert under
+  hash lookup, hash is of `changeme`) but the claim "gone from all history" is
+  not yet true.
+- **W6.2** — `resetMemberPassword()` still uses `prompt()`, so an admin-issued
+  temporary password is typed and displayed in plaintext. Tracked in the README.
+  (The `autocomplete` half of W6.2 landed with W4.0, and ui_check's benign
+  allowlist entry was deleted as promised.)
+- **W7.2** — remove `'unsafe-eval'` via precompiled render functions, and vendor
+  swagger-ui so `/docs` works offline and can carry a CSP. Deferred by design.
+- **D6** (`HCRM_EMBED_DISABLED=1`) — still deferred; CI uses
+  `HCRM_EMBED_MODEL=bogus/model` for hermetic boots, which works but is a trick
+  rather than an interface.
+- **Runner-side CI behaviour** (`setup-uv`, the puppeteer install, `actions/cache`
+  keys) is the one part of W7.1 that cannot be executed here; the first PR run is
+  its verification.
