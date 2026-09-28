@@ -60,7 +60,11 @@ class AuthToken(SQLModel, table=True):
 
     token: str = Field(primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
-    expires_at: datetime = Field(sa_type=DateTime)
+    # Indexed: _issue_token() purges expired rows on every login, so an
+    # unindexed expires_at made that a full table scan per login
+    # (PLAN-v2 §8.2 N8). Existing databases get the index in _migrate_schema(),
+    # because create_all() never alters a table it finds.
+    expires_at: datetime = Field(sa_type=DateTime, index=True)
 
 
 class AppMeta(SQLModel, table=True):

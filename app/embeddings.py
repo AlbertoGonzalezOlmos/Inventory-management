@@ -11,6 +11,7 @@ format used by the sqlite-vector extension.
 import logging
 import os
 import struct
+import threading
 import time
 
 logger = logging.getLogger("hcrm")
@@ -30,6 +31,23 @@ RETRY_SECONDS = float(os.environ.get("HCRM_EMBED_RETRY_SECONDS", "60"))
 _model = None
 _model_failed = False
 _model_failed_at: float | None = None
+
+# Guards the retry hand-off and the publication of _model. Without it the
+# cooldown retry is a thundering herd: `_model_failed` used to be cleared before
+# the attempt, so every request that arrived after the cooldown started its own
+# ~80 MB download/load in its own request thread (PLAN-v2 §8.2 N6).
+_lock = threading.Lock()
+_retry_thread: threading.Thread | None = None
+# Set under _lock when a retry is scheduled, cleared by the worker's finally.
+# A separate flag (rather than `_retry_thread.is_alive()`) is load-bearing:
+# is_alive() is False between Thread(...) and start(), so a caller landing in
+# that window would schedule a second attempt (measured: 3-4 attempts from 20
+# concurrent callers, flakily).
+_retry_scheduled = False
+
+# Floor for the retry interval: a misconfigured HCRM_EMBED_RETRY_SECONDS=0 must
+# not turn a failing model into a hot loop of download attempts.
+MIN_RETRY_SECONDS = 1.0
 
 
 class EmbeddingDimensionError(RuntimeError):
@@ -55,20 +73,19 @@ def _load_model():
     return model
 
 
-def _get_model():
+def _attempt_load() -> bool:
+    """One model load attempt. Returns True on success.
+
+    Raises only when STRICT is set (startup semantics); otherwise the failure is
+    recorded and logged. Safe to call from the retry thread.
+    """
     global _model, _model_failed, _model_failed_at
-    if _model is not None:
-        return _model
-    if _model_failed:
-        if _model_failed_at is None or time.monotonic() - _model_failed_at < RETRY_SECONDS:
-            return None
-        logger.info("Retrying embedding model load after %.0fs cooldown…", RETRY_SECONDS)
-        _model_failed = False
     try:
-        _model = _load_model()
+        loaded = _load_model()
     except Exception as exc:
-        _model_failed = True
-        _model_failed_at = time.monotonic()
+        with _lock:
+            _model_failed = True
+            _model_failed_at = time.monotonic()
         if STRICT:
             raise
         # Degrade gracefully (keyword search still works) — but a dimension
@@ -80,6 +97,98 @@ def _get_model():
             )
         else:
             logger.warning("Embedding model unavailable, vector search disabled: %s", exc)
+        return False
+    # Publish in one step: readers see either the old None or the whole model.
+    with _lock:
+        _model = loaded
+        _model_failed = False
+        _model_failed_at = None
+    logger.info("Embedding model loaded (retry succeeded).")
+    return True
+
+
+def _retry_worker() -> None:
+    global _retry_thread, _retry_scheduled
+    try:
+        _attempt_load()
+    except Exception:  # STRICT only aborts startup; a background retry must not die loudly
+        logger.warning("Background embedding retry failed; will retry after the cooldown.")
+    finally:
+        with _lock:
+            _retry_thread = None
+            _retry_scheduled = False
+
+
+def _retry_cooldown() -> float:
+    return max(MIN_RETRY_SECONDS, RETRY_SECONDS)
+
+
+def _cooldown_elapsed() -> bool:
+    """True when the last failure is old enough to justify another attempt.
+
+    Callers must hold _lock: deciding eligibility outside the lock and
+    scheduling inside it lets a caller that was descheduled between the two
+    re-schedule an attempt the moment the previous one finished, collapsing the
+    cooldown. Measured: 20 concurrent callers produced 5 sequential load
+    attempts instead of 1.
+    """
+    if not _model_failed:
+        return False
+    if _model_failed_at is None:
+        return True
+    return time.monotonic() - _model_failed_at >= _retry_cooldown()
+
+
+def _schedule_retry() -> bool:
+    """Single-flight: start at most one background retry thread per cooldown.
+
+    Returns True if this call started it. Every guard — model already loaded, a
+    retry already alive, cooldown not elapsed — is evaluated under the same lock
+    as the assignment; `if _retry_thread is None` on its own would be racy.
+    """
+    global _retry_thread, _retry_scheduled
+    with _lock:
+        if _model is not None:
+            return False
+        if _retry_scheduled:
+            return False
+        if not _cooldown_elapsed():
+            return False
+        thread = threading.Thread(target=_retry_worker, name="hcrm-embed-retry",
+                                  daemon=True)
+        _retry_thread = thread
+        _retry_scheduled = True
+        # Started under the lock: no window in which the flag is set but the
+        # thread is not yet alive.
+        thread.start()
+    return True
+
+
+def _get_model():
+    """The model, or None if it is unavailable.
+
+    Never blocks a request on a retry: after a failure the first caller past the
+    cooldown schedules a single daemon thread and everyone returns None
+    immediately (keyword search keeps working). The synchronous path remains for
+    the very first load, which is what startup's warm_up() validates.
+    """
+    global _model
+    if _model is not None:
+        return _model
+    with _lock:
+        failed = _model_failed
+        eligible = _cooldown_elapsed()
+    if failed:
+        # Never block this request on a download: hand the retry to the single
+        # background thread (which re-checks eligibility under the lock) and
+        # degrade to keyword search for now.
+        if eligible and _schedule_retry():
+            logger.info("Embedding model retry scheduled in the background "
+                        "(cooldown %.0fs elapsed).", _retry_cooldown())
+        return None
+    # First load: synchronous, so warm_up() can validate the dimension and
+    # STRICT can abort the boot.
+    if not _attempt_load():
         return None
     return _model
 
@@ -91,6 +200,12 @@ def model_status() -> str:
     if _model_failed:
         return "failed"
     return "not_loaded"
+
+
+def retry_in_flight() -> bool:
+    """Whether a background retry is scheduled/running (healthz, diagnostics)."""
+    with _lock:
+        return _retry_scheduled
 
 
 def warm_up() -> None:

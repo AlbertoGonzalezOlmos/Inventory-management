@@ -120,6 +120,8 @@ def _startup() -> None:
 def _migrate_schema() -> None:
     """SQLModel's create_all never ALTERs existing tables — add columns here."""
     with engine.begin() as conn:
+        tables = {row[0] for row in conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
         columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)")}
         if "must_change_password" not in columns:
             conn.exec_driver_sql(
@@ -127,6 +129,13 @@ def _migrate_schema() -> None:
                 "BOOLEAN NOT NULL DEFAULT 0"
             )
             logger.info("Added users.must_change_password column (migration).")
+        # Same reason as the column above: create_all() skips a table it finds,
+        # so an index added to the model never reaches an existing database.
+        if "auth_tokens" in tables:
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_auth_tokens_expires_at "
+                "ON auth_tokens (expires_at)"
+            )
 
 
 WEAK_SCAN_KEY = "well_known_password_scan"
