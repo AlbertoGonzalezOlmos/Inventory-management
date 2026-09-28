@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# HCRM local state: runtime database and embedding-model cache.
+# Scoped on purpose (no blanket *.db/*.sqlite3): a future intentional
+# fixture DB must not be silently untracked (PLAN-v2 W1.2, review R4).
+/data/
+/fastembed_cache/

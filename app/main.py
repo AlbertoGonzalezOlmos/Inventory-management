@@ -110,7 +110,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="HCRM - Shop Catalogue & Members",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 

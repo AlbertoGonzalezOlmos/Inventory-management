@@ -85,6 +85,14 @@ def _load_vector_extension(dbapi_connection, _connection_record):
 # 500s) under concurrent load. The last-admin invariant is enforced by the
 # triggers, not by transaction mode.
 
+# NOTE on the AuthToken→users foreign key (D4, PLAN-v2.md): SQLite does not
+# enforce FK constraints unless PRAGMA foreign_keys=ON (not set here), so
+# auth_tokens.user_id is declarative only. Every current token-delete path
+# (logout, change-password, admin reset, member deletion) performs explicit
+# cleanup; enforcing/cascading would require an auth_tokens table rebuild
+# (SQLite cannot ALTER an FK into an existing table). Deferred until a real
+# orphan path appears.
+
 
 def get_session():
     """FastAPI dependency yielding a database session."""
