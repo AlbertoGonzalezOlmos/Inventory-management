@@ -11,6 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
@@ -23,6 +24,7 @@ from app.security import (
     DEV_ADMIN,
     DEV_ADMIN_PASSWORD,
     DEV_ADMIN_USERNAME,
+    PBKDF2_ITERATIONS,
     hash_password,
     verify_password,
 )
@@ -190,9 +192,24 @@ _vector_status: bool | None = None
 
 
 # Docs-only paths: exempt from the CSP header (they load jsdelivr assets
-# and an inline bootstrap script; see DOCS_ENABLED above). Prefix matching
-# also covers /docs/oauth2-redirect and friends.
-_DOCS_PATH_PREFIXES = ("/docs", "/redoc")
+# and an inline bootstrap script; see DOCS_ENABLED above).
+_DOCS_PATHS = ("/docs", "/redoc")
+_OPENAPI_PATH = "/openapi.json"
+
+
+def _is_docs_path(path: str) -> bool:
+    """True for the interactive-docs routes, which are exempt from the CSP.
+
+    Bounded match on purpose: `/docs` and anything *under* it
+    (`/docs/oauth2-redirect`), but NOT `/docs.html`. A bare
+    `startswith("/docs")` exempted every static file whose name begins with
+    "docs" — measured: a `static/docs.html` was served with no
+    Content-Security-Policy header at all (PLAN-v2 §8.2 F3). The exemption is a
+    security boundary, so it gets a boundary.
+    """
+    if path == _OPENAPI_PATH:
+        return True
+    return any(path == p or path.startswith(p + "/") for p in _DOCS_PATHS)
 
 # Why 'unsafe-eval' is unavoidable: the frontend deliberately uses Vue's
 # FULL build (vendored vue.global.prod.js, no build step) with an in-DOM
@@ -215,23 +232,49 @@ CSP_POLICY = (
 )
 
 
+def apply_security_headers(response: Response, path: str) -> Response:
+    """Attach the hardening headers (single source of truth).
+
+    Used by the middleware below AND by the 500 handler: an exception raised
+    inside an endpoint propagates straight through `BaseHTTPMiddleware` (the
+    code after `call_next` never runs), so without that handler a 500 carries
+    none of these headers — measured, and the previous docstring claimed
+    otherwise (PLAN-v2 §9.5).
+    """
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    if not _is_docs_path(path):
+        response.headers["Content-Security-Policy"] = CSP_POLICY
+    return response
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    """Baseline browser hardening on every response.
+    """Baseline browser hardening on every response this middleware sees.
 
     CSP is skipped only for the docs routes (dev tooling; see DOCS_ENABLED)
     — everything the product actually serves, including the SPA and every
     API response, carries the full policy. 'unsafe-inline' in style-src is
     for Vue's :style bindings (the analysis bar chart), not for scripts.
+    Unhandled exceptions bypass this middleware; `unhandled_error` covers those.
     """
     response: Response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "same-origin"
-    path = request.url.path
-    if not (path.startswith(_DOCS_PATH_PREFIXES) or path == "/openapi.json"):
-        response.headers["Content-Security-Policy"] = CSP_POLICY
-    return response
+    return apply_security_headers(response, request.url.path)
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, exc: Exception):
+    """A 500 must be as hardened as a 200.
+
+    Starlette sends this response and then re-raises, so uvicorn still logs the
+    traceback. (Headers cannot be added once a response has started streaming;
+    that case is out of reach by construction.)
+    """
+    return apply_security_headers(
+        JSONResponse(status_code=500, content={"detail": "Internal server error"}),
+        request.url.path,
+    )
 
 
 @app.get("/api/healthz", tags=["meta"])
@@ -252,6 +295,9 @@ def healthz():
         # Loud, machine-readable exposure of the dev credential mode (W4.0):
         # a deployment can be checked for it without reading logs.
         "insecure_dev_admin": DEV_ADMIN,
+        # Not a secret, and load tests need it: a latency budget is meaningless
+        # without the hashing cost it was measured at (PLAN-v2 §8.2 N10).
+        "pbkdf2_iterations": PBKDF2_ITERATIONS,
     }
 
 # Frontend: hash-based routing means a plain static mount is enough.
