@@ -108,6 +108,13 @@ that adds SIMD-accelerated vector search:
   (an `AI ✓` column shows which items have embeddings)
 - Member account creation (member or staff role), account management
 
+### Barcode scanner (Opticon M-10)
+- Hardware integration for the Opticon M-10 2D presentation scanner:
+  stdlib-first serial driver (`app/scanner/`, pyserial optional) plus a
+  bridge script that looks scanned barcodes up in the catalogue and can
+  adjust stock (`scripts/scanner_bridge.py`).
+- Full setup, protocol and troubleshooting guide: **`docs/opticon-m10.md`**.
+
 ## Project layout
 
 ```
@@ -120,16 +127,20 @@ that adds SIMD-accelerated vector search:
 │   ├── deps.py           # get_current_user / require_staff / require_admin
 │   ├── embeddings.py     # fastembed wrapper + float32 BLOB serialization
 │   ├── seed.py           # 12 example items + embedding backfill
+│   ├── scanner/          # Opticon M-10 driver (protocol, transport, m10)
 │   └── routers/
 │       ├── auth.py       # /api/auth/*      register, login, logout, me
 │       ├── items.py      # /api/items/*     browse, vector-search, input
 │       └── members.py    # /api/members/*   account management
 ├── static/               # Vue 3 SPA (index.html, app.js, style.css)
 ├── data/                 # SQLite database (created at runtime)
+├── docs/
+│   └── opticon-m10.md    # barcode scanner connection & interaction guide
 ├── scripts/
 │   ├── run.sh            # one-command startup
 │   ├── smoke_test.py     # end-to-end API test (run with server up)
-│   └── load_test.py     # availability check: concurrent logins must not lock the DB
+│   ├── load_test.py      # availability check: concurrent logins must not lock the DB
+│   └── scanner_bridge.py # Opticon M-10 → catalogue lookup/stock bridge
 └── pyproject.toml        # uv-managed dependencies
 ```
 
