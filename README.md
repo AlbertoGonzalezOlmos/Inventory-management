@@ -154,6 +154,13 @@ that adds SIMD-accelerated vector search:
 - Connection, WSL2/`usbipd` passthrough, permissions and troubleshooting:
   **`docs/opticon-hardware.md`**.
 
+### Barcode scanner (Opticon M-10)
+- Hardware integration for the Opticon M-10 2D presentation scanner:
+  stdlib-first serial driver (`app/scanner/`, pyserial optional) plus a
+  bridge script that looks scanned barcodes up in the catalogue and can
+  adjust stock (`scripts/scanner_bridge.py`).
+- Full setup, protocol and troubleshooting guide: **`docs/opticon-m10.md`**.
+
 ## Project layout
 
 ```
@@ -166,6 +173,7 @@ that adds SIMD-accelerated vector search:
 │   ├── deps.py           # get_current_user / require_staff / require_admin
 │   ├── embeddings.py     # fastembed wrapper + float32 BLOB serialization
 │   ├── seed.py           # 12 example items + embedding backfill
+│   ├── scanner/          # Opticon M-10 driver (protocol, transport, m10)
 │   └── routers/
 │       ├── auth.py       # /api/auth/*      register, login, logout, me
 │       ├── items.py      # /api/items/*     browse, vector-search, input
@@ -173,7 +181,8 @@ that adds SIMD-accelerated vector search:
 ├── static/               # Vue 3 SPA (index.html, app.js, style.css, vendored libs)
 ├── data/                 # SQLite database (runtime only — git-ignored)
 ├── docs/
-│   └── opticon-hardware.md # which Opticon scanner is attached, and how to reach it
+│   ├── opticon-hardware.md # which Opticon scanner is attached, and how to reach it
+│   └── opticon-m10.md    # Opticon M-10: connection, command protocol, guide
 ├── scripts/
 │   ├── run.sh            # one-command startup (prints the DB it will open;
 │   │                     # HCRM_SCRATCH=1 for a throwaway one)
@@ -186,7 +195,8 @@ that adds SIMD-accelerated vector search:
 │   ├── ui_check.py       # browser gate: renders the SPA + /docs in headless
 │   │                     # Chrome and fails on console errors / missing DOM
 │   ├── smoke_test.py     # end-to-end API test (self-hosts by default)
-│   └── load_test.py      # availability check: concurrent logins must not lock the DB
+│   ├── load_test.py      # availability check: concurrent logins must not lock the DB
+│   └── scanner_bridge.py # Opticon M-10 → catalogue lookup / stock bridge
 ├── tests/                # pytest suite (per-test fresh DB, fake embeddings)
 └── pyproject.toml        # uv-managed dependencies
 ```
