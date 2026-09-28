@@ -45,6 +45,13 @@ embedded in `data/hcrm.db`. To expose the server on your network:
 
 On first run the app seeds:
 
+- **dev admin (testing/debugging, owner directive "until further notice"):**
+  username `admin`, password `admin`, full admin access, not flagged for a
+  password change. It exists while `HCRM_DEV_ADMIN` is on (**the default this
+  round**) and is announced at startup and by `/api/healthz`
+  (`insecure_dev_admin: true`). `scripts/run.sh` refuses to bind a non-loopback
+  address while it is on unless you set `HCRM_ALLOW_INSECURE_BIND=1`. Turn the
+  whole thing off with `HCRM_DEV_ADMIN=0`.
 - a default admin: `admin@shop.local` / `changeme` ← the account is
   **blocked from the API until you change it** (first login redirects to
   Account → Change password; only logout/me work before that)
@@ -63,6 +70,10 @@ On first run the app seeds:
 | `HCRM_HOST` / `HCRM_PORT` | `127.0.0.1` / `8000` | bind address used by `scripts/run.sh` |
 | `HCRM_EMBED_STRICT` | unset | when `1`, abort startup if the embedding model is unusable (default: degrade to keyword search) |
 | `HCRM_EMBED_RETRY_SECONDS` | `60` | after a model load failure, retry at most this often (a transient network blip must not disable semantic search until restart) |
+| `HCRM_DEV_ADMIN` | `1` (**this round**) | seed/ensure the well-known dev admin `admin`/`admin`. `0` restores the secure default (`admin@shop.local`/`changeme`, blocked until changed) |
+| `HCRM_ALLOW_INSECURE_BIND` | unset | let `scripts/run.sh` bind a non-loopback `HCRM_HOST` while `HCRM_DEV_ADMIN` is on (trusted networks only) |
+| `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` for production |
+| `FASTEMBED_CACHE_PATH` | `$TMPDIR/fastembed_cache` | where the embedding model is cached — note this is `/tmp` by default, so a tmp-cleaner wipes it and the next boot re-downloads ~80 MB |
 
 ## Vector search with sqlite-vector
 
@@ -179,6 +190,13 @@ Interactive docs: http://localhost:8000/docs
 
 ## Security notes
 
+- ⚠ **Dev admin mode is ON by default this round** (`HCRM_DEV_ADMIN=1`, owner
+  directive): username `admin` / password `admin` has full admin access and is
+  not flagged for a password change. It is intended for local testing and
+  debugging only — `scripts/run.sh` refuses a non-loopback bind while it is on,
+  `/api/healthz` reports `insecure_dev_admin`, and startup logs a SECURITY
+  warning. Set `HCRM_DEV_ADMIN=0` for any deployment, and see the tracked item
+  for making the well-known password un-settable via the API (W4.1).
 - All responses carry baseline hardening headers (`X-Content-Type-Options`,
   `X-Frame-Options`, `Referrer-Policy`, and a strict CSP: scripts are
   same-origin only — everything is vendored; inline style *attributes* are

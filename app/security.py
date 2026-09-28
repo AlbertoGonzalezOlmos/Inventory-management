@@ -12,6 +12,34 @@ from app.models import AuthToken, utcnow
 PBKDF2_ITERATIONS = int(os.environ.get("HCRM_PBKDF2_ITERATIONS", "600000"))
 TOKEN_TTL = timedelta(days=7)
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# --- Dev admin mode (owner directive, round 5: "until further notice") -------
+# A well-known credential for testing/debugging. This deliberately weakens the
+# default-password controls, so it is an explicit, loud and reversible MODE,
+# not a silent default:
+#   - announced at startup and reported by /api/healthz (insecure_dev_admin);
+#   - scripts/run.sh refuses a non-loopback bind while it is on
+#     (override: HCRM_ALLOW_INSECURE_BIND=1);
+#   - the test suite runs with HCRM_DEV_ADMIN=0 (tests/conftest.py), so every
+#     security test still exercises the secure default.
+# Turn it off with HCRM_DEV_ADMIN=0.
+DEV_ADMIN = _env_flag("HCRM_DEV_ADMIN", True)
+DEV_ADMIN_USERNAME = "admin"
+DEV_ADMIN_PASSWORD = "admin"
+
+# Contract for W4.1 (reject well-known passwords as *new* passwords):
+# "changeme" is always rejected; DEV_ADMIN_PASSWORD must be rejected whenever
+# DEV_ADMIN is off, and is only settable by the seeder while it is on. Note
+# the API schemas keep min_length=8, so no endpoint can set a 5-char password
+# anyway — the dev credential is seed-only by construction.
+
 # A syntactically valid hash that never matches. Login verifies against this
 # when the email is unknown, so response time does not reveal whether an
 # account exists (user-enumeration timing side-channel).

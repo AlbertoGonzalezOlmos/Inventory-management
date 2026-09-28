@@ -21,6 +21,11 @@ import tempfile
 # different temp dir than the one app.database already imported.
 os.environ.setdefault("HCRM_DATA_DIR", tempfile.mkdtemp(prefix="hcrm-test-"))
 os.environ.setdefault("HCRM_PBKDF2_ITERATIONS", "1000")  # cheap hashing for tests
+# The dev admin credential (W4.0, HCRM_DEV_ADMIN, default ON for the owner's
+# testing directive) is OFF for the suite: every security test must keep
+# exercising the secure default. tests/test_dev_admin.py covers the mode itself
+# in a subprocess, because the flag is read at import time.
+os.environ.setdefault("HCRM_DEV_ADMIN", "0")
 
 import pytest
 

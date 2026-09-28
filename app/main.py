@@ -19,7 +19,13 @@ from app.database import create_all, engine, vector_extension_available
 from app.embeddings import model_status, warm_up
 from app.routers import auth, items, members
 from app.seed import backfill_embeddings, seed_example_items
-from app.security import hash_password, verify_password
+from app.security import (
+    DEV_ADMIN,
+    DEV_ADMIN_PASSWORD,
+    DEV_ADMIN_USERNAME,
+    hash_password,
+    verify_password,
+)
 
 logger = logging.getLogger("hcrm")
 
@@ -50,6 +56,43 @@ def seed_default_admin(session: Session) -> None:
     )
 
 
+def _ensure_dev_admin(session: Session) -> None:
+    """Idempotently ensure the dev admin credential exists (owner directive).
+
+    Creates the account when it is missing; NEVER touches an existing account's
+    password or role, so re-running it cannot undo an operator's changes.
+    """
+    if not DEV_ADMIN:
+        return
+    existing = session.exec(
+        select(models.User).where(models.User.email == DEV_ADMIN_USERNAME)
+    ).first()
+    if existing is not None:
+        return
+    session.add(
+        models.User(
+            email=DEV_ADMIN_USERNAME,
+            name="Dev Administrator",
+            password_hash=hash_password(DEV_ADMIN_PASSWORD),
+            role="admin",
+            # The credential must work for testing/debugging — a flagged account
+            # is blocked from the API until it changes its password, which would
+            # defeat the directive.
+            must_change_password=False,
+            created_at=models.utcnow(),
+        )
+    )
+    session.commit()
+    logger.warning(
+        "SECURITY: dev admin mode is ON (HCRM_DEV_ADMIN) — username '%s' with "
+        "password '%s' has full admin access. Loopback-only; run.sh refuses a "
+        "network bind unless HCRM_ALLOW_INSECURE_BIND=1. Set HCRM_DEV_ADMIN=0 "
+        "for the secure default.",
+        DEV_ADMIN_USERNAME,
+        DEV_ADMIN_PASSWORD,
+    )
+
+
 def _startup() -> None:
     """Synchronous startup work (runs in a threadpool: embedding/backfill can
     take a while and must not block the event loop)."""
@@ -60,6 +103,7 @@ def _startup() -> None:
     _migrate_schema()
     with Session(engine) as session:
         seed_default_admin(session)
+        _ensure_dev_admin(session)
         seed_example_items(session)
         backfill_embeddings(session)
         _flag_default_password(session)
@@ -86,6 +130,12 @@ def _flag_default_password(session: Session) -> None:
 
     A boot-time warning does not close the changeme class of issue — the flag
     does: the account is blocked from the API until the password is changed.
+
+    Scope note: only DEFAULT_ADMIN_EMAIL is inspected, so the W4.0 dev admin
+    (username `admin`) is a different account and is never flagged — pinned by
+    tests/test_dev_admin.py. W4.1 broadens this to *every* account sitting on a
+    well-known password and MUST keep excluding DEV_ADMIN_USERNAME while
+    HCRM_DEV_ADMIN is on, or the dev credential becomes unusable.
     """
     admin = session.exec(
         select(models.User).where(models.User.email == DEFAULT_ADMIN_EMAIL)
@@ -195,7 +245,14 @@ def healthz():
     global _vector_status
     if _vector_status is None:
         _vector_status = vector_extension_available()
-    return {"ok": True, "vector": _vector_status, "embeddings": model_status()}
+    return {
+        "ok": True,
+        "vector": _vector_status,
+        "embeddings": model_status(),
+        # Loud, machine-readable exposure of the dev credential mode (W4.0):
+        # a deployment can be checked for it without reading logs.
+        "insecure_dev_admin": DEV_ADMIN,
+    }
 
 # Frontend: hash-based routing means a plain static mount is enough.
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

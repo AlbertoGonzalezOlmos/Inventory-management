@@ -38,11 +38,16 @@
       <h1>Log in</h1>
       <p class="muted">Members: browse and select items. Staff: manage the catalogue.</p>
       <form @submit.prevent="doLogin">
-        <label>Email
-          <input type="email" v-model="loginForm.email" required autofocus />
+        <label>Email or username
+          <!-- type="text" (not email): the dev admin credential is the bare
+               username "admin" (W4.0), which type="email" would refuse to
+               submit. autocomplete/inputmode keep password managers working. -->
+          <input type="text" inputmode="email" autocomplete="username"
+                 v-model="loginForm.email" required autofocus />
         </label>
         <label>Password
-          <input type="password" v-model="loginForm.password" required />
+          <input type="password" autocomplete="current-password"
+                 v-model="loginForm.password" required />
         </label>
         <p v-if="loginError" class="error">{{ loginError }}</p>
         <button class="btn block" :disabled="busy">Log in</button>
@@ -55,13 +60,14 @@
       <h1>Create your member account</h1>
       <form @submit.prevent="doRegister">
         <label>Full name
-          <input type="text" v-model="registerForm.name" required />
+          <input type="text" autocomplete="name" v-model="registerForm.name" required />
         </label>
         <label>Email
-          <input type="email" v-model="registerForm.email" required />
+          <input type="email" autocomplete="email" v-model="registerForm.email" required />
         </label>
         <label>Password (min. 8 characters)
-          <input type="password" v-model="registerForm.password" minlength="8" required />
+          <input type="password" autocomplete="new-password"
+                 v-model="registerForm.password" minlength="8" required />
         </label>
         <p v-if="registerError" class="error">{{ registerError }}</p>
         <button class="btn block" :disabled="busy">Sign up</button>
@@ -173,10 +179,12 @@
       <h2>Change password</h2>
       <form @submit.prevent="changePassword">
         <label>Current password
-          <input type="password" v-model="pwForm.current_password" required />
+          <input type="password" autocomplete="current-password"
+                 v-model="pwForm.current_password" required />
         </label>
         <label>New password (min. 8 characters)
-          <input type="password" v-model="pwForm.new_password" minlength="8" required />
+          <input type="password" autocomplete="new-password"
+                 v-model="pwForm.new_password" minlength="8" required />
         </label>
         <p v-if="pwError" class="error">{{ pwError }}</p>
         <p v-if="pwOk" class="ok">Password updated. Other sessions were signed out.</p>
@@ -370,7 +378,8 @@
             <input type="email" v-model="memberForm.email" required />
           </label>
           <label>Temporary password (min. 8 chars)
-            <input v-model="memberForm.password" minlength="8" required />
+            <input type="password" autocomplete="new-password"
+                   v-model="memberForm.password" minlength="8" required />
           </label>
           <label>Role
             <select v-model="memberForm.role">
