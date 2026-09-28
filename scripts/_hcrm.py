@@ -153,6 +153,7 @@ def self_host(model: str = NO_MODEL, pbkdf2_iterations: int | None = None,
     what makes a load test's latency numbers meaningful (finding N10: the old
     docstring claimed 600k iterations while nothing enforced it).
     """
+    model = model or NO_MODEL          # callers may pass None to mean "default"
     data_dir = tempfile.mkdtemp(prefix="hcrm-selfhost-")
     port = free_port()
     log_path = os.path.join(tempfile.gettempdir(), f"hcrm-selfhost-{port}.log")
