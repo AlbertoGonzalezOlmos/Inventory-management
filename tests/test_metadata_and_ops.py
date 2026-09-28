@@ -151,8 +151,15 @@ def _git(*args):
     return proc
 
 
+def _in_git_checkout() -> bool:
+    # `.git` is a FILE, not a directory, in a linked worktree (`git worktree
+    # add`) — exactly the setup a reviewer uses — so gating on isdir('.git')
+    # silently skipped these tripwires there. Ask git instead.
+    return _git("rev-parse", "--git-dir").returncode == 0
+
+
 def test_repo_hygiene():
-    if not os.path.isdir(os.path.join(REPO_ROOT, ".git")):
+    if not _in_git_checkout():
         pytest.skip("not a git checkout")
     tracked = _git("ls-files").stdout.splitlines()
     assert tracked, "git ls-files returned nothing"
@@ -172,7 +179,7 @@ def test_repo_hygiene():
 
 def test_no_database_artifacts_are_committed_in_history():
     """The rewritten history must stay clean; a re-added blob would be silent."""
-    if not os.path.isdir(os.path.join(REPO_ROOT, ".git")):
+    if not _in_git_checkout():
         pytest.skip("not a git checkout")
     objects = _git("rev-list", "--all", "--objects").stdout
     leaked = [l for l in objects.splitlines() if "hcrm.db" in l]

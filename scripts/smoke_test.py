@@ -8,6 +8,7 @@ Usage:
     # default: boot a throwaway server on a scratch data dir and test it
     uv run python scripts/smoke_test.py                        # no model: degraded
     uv run python scripts/smoke_test.py --model BAAI/bge-small-en-v1.5   # full
+    uv run python scripts/smoke_test.py --fast-hashing         # cheap PBKDF2 (flagged)
 
     # against an existing server (explicit opt-in AND explicit credentials)
     HCRM_ADMIN_USERNAME=... HCRM_ADMIN_PASSWORD=... \\
@@ -130,9 +131,11 @@ def run_checks(report: Reporter, base: str, token: str, degraded: bool,
         for query, expected in SEMANTIC_CASES:
             report.skip(f"'{query}' -> {expected}",
                         "embedding model not loaded; pass --model BAAI/bge-small-en-v1.5")
-        report.check("semantic coverage was exercised", allow_degraded,
+        report.check("the degraded semantic run was explicitly allowed "
+                     "(--allow-degraded)", allow_degraded,
+                     "" if allow_degraded else
                      "(the model is unavailable and --allow-degraded was NOT passed: "
-                     "losing semantic coverage must be a decision)")
+                     "losing semantic coverage must be a decision, not an accident)")
     else:
         for query, expected in SEMANTIC_CASES:
             status, payload, _ = get(
@@ -159,8 +162,9 @@ def run_checks(report: Reporter, base: str, token: str, degraded: bool,
                      "" if TEST_SKU not in skus else f"({TEST_SKU} IS present)")
         report.skip("create/update/re-embed + vector-search visibility",
                     "requires the embedding model")
-        report.check("item-write coverage was exercised", allow_degraded,
-                     "(--allow-degraded was NOT passed)")
+        report.check("the degraded item-write run was explicitly allowed "
+                     "(--allow-degraded)", allow_degraded,
+                     "" if allow_degraded else "(--allow-degraded was NOT passed)")
     else:
         status, payload, _ = req("/api/items", "POST", {
             "sku": TEST_SKU, "name": "Espresso Grinder",
@@ -235,6 +239,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=None,
                         help=f"self-hosted only: HCRM_EMBED_MODEL (default {NO_MODEL}, "
                              f"i.e. no model — offline boot, semantic checks skipped)")
+    parser.add_argument("--fast-hashing", action="store_true",
+                        help="self-hosted only: cheap PBKDF2 (1000 iterations) for a "
+                             "quick run — the report then says so, because the "
+                             "numbers are not comparable to production")
     parser.add_argument("--allow-degraded", action="store_true",
                         help="exit 0 even though the embedding model is unavailable "
                              "and the semantic checks were skipped")
@@ -249,8 +257,8 @@ def main(argv: list[str] | None = None) -> int:
             "self-hosts a throwaway server so it cannot touch a real deployment.", 3)
     if args.force and not args.base:
         die("--force is only meaningful together with --base.", 3)
-    if args.base and (args.model or args.keep):
-        die("--model/--keep apply to the self-hosted server only.", 3)
+    if args.base and (args.model or args.keep or args.fast_hashing):
+        die("--model/--keep/--fast-hashing apply to the self-hosted server only.", 3)
 
     report = Reporter("SMOKE TEST")
     summary: dict = {"target": args.base or "self-hosted", "forced": bool(args.force)}
@@ -258,8 +266,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.base and args.force:
         exit_code = _run(args.base, report, summary, args, external=True)
     else:
+        # pbkdf2_iterations=None keeps the app's real (expensive) default;
+        # 1000 is an explicit, reported trade-off (mirrors load_test.py).
         with self_host(model=args.model, keep=args.keep,
-                       pbkdf2_iterations=1000) as server:
+                       pbkdf2_iterations=1000 if args.fast_hashing else None) as server:
             summary["data_dir"] = server.data_dir
             summary["model"] = args.model or NO_MODEL
             exit_code = _run(server.base, report, summary, args, external=False)
@@ -284,6 +294,8 @@ def _run(base: str, report: Reporter, summary: dict, args, external: bool) -> in
     if degraded:
         print("  NOTE: the embedding model is not loaded — semantic checks will be "
               "SKIPPED and this run fails unless --allow-degraded is given.")
+    if args.fast_hashing:
+        print("  note: --fast-hashing — latency numbers are NOT production-comparable")
 
     creds = credentials_for_external() if external else credentials_for_self_hosted()
     token, final_password, changed = bootstrap_admin(base, creds)

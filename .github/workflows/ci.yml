@@ -39,9 +39,17 @@ jobs:
       - name: suite
         run: uv run pytest -q
       # Order-independence is a claimed property, so it is checked, not assumed.
+      # The reversal is done in Python, not `tac` (GNU-only): on a macOS dev
+      # machine `tac` does not exist and the step would silently run the suite
+      # FORWARD while reporting success — a gate that cannot run must fail.
       - name: suite in reverse node-id order
         run: |
-          uv run pytest -q $(uv run pytest --collect-only -q | grep '::' | tac | tr '\n' ' ')
+          TESTS="$(uv run pytest --collect-only -q | grep '::' | \
+            uv run python -c 'import sys; print("\n".join(reversed(sys.stdin.read().splitlines())))')"
+          # An empty collection must fail the step, never degrade to a full
+          # forward-order run (or worse, a vacuous pass).
+          test -n "$TESTS"
+          uv run pytest -q $TESTS
       - name: repo hygiene (no runtime DB, no *copy* artifacts)
         run: |
           git status --porcelain
@@ -81,8 +89,10 @@ jobs:
       # so they cannot touch a deployment and need no credentials here.
       - name: availability (concurrent logins must not lock the DB)
         run: uv run python scripts/load_test.py --fast-hashing --logins 30 --reads 10
+      # --fast-hashing is explicit and printed: the PR gate trades real PBKDF2
+      # cost for speed; the e2e job below runs the smoke test at full cost.
       - name: end-to-end, degraded (no model -> semantic checks skipped)
-        run: uv run python scripts/smoke_test.py --allow-degraded
+        run: uv run python scripts/smoke_test.py --allow-degraded --fast-hashing
       - name: the checkout is still clean afterwards
         run: |
           git status --porcelain

@@ -19,7 +19,7 @@ import threading
 from fastapi.testclient import TestClient
 
 from app.main import app
-from tests.conftest import auth, create_user
+from tests.conftest import USER_PASSWORD_AFTER_CHANGE, auth, create_user
 
 ROUNDS = 5
 BARRIER_TIMEOUT = 60   # a racer that never arrives must fail, not hang the suite
@@ -121,14 +121,16 @@ def test_concurrent_cross_demotion_never_leaves_zero_admins(client, admin_token)
         assert statuses[0] == 200, (round_no, sa, sb)
         assert statuses[1] in (400, 401, 403), (round_no, sa, sb)
         assert _admin_count(client, actor_token) == 1, (round_no, sa, sb)
-        # The survivor administers the next round.
+        # The survivor administers the next round. Both racers came from
+        # create_user, so both now have USER_PASSWORD_AFTER_CHANGE.
         survivor = next(
             u["email"]
             for u in client.get("/api/members", headers=auth(actor_token)).json()
             if u["role"] == "admin"
         )
         actor_token = client.post(
-            "/api/auth/login", json={"email": survivor, "password": "password123"}
+            "/api/auth/login",
+            json={"email": survivor, "password": USER_PASSWORD_AFTER_CHANGE},
         ).json()["token"]
 
 
@@ -160,12 +162,13 @@ def test_concurrent_cross_delete_never_leaves_zero_admins(client, admin_token):
         # Loser: 400 (trigger) or 401 (the actor's own account was deleted).
         assert statuses[1] in (400, 401, 403), (round_no, sa, sb)
         assert _admin_count(client, actor_token) == 1, (round_no, sa, sb)
-        # The survivor administers the next round.
+        # The survivor administers the next round (see the note above).
         survivor = next(
             u["email"]
             for u in client.get("/api/members", headers=auth(actor_token)).json()
             if u["role"] == "admin"
         )
         actor_token = client.post(
-            "/api/auth/login", json={"email": survivor, "password": "password123"}
+            "/api/auth/login",
+            json={"email": survivor, "password": USER_PASSWORD_AFTER_CHANGE},
         ).json()["token"]

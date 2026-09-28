@@ -20,7 +20,7 @@ from app.database import engine
 from app.main import WEAK_SCAN_KEY, _flag_well_known_passwords
 from app.models import AppMeta, User
 from app.security import hash_password
-from tests.conftest import auth, create_user, unique_email
+from tests.conftest import USER_PASSWORD_AFTER_CHANGE, auth, create_user, unique_email
 
 # Both are published by this repo, and both are rejected — but by DIFFERENT
 # layers, which is the point: `changeme` is 8 characters so it reaches the
@@ -71,6 +71,50 @@ def test_change_password_cannot_be_used_to_clear_the_flag_and_keep_default(clien
     assert client.get("/api/items", headers=auth(token)).status_code == 403
 
 
+def test_change_password_to_the_same_password_is_rejected_and_keeps_the_flag(
+        client, admin_token):
+    """The exact round-5d F1 probe: a staff-issued account on `temporary123`
+    calling change-password with `temporary123 -> temporary123` used to return
+    204 and clear must_change_password — B9 through the back door, leaving the
+    account on a password somebody else chose and knows, indefinitely."""
+    email = unique_email()
+    r = client.post("/api/members",
+                    json={"name": "Temp", "email": email,
+                          "password": "temporary123", "role": "member"},
+                    headers=auth(admin_token))
+    assert r.status_code == 201, r.text
+    assert r.json()["must_change_password"] is True
+
+    token = _login(client, email, "temporary123").json()["token"]
+    r = client.post("/api/auth/change-password",
+                    json={"current_password": "temporary123",
+                          "new_password": "temporary123"},
+                    headers=auth(token))
+    assert r.status_code == 400, r.text
+    assert "differ" in r.json()["detail"]
+    # The flag survives and the account is still blocked from the API.
+    me = client.get("/api/auth/me", headers=auth(token)).json()
+    assert me["must_change_password"] is True
+    assert client.get("/api/items", headers=auth(token)).status_code == 403
+
+
+def test_change_password_to_the_same_password_is_rejected_for_anyone(client):
+    """The no-op rejection is not specific to flagged accounts: a self-registered
+    user cannot "change" their password to itself either."""
+    email = unique_email()
+    client.post("/api/auth/register",
+                json={"name": "S", "email": email, "password": "password123"})
+    token = _login(client, email, "password123").json()["token"]
+    r = client.post("/api/auth/change-password",
+                    json={"current_password": "password123",
+                          "new_password": "password123"},
+                    headers=auth(token))
+    assert r.status_code == 400, r.text
+    # Nothing changed: the same password still works, the session survives.
+    assert _login(client, email, "password123").status_code == 200
+    assert client.get("/api/auth/me", headers=auth(token)).status_code == 200
+
+
 def test_admin_reset_to_a_well_known_password_is_rejected(client, admin_token):
     member, _ = create_user(client, admin_token)
     for weak, expected in WELL_KNOWN.items():
@@ -78,7 +122,7 @@ def test_admin_reset_to_a_well_known_password_is_rejected(client, admin_token):
                          headers=auth(admin_token))
         assert r.status_code == expected, (weak, r.status_code, r.text)
     # The member's own password is untouched and their session survives.
-    assert _login(client, member["email"], "password123").status_code == 200
+    assert _login(client, member["email"], USER_PASSWORD_AFTER_CHANGE).status_code == 200
 
 
 def test_register_and_create_reject_well_known_passwords(client, admin_token):

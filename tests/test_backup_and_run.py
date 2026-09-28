@@ -9,6 +9,7 @@ the copy; `HCRM_SCRATCH=1` must keep experiments off the live directory.
 """
 
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -140,16 +141,30 @@ def test_run_sh_announces_and_exports_the_resolved_data_dir():
     with tempfile.TemporaryDirectory(prefix="hcrm-runsh-live-") as td:
         log = os.path.join(td, "calls.log")
         shim_dir = _uv_shim(td, log)
-        env = {k: v for k, v in os.environ.items() if k != "HCRM_DATA_DIR"}
+        # Strip every variable that would change which database run.sh announces
+        # or exports — with DATABASE_URL exported the script prints it instead of
+        # the sqlite path and the test fails for a reason unrelated to run.sh.
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("HCRM_DATA_DIR", "DATABASE_URL", "HCRM_SCRATCH")}
         proc = subprocess.run(
             [BASH, "scripts/run.sh"],
             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
             env={**env, "PATH": shim_dir + os.pathsep + env["PATH"], "HCRM_PORT": "8199"},
         )
-        live = os.path.join(REPO_ROOT, "data")
-        assert f"database:  sqlite:///{live}/hcrm.db" in proc.stdout, proc.stdout
+        # Compare REAL paths, not strings: run.sh prints bash's $PWD (which
+        # keeps or resolves symlinks depending on how it was invoked) while
+        # REPO_ROOT comes from Python — under a symlinked checkout (macOS maps
+        # /tmp -> /private/tmp) the two spellings legitimately differ.
+        live = os.path.realpath(os.path.join(REPO_ROOT, "data"))
+        announced = re.search(r"^database:  sqlite:///(.+)/hcrm\.db$",
+                              proc.stdout, re.M)
+        assert announced, proc.stdout
+        assert os.path.realpath(announced.group(1)) == live, proc.stdout
         # The resolved dir is exported, so parent and child cannot disagree.
-        assert f"DATA_DIR={live} " in open(log, encoding="utf-8").read()
+        exported = re.search(r"^DATA_DIR=(\S+) ",
+                             open(log, encoding="utf-8").read(), re.M)
+        assert exported, open(log, encoding="utf-8").read()
+        assert os.path.realpath(exported.group(1)) == live
         # …and the operator is told whether that is live data or a fresh file.
         if os.path.exists(os.path.join(live, "hcrm.db")):
             assert "LIVE DATA" in proc.stdout, proc.stdout

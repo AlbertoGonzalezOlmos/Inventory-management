@@ -120,6 +120,8 @@ def test_usage_external_base_requires_force():
                              "--fast-hashing"]) == 3
     assert _main(smoke_test, ["--base", "http://127.0.0.1:1", "--force",
                               "--keep"]) == 3
+    assert _main(smoke_test, ["--base", "http://127.0.0.1:1", "--force",
+                              "--fast-hashing"]) == 3
 
 
 def test_external_target_needs_explicit_credentials(server, monkeypatch):
@@ -194,7 +196,7 @@ def test_smoke_reports_instead_of_raising(server, admin_env, capsys):
     assert "Traceback" not in out, out[-2000:]
     assert "[FAIL]" in out and "[SKIP]" in out, out[-2000:]
     assert code == 1, (code, out[-1500:])          # degraded coverage must fail
-    assert "semantic coverage was exercised" in out
+    assert "the degraded semantic run was explicitly allowed" in out
 
 
 def test_smoke_allow_degraded_passes(server, admin_env, capsys):
@@ -226,6 +228,25 @@ def test_scripts_never_write_the_repo_data_dir(server, admin_env):
     after = hashlib.md5(open(live, "rb").read()).hexdigest()
     assert after == before, "./data/hcrm.db was modified by a verification script"
     assert os.stat(live).st_mtime_ns == before_stat
+
+
+def test_self_host_cleans_up_its_log_file():
+    """F7: the scratch server's log lives in $TMPDIR, *outside* the scratch data
+    dir — if the teardown only removed the data dir, every run leaked a
+    hcrm-selfhost-<port>.log forever (measured: 10 files after a single review
+    session; on macOS they land in the invisible /var/folders/.../T)."""
+    with _hcrm.self_host(model=_hcrm.NO_MODEL, pbkdf2_iterations=1000) as srv:
+        assert os.path.isfile(srv.log_path), srv.log_path
+        assert _hcrm.healthz(srv.base) is not None      # really booted
+        log_path = srv.log_path
+    assert not os.path.exists(log_path), f"{log_path} leaked after teardown"
+
+    # --keep retains the log, so a failing investigation can keep its evidence.
+    with _hcrm.self_host(model=_hcrm.NO_MODEL, pbkdf2_iterations=1000,
+                         keep=True) as srv:
+        pass
+    assert os.path.isfile(srv.log_path)
+    os.remove(srv.log_path)   # the test must not leak what it tests against
 
 
 def test_smoke_cleanup_no_longer_deletes_arbitrary_skus():

@@ -191,6 +191,11 @@ def self_host(model: str = NO_MODEL, pbkdf2_iterations: int | None = None,
         log.close()
         if not keep:
             _rmtree(data_dir)
+            # The log lives in $TMPDIR, outside the scratch data dir: delete it
+            # too, or every run leaks a hcrm-selfhost-<port>.log forever. (On a
+            # failed boot the tail was already printed by die() above.)
+            with contextlib.suppress(OSError):
+                os.remove(log_path)
 
 
 def _terminate(proc: subprocess.Popen) -> None:

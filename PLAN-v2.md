@@ -301,8 +301,9 @@ Size: **S** ≤ ~50 LOC, **M** ≤ ~200 LOC, **L** > 200 LOC or cross-cutting.
   no-ops — the defect is coupling and fragility (16 lifespan runs per suite today:
   5×2 + 3×2), not a live coin flip.
 - Gate: suite green over 10 consecutive runs **and** in reverse order — no
-  randomization plugin is installed, so reverse means explicit node IDs:
-  `uv run pytest $(uv run pytest --collect-only -q | grep '::' | tac)`. Zero flakes.
+  randomization plugin is installed, so reverse means explicit node IDs (the
+  reversal is done in Python — `tac` is GNU-only and silently no-ops the gate on
+  macOS; see ci.yml). Zero flakes.
 - Evidence: the 10-run loop output.
 
 **W4.5 Small hardening batch** (N7, N8) size S · deps: none · optional this round

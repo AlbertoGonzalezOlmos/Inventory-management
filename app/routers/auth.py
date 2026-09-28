@@ -101,6 +101,15 @@ def change_password(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Current password is incorrect"
         )
+    # A no-op "change" must not count as a change: accepting new == current
+    # returned 204 AND cleared must_change_password, so a staff-issued
+    # temporary password could be kept indefinitely — B9 through the back door
+    # (the account stays on a password somebody else chose and knows).
+    if payload.new_password == payload.current_password:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "New password must differ from the current password",
+        )
     # Rejecting the published defaults here is what closes the loop: without it,
     # `change-password changeme -> changeme` returned 204 AND cleared
     # must_change_password, leaving a well-known credential with full API access
