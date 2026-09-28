@@ -6,6 +6,7 @@ Run with:  uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,10 +22,13 @@ from app.embeddings import model_status, warm_up
 from app.routers import auth, items, members
 from app.seed import backfill_embeddings, seed_example_items
 from app.security import (
+    DEFAULT_ADMIN_EMAIL,
+    DEFAULT_ADMIN_PASSWORD,
     DEV_ADMIN,
     DEV_ADMIN_PASSWORD,
     DEV_ADMIN_USERNAME,
     PBKDF2_ITERATIONS,
+    WELL_KNOWN_PASSWORDS,
     hash_password,
     verify_password,
 )
@@ -32,8 +36,6 @@ from app.security import (
 logger = logging.getLogger("hcrm")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-DEFAULT_ADMIN_EMAIL = "admin@shop.local"
-DEFAULT_ADMIN_PASSWORD = "changeme"
 
 
 def seed_default_admin(session: Session) -> None:
@@ -108,7 +110,7 @@ def _startup() -> None:
         _ensure_dev_admin(session)
         seed_example_items(session)
         backfill_embeddings(session)
-        _flag_default_password(session)
+        _flag_well_known_passwords(session)
     # Cache the extension probe so /api/healthz never touches the database:
     # under load that turned a busy DB into a false "vector: false".
     global _vector_status
@@ -127,32 +129,72 @@ def _migrate_schema() -> None:
             logger.info("Added users.must_change_password column (migration).")
 
 
-def _flag_default_password(session: Session) -> None:
-    """Force a password change on the admin while the default is still in use.
+WEAK_SCAN_KEY = "well_known_password_scan"
 
-    A boot-time warning does not close the changeme class of issue — the flag
+
+def _scan_marker() -> str:
+    """Identity of the current scan policy, stored in app_meta.
+
+    Includes dev-admin mode, because the mode decides whether the well-known
+    `admin` account is exempt: turning HCRM_DEV_ADMIN off must re-run the scan
+    so that account gets flagged like any other.
+    """
+    return ",".join(sorted(WELL_KNOWN_PASSWORDS)) + ("|dev-admin" if DEV_ADMIN else "")
+
+
+def _flag_well_known_passwords(session: Session) -> None:
+    """Flag every account that still uses a password published by this repo.
+
+    A boot-time warning does not close the `changeme` class of issue — the flag
     does: the account is blocked from the API until the password is changed.
 
-    Scope note: only DEFAULT_ADMIN_EMAIL is inspected, so the W4.0 dev admin
-    (username `admin`) is a different account and is never flagged — pinned by
-    tests/test_dev_admin.py. W4.1 broadens this to *every* account sitting on a
-    well-known password and MUST keep excluding DEV_ADMIN_USERNAME while
-    HCRM_DEV_ADMIN is on, or the dev credential becomes unusable.
+    Scope (PLAN-v2 §8.2 N5): this used to inspect only DEFAULT_ADMIN_EMAIL, so
+    any *other* account sitting on a well-known password (reachable: an admin
+    reset to `changeme` returned 200, and change-password to the same value
+    cleared the flag — §0 B10) was never flagged. It now scans every account,
+    with two exclusions:
+      - already-flagged accounts (nothing to gain, and it skips the PBKDF2 cost);
+      - the W4.0 dev admin while HCRM_DEV_ADMIN is on — well-known by owner
+        directive; flagging it would block the credential that exists to be used.
+
+    Cost: verifying a hash is a full PBKDF2 run per account per candidate
+    password, so the scan is bounded by a marker row in `app_meta` and runs once
+    per database per well-known-password set (i.e. again only if that set
+    changes). Accounts created afterwards cannot hold a well-known password:
+    every endpoint that sets one rejects them (W4.1).
     """
-    admin = session.exec(
-        select(models.User).where(models.User.email == DEFAULT_ADMIN_EMAIL)
-    ).first()
-    if admin is not None and verify_password(DEFAULT_ADMIN_PASSWORD, admin.password_hash):
-        if not admin.must_change_password:
-            admin.must_change_password = True
-            session.add(admin)
-            session.commit()
+    marker = _scan_marker()
+    meta = session.get(models.AppMeta, WEAK_SCAN_KEY)
+    if meta is not None and meta.value == marker:
+        return
+
+    started = time.monotonic()
+    flagged: list[str] = []
+    checked = 0
+    for user in session.exec(select(models.User)).all():
+        if user.must_change_password:
+            continue
+        if DEV_ADMIN and user.email == DEV_ADMIN_USERNAME:
+            continue
+        checked += 1
+        if any(verify_password(pw, user.password_hash) for pw in WELL_KNOWN_PASSWORDS):
+            user.must_change_password = True
+            session.add(user)
+            flagged.append(user.email)
+
+    session.add(models.AppMeta(key=WEAK_SCAN_KEY, value=marker,
+                               updated_at=models.utcnow()))
+    session.commit()
+    for email in flagged:
         logger.warning(
-            "SECURITY: %s still uses the default password — the account is "
-            "blocked from the API until the password is changed "
-            "(Account → Change password).",
-            DEFAULT_ADMIN_EMAIL,
+            "SECURITY: %s uses a password published by this project — the account "
+            "is blocked from the API until it is changed (Account → Change "
+            "password).", email,
         )
+    logger.info(
+        "Well-known-password scan: %d account(s) checked, %d flagged in %.2fs.",
+        checked, len(flagged), time.monotonic() - started,
+    )
 
 
 @asynccontextmanager

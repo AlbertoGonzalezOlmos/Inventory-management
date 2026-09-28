@@ -51,22 +51,58 @@ def _main(module, argv) -> int:
 
 @pytest.fixture(scope="module")
 def server():
-    """A flagged-admin server with no embedding model: exercises the bootstrap
-    password change AND the smoke test's degraded path."""
+    """One server for the module: dev admin OFF (so the seeded
+    admin@shop.local/changeme is flagged and the bootstrap path is exercised)
+    and no embedding model (so the smoke test's degraded path is exercised)."""
     with _hcrm.self_host(model=_hcrm.NO_MODEL, pbkdf2_iterations=1000,
                          extra_env={"HCRM_DEV_ADMIN": "0"}) as srv:
         yield srv
 
 
-@pytest.fixture(scope="module")
-def admin_password(server):
-    """The credential the scripts leave behind, shared across the module.
+@pytest.fixture()
+def flagged_admin(server):
+    """Reset the server's admin to a KNOWN flagged state before each test.
 
-    Deliberately mutable state: the whole point of the no-restore contract is
-    that run N+1 must work with what run N left (finding D).
+    Without this the module shares mutable credential state and the tests become
+    order-dependent — running the file in reverse put the "second consecutive
+    run" test before the first one and 6 tests failed. Each test now establishes
+    its own precondition instead of inheriting the previous test's password.
+
+    Writing straight to the scratch database is deliberate: W4.1 makes it
+    impossible to reset an account to `changeme` through the API (that was the
+    hole), so a test that needs a flagged-default admin has to plant one.
     """
-    state = {"password": "changeme"}
-    return state
+    _reset_flagged_admin(server)
+    return {"username": "admin@shop.local", "password": "changeme"}
+
+
+def _reset_flagged_admin(server) -> None:
+    """Plant a flagged admin@shop.local/changeme in the scratch database."""
+    import sqlite3
+
+    from app.security import hash_password
+
+    db = os.path.join(server.data_dir, "hcrm.db")
+    con = sqlite3.connect(db, timeout=15)
+    try:
+        con.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = 1 "
+            "WHERE email = 'admin@shop.local'", (hash_password("changeme"),))
+        con.execute("DELETE FROM auth_tokens")
+        con.commit()
+    finally:
+        con.close()
+    # Preconditions asserted, not assumed.
+    assert _hcrm.call(server.base, "/api/auth/login", "POST",
+                      body={"email": "admin@shop.local",
+                            "password": "changeme"})[0] == 200
+
+
+@pytest.fixture()
+def admin_env(flagged_admin, monkeypatch):
+    monkeypatch.setenv("HCRM_ADMIN_USERNAME", flagged_admin["username"])
+    monkeypatch.setenv("HCRM_ADMIN_PASSWORD", flagged_admin["password"])
+    return flagged_admin
 
 
 def _login(base, password):
@@ -102,55 +138,45 @@ def test_unreachable_target_is_not_a_pass(monkeypatch):
     assert _main(smoke_test, ["--base", "http://127.0.0.1:9", "--force"]) == 2
 
 
-def test_load_test_first_run_passes_and_never_restores(server, admin_password,
-                                                       monkeypatch, capsys):
-    """Findings D + E: run 1 must exit 0, leave the new password active, and
-    never write the well-known default back."""
-    monkeypatch.setenv("HCRM_ADMIN_USERNAME", "admin@shop.local")
-    monkeypatch.setenv("HCRM_ADMIN_PASSWORD", "changeme")
+def test_first_run_reports_final_state_and_second_run_reuses_it(server, admin_env,
+                                                                 monkeypatch, capsys):
+    """Findings D + E in one deterministic test.
+
+    Run 1 hits a flagged admin, changes the password to proceed, exits 0 and
+    reports the final state. E: `changeme` must be dead afterwards — the old
+    restore step re-armed it with must_change_password cleared. D: run 2, fed
+    run 1's password, must also exit 0 — the old unconditional restore made it
+    print "LOAD TEST PASSED" and exit 1.
+    """
     code = _main(load_test, ["--base", server.base, "--force",
                              "--logins", "12", "--reads", "6", "--json"])
     out = capsys.readouterr().out
     assert code == 0, out
     assert "LOAD TEST PASSED" in out
-
-    # The final state is reported loudly (P-2) and machine-readably.
     assert "FINAL STATE" in out and "NOT reverted" in out
+
     summary = json.loads(out[out.index('{\n  "target"'):])
     assert summary["password_changed"] is True
     new_password = summary["final_password"]
     assert new_password and new_password != "changeme"
-    admin_password["password"] = new_password
 
-    # E: the well-known default is dead; the reported password works.
-    assert _login(server.base, "changeme")[0] == 401
+    assert _login(server.base, "changeme")[0] == 401           # E
     assert _login(server.base, new_password)[0] == 200
 
-
-def test_load_test_second_consecutive_run_passes(server, admin_password,
-                                                 monkeypatch, capsys):
-    """Finding D was exactly this run: 'LOAD TEST PASSED' printed, exit 1,
-    because the restore step tried a password that was never set."""
-    monkeypatch.setenv("HCRM_ADMIN_USERNAME", "admin@shop.local")
-    monkeypatch.setenv("HCRM_ADMIN_PASSWORD", admin_password["password"])
-    code = _main(load_test, ["--base", server.base, "--force",
-                             "--logins", "12", "--reads", "6"])
-    out = capsys.readouterr().out
-    assert "LOAD TEST PASSED" in out, out
-    assert code == 0, (code, out)
-    # Still no restore: the password is whatever run 1 left, and changeme is dead.
+    monkeypatch.setenv("HCRM_ADMIN_PASSWORD", new_password)
+    code2 = _main(load_test, ["--base", server.base, "--force",
+                              "--logins", "12", "--reads", "6"])
+    out2 = capsys.readouterr().out
+    assert "LOAD TEST PASSED" in out2, out2
+    assert code2 == 0, (code2, out2)                            # D
+    # Still no restore anywhere: the default stays dead.
     assert _login(server.base, "changeme")[0] == 401
-    assert _login(server.base, admin_password["password"])[0] == 200
 
 
-def test_load_test_failure_feeds_the_exit_code(server, admin_password,
-                                               monkeypatch, capsys):
-    """Finding C: _run_load()'s return value used to be discarded, so a failing
+def test_load_test_failure_feeds_the_exit_code(server, admin_env, monkeypatch, capsys):
+    """Finding C: run_load()'s return value used to be discarded, so a failing
     load phase still exited 0."""
-    monkeypatch.setenv("HCRM_ADMIN_USERNAME", "admin@shop.local")
-    monkeypatch.setenv("HCRM_ADMIN_PASSWORD", admin_password["password"])
-    monkeypatch.setattr(load_test, "run_load",
-                        lambda *a, **k: False)
+    monkeypatch.setattr(load_test, "run_load", lambda *a, **k: False)
     code = _main(load_test, ["--base", server.base, "--force",
                              "--logins", "2", "--reads", "1"])
     out = capsys.readouterr().out
@@ -158,35 +184,28 @@ def test_load_test_failure_feeds_the_exit_code(server, admin_password,
     assert "FAILED" in out
 
 
-def test_smoke_reports_instead_of_raising(server, admin_password,
-                                          monkeypatch, capsys):
+def test_smoke_reports_instead_of_raising(server, admin_env, capsys):
     """Finding N4: with the model unavailable the old script died with
     `TypeError: string indices must be integers`, printed no [FAIL] line, and
     left the admin password changed with no restore."""
-    monkeypatch.setenv("HCRM_ADMIN_USERNAME", "admin@shop.local")
-    monkeypatch.setenv("HCRM_ADMIN_PASSWORD", admin_password["password"])
     code = _main(smoke_test, ["--base", server.base, "--force"])
     captured = capsys.readouterr()
     out = captured.out + captured.err
     assert "Traceback" not in out, out[-2000:]
     assert "[FAIL]" in out and "[SKIP]" in out, out[-2000:]
-    # Degraded coverage must fail the build unless explicitly allowed.
-    assert code == 1, (code, out[-1500:])
+    assert code == 1, (code, out[-1500:])          # degraded coverage must fail
     assert "semantic coverage was exercised" in out
 
 
-def test_smoke_allow_degraded_passes(server, admin_password, monkeypatch, capsys):
-    monkeypatch.setenv("HCRM_ADMIN_USERNAME", "admin@shop.local")
-    monkeypatch.setenv("HCRM_ADMIN_PASSWORD", admin_password["password"])
+def test_smoke_allow_degraded_passes(server, admin_env, capsys):
     code = _main(smoke_test, ["--base", server.base, "--force", "--allow-degraded"])
     out = capsys.readouterr().out
     assert code == 0, out[-1500:]
     assert "SMOKE TEST PASSED" in out
-    # The 503-on-write policy during an outage is asserted by the script itself.
-    assert "rejected with 503" in out
+    assert "rejected with 503" in out               # outage write policy asserted
 
 
-def test_scripts_never_write_the_repo_data_dir(server, admin_password, monkeypatch):
+def test_scripts_never_write_the_repo_data_dir(server, admin_env):
     """Ground rule 3, mechanically: running both scripts must not touch ./data."""
     live = os.path.join(REPO_ROOT, "data", "hcrm.db")
     if not os.path.exists(live):
@@ -194,10 +213,13 @@ def test_scripts_never_write_the_repo_data_dir(server, admin_password, monkeypat
     before = hashlib.md5(open(live, "rb").read()).hexdigest()
     before_stat = os.stat(live).st_mtime_ns
 
-    monkeypatch.setenv("HCRM_ADMIN_USERNAME", "admin@shop.local")
-    monkeypatch.setenv("HCRM_ADMIN_PASSWORD", admin_password["password"])
+    # Each script bootstraps from a freshly planted flagged admin: the load run
+    # changes the password (and never restores it), so the smoke run needs its
+    # own precondition rather than inheriting the previous run's state.
+    _reset_flagged_admin(server)
     assert _main(load_test, ["--base", server.base, "--force",
                              "--logins", "4", "--reads", "2"]) == 0
+    _reset_flagged_admin(server)
     assert _main(smoke_test, ["--base", server.base, "--force",
                               "--allow-degraded"]) == 0
 

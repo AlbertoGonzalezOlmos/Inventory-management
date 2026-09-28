@@ -15,11 +15,16 @@ from app.database import get_session
 from app.deps import require_admin, require_staff
 from app.models import AuthToken, User
 from app.schemas import MemberIn, MemberPatch, UserOut
-from app.security import hash_password
+from app.security import hash_password, is_well_known_password
 
 router = APIRouter(prefix="/api/members", tags=["members"])
 
 VALID_ROLES = ("member", "staff", "admin")
+
+WELL_KNOWN_DETAIL = (
+    "That password is published in this project's documentation/seed code; "
+    "choose another one"
+)
 
 
 def _admin_count(session: Session) -> int:
@@ -44,6 +49,8 @@ def create_member(
     """Staff creates accounts for shop members (optionally other staff)."""
     if payload.role not in VALID_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid role")
+    if is_well_known_password(payload.password):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
     if payload.role == "admin" and staff.role != "admin":
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Only admins can create admin accounts"
@@ -58,6 +65,12 @@ def create_member(
         name=payload.name.strip(),
         password_hash=hash_password(payload.password),
         role=payload.role,
+        # A staff- or admin-issued password is a *temporary* password — the UI
+        # has always labelled the field that way, but the flag was never set, so
+        # the account worked indefinitely on a password somebody else chose and
+        # knows (PLAN-v2 §0 B9 / finding G). Blocked from the API until the
+        # holder changes it, exactly like an admin-issued reset.
+        must_change_password=True,
     )
     session.add(user)
     try:
@@ -112,6 +125,10 @@ def update_member(
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, "Only admins can reset passwords"
             )
+        if is_well_known_password(password):
+            # An admin reset used to accept `changeme` (200), re-arming the
+            # well-known default on any account (PLAN-v2 §0 B10).
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
         if user.id == staff.id:
             # Reject self-service reset here: this path does not verify the
             # current password, so allowing it (an earlier revision spared the

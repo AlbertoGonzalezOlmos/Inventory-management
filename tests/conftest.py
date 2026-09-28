@@ -154,7 +154,14 @@ def unique_email() -> str:
 
 
 def create_user(client, admin_token: str, role: str = "member", email: str | None = None):
-    """Create a user via the API and return (user_dict, token)."""
+    """Create a user via the API and return (user_dict, token).
+
+    Staff-issued accounts are flagged must_change_password (W4.2), so the helper
+    immediately performs that change — reusing the same password, which keeps the
+    "created users log in with password123" contract the concurrency tests'
+    survivor re-login depends on. change-password spares the presenting session,
+    so the returned token stays valid.
+    """
     email = email or unique_email()
     r = client.post(
         "/api/members",
@@ -162,6 +169,14 @@ def create_user(client, admin_token: str, role: str = "member", email: str | Non
         headers=auth(admin_token),
     )
     assert r.status_code == 201, r.text
+    assert r.json()["must_change_password"] is True, r.json()  # W4.2
     login = client.post("/api/auth/login", json={"email": email, "password": "password123"})
     assert login.status_code == 200, login.text
-    return r.json(), login.json()["token"]
+    token = login.json()["token"]
+    cleared = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "password123", "new_password": "password123"},
+        headers=auth(token),
+    )
+    assert cleared.status_code == 204, cleared.text
+    return r.json(), token

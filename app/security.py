@@ -34,11 +34,26 @@ DEV_ADMIN = _env_flag("HCRM_DEV_ADMIN", True)
 DEV_ADMIN_USERNAME = "admin"
 DEV_ADMIN_PASSWORD = "admin"
 
-# Contract for W4.1 (reject well-known passwords as *new* passwords):
-# "changeme" is always rejected; DEV_ADMIN_PASSWORD must be rejected whenever
-# DEV_ADMIN is off, and is only settable by the seeder while it is on. Note
-# the API schemas keep min_length=8, so no endpoint can set a 5-char password
-# anyway — the dev credential is seed-only by construction.
+# The seeded administrator credential. It lives here rather than in the
+# entrypoint because the routers (which must reject it as a *new* password) and
+# the boot-time flagger both need it (PLAN.md item 5 / PLAN-v2 W4.1).
+DEFAULT_ADMIN_EMAIL = "admin@shop.local"
+DEFAULT_ADMIN_PASSWORD = "changeme"
+
+# Passwords published by this repository (README + seed code). They are never
+# acceptable as a *chosen* password — setting one used to be the easy way back
+# to a well-known credential: an admin reset to `changeme` returned 200, and
+# `change-password changeme -> changeme` returned 204 *and cleared*
+# must_change_password, leaving a default-password account with full API access
+# (PLAN-v2 §0 B10). The dev credential is seed-only by construction: it is
+# written by _ensure_dev_admin(), never through an endpoint (every write path
+# enforces min_length=8, and `admin` is 5).
+WELL_KNOWN_PASSWORDS = frozenset({DEFAULT_ADMIN_PASSWORD, DEV_ADMIN_PASSWORD})
+
+
+def is_well_known_password(password: str) -> bool:
+    """True for a password published by this repo (reject it with a 400)."""
+    return password in WELL_KNOWN_PASSWORDS
 
 # A syntactically valid hash that never matches. Login verifies against this
 # when the email is unknown, so response time does not reveal whether an
