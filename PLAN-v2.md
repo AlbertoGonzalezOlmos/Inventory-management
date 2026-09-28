@@ -983,3 +983,34 @@ Recorded because they are the argument for the gates, not against them:
 - **Runner-side CI behaviour** (`setup-uv`, the puppeteer install, `actions/cache`
   keys) is the one part of W7.1 that cannot be executed here; the first PR run is
   its verification.
+
+## 11. Round 5e — external review of round 5d, and its remediation
+
+Two passes over the nine round-5d commits: a review that found seven issues
+(F1–F7), and a re-review of the fixes that found them sound but **uncommitted**,
+plus four residual nits (R1–R5). All eleven are now closed on this branch.
+
+| # | Finding | Severity | Fix | Evidence (executed) |
+|---|---|---|---|---|
+| F1 | `change-password` accepted `new == current`: a staff-issued temp password could be kept indefinitely by a no-op "change" (204 + flag cleared) — B9 through the back door; `conftest.create_user` relied on it | medium | reject the no-op with 400; conftest changes to a genuinely different password | live probe: `temporary123 -> temporary123` → **400**, flag stays True, `/api/items` stays **403**; genuine change → 204 → 200; 2 regression tests |
+| F2 | CI reverse-order step used `tac` (GNU-only) — on macOS it silently ran the suite **forward** while reporting success, and the "executed locally" claim in W7.1's message could not have been true for that step | medium | Python reversal + `test -n "$TESTS"` empty-collection guard | exact CI command run locally: 104 passed reverse (and forward); `tac` gone from everything but comments |
+| F3 | `test_run_sh_announces…` failed under symlinked checkouts (macOS `/tmp` → `/private/tmp`): bash `$PWD` vs Python `abspath` | low-med | compare `os.path.realpath` on both extracted paths | full suite in a `/tmp` copy: **104 passed** (was 1 failed) |
+| F4 | repo-hygiene tripwires **skipped** in git worktrees (`.git` is a file there) — the reviewer's own setup | low | gate on `git rev-parse --git-dir` | real worktree: 8/8 run and pass, zero skips |
+| F5 | smoke_test hard-coded 1000 PBKDF2 iterations for its self-host, no flag, no caveat — contradicting `_hcrm.self_host`'s docstring; CI e2e "full" run was silently cheap | low | `--fast-hashing` flag mirroring load_test; default is the real cost | default run: healthz `pbkdf2_iterations=600000`, exit 0; flag prints the caveat; usage-rejection test |
+| F6 | degraded-mode labels inverted ("semantic coverage was exercised" + a parenthetical about `--allow-degraded` NOT passed, printed on the OK branch) | nit | renamed to "the degraded … run was explicitly allowed"; explanation only on failure | both branches' output inspected |
+| F7 | `self_host` leaked `hcrm-selfhost-<port>.log` into `$TMPDIR` forever (10 files after one session; on macOS that is `/var/folders/.../T`) | nit | teardown deletes it unless `--keep` | `$TMPDIR` clean after repeated runs; pinned by a test (absent after exit, retained with `--keep`) |
+| R1 | the whole fix round sat **uncommitted** in the working tree — the PR's own CI gates never saw it, ground rule 4 violated | process | committed (this series) with executed evidence in the messages | the commits exist |
+| R2 | the F3 test still inherited `DATABASE_URL`/`HCRM_SCRATCH` from the ambient env | nit | stripped from the test env | inspected; NB exporting `DATABASE_URL` breaks the *suite itself* at import (`app/database.py` reads it at import time) — pre-existing, out of scope, noted here so it is not rediscovered |
+| R3 | `getattr(args, "fast_hashing", False)` hid contract breaks silently | nit | direct attribute access | — |
+| R4 | the F7 log-cleanup had no test (the round's own standard: fixed-by-hand gets a tripwire) | nit | `test_self_host_cleans_up_its_log_file` | passes; ~2 boots |
+| R5 | smoke_test's docstring didn't mention `--fast-hashing` | nit | usage line added | — |
+
+Final state on this branch: **104 passed + 1 skipped** (`./data` absent), forward
+**and** reverse, in the normal tree, in a symlinked `/tmp` copy, and in a git
+worktree. `smoke_test --allow-degraded` exit 0 at full cost and with
+`--fast-hashing`; `load_test --fast-hashing --logins 30 --reads 10` exit 0;
+zero leaked selfhost logs.
+
+Not re-litigated: the round-5d commit-message test-count claims ("102 passed")
+were environment-dependent (they hold only outside symlinked paths); the counts
+above are the reproducible ones.
