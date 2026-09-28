@@ -525,3 +525,391 @@ in §0 and only need re-running against the merged code.
 - Any change to the transaction-mode policy in `app/database.py` — the comment there
   documents a real incident; the last-admin invariant is the triggers' job.
 - "Fixing" NULL-embedding vector scans: verified safe (B12).
+
+---
+
+## 8. Round 5b — review of the W1/W2 merge (`5ac509c`…`8c2d9cb`) and the remaining board
+
+Reviewer: B. Every statement below was executed against `8c2d9cb`; artifacts are
+reproducible with the commands given. Scratch servers only (ports 8150-8152,
+`HCRM_DATA_DIR=$(mktemp -d)`), all stopped afterwards; `data/hcrm.db` not written.
+
+### 8.1 Re-verified green (A's report holds)
+
+| Check | Result |
+|---|---|
+| `uv run pytest -q`, forward and reverse node-id order | **40 passed, 2.01 s / 2.07 s** |
+| `ui_check.py` vs the pre-fix tree (`git archive 3e18c6a`, broken CSP) | **exit 1** — 5 console errors incl. the `Uncaught EvalError` and the three docs violations with hash `sha256-QOOQu4W1oxG…`, plus all DOM canaries |
+| `HCRM_DOCS=0` boot | `/docs`, `/redoc`, `/openapi.json` → **404**, `/` → 200, `/api/healthz` → 200 |
+| `openapi_url=None` correction adopted | `app/main.py:126-131`, with the reason commented |
+| History rewrite, **local** refs | `git rev-list --all --objects \| grep -cE 'hcrm\.db\|(^|/)data/'` → **0**; `git fsck --unreachable` empty; no `refs/original` |
+| Hygiene | no `*copy*` tracked, `data/` ignored (`.gitignore:223`), `pyproject`/`app` both **0.3.0** |
+| Mechanism of regression A (new detail) | Vue's full build **empties `#app`** (it takes `innerHTML` as the template) and *then* the compile throws → the 557 B DOM is `<div id="app" v-cloak=""></div>`. The canary is sound and the blank page is unavoidable, not a CSS artefact |
+
+### 8.2 New findings (F1-F6)
+
+**F1 🔴 `ui_check.py`'s console detector is browser-format-locked and fails *open*.**
+`_CONSOLE_RE` requires `:CONSOLE(<n>)] "…", source: …` (Chrome-for-Testing 131 shape).
+Chrome **150** (`/usr/bin/google-chrome`, and what CI images ship) logs
+`:CONSOLE:<n>] "…"` — sometimes with no `, source:` suffix — so the regex matches
+nothing. Proof (same script, same server, a page with a live CSP violation injected
+into a `/tmp` copy):
+
+```
+Chrome 131 (ui_check's own pick) -> exit 1: "[app-root] console error: 'Refused to load
+    the script https://cdn.jsdelivr.net/… violates … script-src 'self' 'unsafe-eval''"
+Chrome 150 (PATH fallback)       -> exit 0: "UI CHECK PASSED", 0 console message(s)
+```
+
+and `_console_messages()` returns **0** for all three of B2/B3/B4's recorded stderr
+logs. On Chrome 150 the gate survives regression A *only* via the DOM/size canaries;
+anything that produces a console error without blanking the DOM (broken fetch,
+mixed content, a script error inside the admin/table views) passes silently. This is
+the exact failure mode rule 1 exists to prevent — a detector that reports zero.
+
+**F2 🟠 `find_browser()` contradicts its docstring and is mtime-dependent.** It
+collects `chrome-headless-shell` *and* full `chrome` into one list and sorts by
+`st_mtime`, so "headless-shell first (CI-friendly)" is not what happens: on this
+machine it picks `…/chrome-linux64/chrome` (131). Which binary runs — and therefore
+which log format appears (F1) — depends on filesystem timestamps.
+
+**F3 🟠 The docs CSP exemption over-matches.** `_DOCS_PATH_PREFIXES = ("/docs",
+"/redoc")` with bare `startswith` exempts *any* path under those prefixes, including
+static files. Demonstrated against a running server:
+
+```
+/docs.html    -> 200, NO content-security-policy      (static file I dropped in)
+/redocx.html  -> 200, NO content-security-policy
+/index.html   -> 200, full policy
+```
+
+Latent today (no such file exists), but it is a security boundary, and W7.2's vendored
+swagger assets are exactly the kind of thing that would land under `/docs*`.
+
+**F4 🔴 D1 is not finished: the public remote still serves the "erased" history.**
+`git fetch origin 07d879eb6773565c7aa3c3d13db658ac63197b82` **succeeds** against
+`github.com:AlbertoGonzalezOlmos/Inventory-management`, and from the fetched tree
+`blob beeab6ac…` (77 824 B) still yields `admin@shop.local`'s
+`pbkdf2_sha256$600000$2a400…` hash and all three plaintext 43-char tokens. Rewriting
+local refs does not remove unreachable objects from GitHub; that needs a Support purge.
+(The reviewer re-fetched these objects to prove the point and then removed them again:
+`rm .git/FETCH_HEAD && git reflog expire --expire=now --all && git gc --prune=now` →
+0 data objects, old SHA unreadable. No refs were moved.)
+
+**F5 🟠 Ground rule 3 was broken and the live operator DB was mutated.**
+`data/hcrm.db` now reads (via the WAL) as: column `must_change_password` present,
+admin flagged, and **`users.name` changed `'Shop Administrator'` → `'admin'`** — a
+user-data edit, not a migration. It was `Shop Administrator` when B measured the file
+read-only at 12:15, so the change happened during this round, through the API, against
+`./data`. Two aggravating details:
+- The writes exist **only in `data/hcrm.db-wal` (8 272 B, 13:48)**. The main file
+  (`77 824 B`, mtime 09:45) is *still pre-migration*: copying `hcrm.db` alone — which
+  is what `/tmp/hcrm-data-backup-vFJS/data/` effectively is — loses every one of those
+  writes. "The operator's first boot is behind them" is true only while the WAL survives.
+- With `data/` now gitignored there is no diff and no audit trail for any of it.
+
+Attribution correction: this was **not** B's verification pass. All of B's servers used
+scratch `HCRM_DATA_DIR`s on ports 8137-8141 (`/tmp/hcrm-ui-a79a`, `/tmp/hcrm-csp-1pQu`,
+`/tmp/hcrm-livecopy`, `/tmp/hcrm-smoke-DwEW`), each confirmed down at the end; B's only
+touch of `./data` was a **read-only** `sqlite3` open (which cannot `ALTER TABLE` or
+rename a row) and a `git checkout --` restoring the then-tracked `-shm`/`-wal`. B11's
+upgrade path was exercised on a **copy** in `/tmp/hcrm-livecopy`.
+
+**F6 🟡 Test gaps left by W1/W2.** No test for `HCRM_DOCS=0` (the kill-switch can rot
+silently — it is import-time env), none asserting the CSP on **API** responses (the
+middleware docstring claims "every API response"), none for the version consistency
+that W1.1 just fixed by hand (W5.4), and none pinning the ui_check parser (F1).
+
+### 8.3 Round-5b work items
+
+**W2.3 Make the console detector portable and self-testing (F1, F2, F6).** size M · owner **A** · **blocks CI-2**
+- Split stderr on console *records* instead of regexing one shape:
+  `\[\d+:\d+:[^\]]*:(?:INFO|ERROR|WARNING):CONSOLE(?::|\()(\d+)\)?\]` — take everything
+  up to the next record, strip the surrounding quotes and an *optional* trailing
+  `, source: …`. Handles both observed formats, embedded quotes and embedded newlines.
+- **Liveness guard (the important half):** count records in stderr; if `records > 0`
+  and `parsed == 0` → **fail** with "console parser recognised 0 of N records — Chrome
+  log format changed". A blind detector must be a red build, never a green one.
+- `--browser` / `HCRM_BROWSER` override; make the puppeteer probe return
+  `chrome-headless-shell` first as documented (no mixed-list mtime sort); print the
+  chosen binary + version (already done).
+- `tests/test_ui_check_parser.py`: recorded fixtures, no browser needed — 131 form,
+  150 form, the multi-line unescaped-quote `EvalError`, the jsdelivr trio + inline hash,
+  the benign `[DOM]` advisory, a message with no `source:` suffix, and the liveness guard.
+- Isolate the profile: `--user-data-dir=$(mktemp -d)` (+ `--no-first-run
+  --no-default-browser-check`), removed in `finally`; today it drives the developer's
+  real Chrome profile and cannot run in parallel.
+- Reachability pre-check on `/api/healthz` → **exit 2** "server not reachable" instead
+  of three confusing page failures; optional `--self-host` reusing W3.1's helper so CI-2
+  is one command.
+- Gate: (i) the F1 reproduction — injected external script — exits **1** under
+  `HOME=<empty>` (PATH Chrome 150) *and* under the puppeteer pick; (ii) parser fixtures
+  green; (iii) pre-fix tree still exits 1 under both browsers *with console errors
+  listed* under both.
+
+**W2.4 Bound the docs exemption (F3).** size S · owner **A** (rides with W2.3)
+- `path == p or path.startswith(p + "/")` for `/docs` and `/redoc`; keep `/openapi.json`
+  exact. Test with a temporary `static/docs.html` fixture: it must carry the CSP;
+  `/docs`, `/docs/oauth2-redirect`, `/redoc`, `/openapi.json` must not.
+
+**W1.3 Finish D1 on the remote (F4).** size S · owner **owner + A**
+- Open a GitHub Support "remove sensitive data" request for the repo (they GC the
+  unreachable objects); re-test with `git fetch origin 07d879e…` → must fail.
+- Until then treat the material as exposed: the tokens are inert under hash lookup and
+  the hash is of `changeme`, so no rotation is *forced* — but change the live admin
+  password anyway (W4.1 makes `changeme` un-settable) and record the decision + date in
+  the README security notes. Everyone re-clones (already instructed).
+
+**W1.4 Live-data guard and backup discipline (F5).** size S · owner **B** · needs decision **D7**
+- `scripts/backup_db.sh`: `PRAGMA wal_checkpoint(TRUNCATE)` **then** copy `hcrm.db*`;
+  refuse to copy `hcrm.db` alone. Run it before any experiment that touches `./data`.
+- `scripts/run.sh`: print the resolved DB path loudly when `HCRM_DATA_DIR` is unset, and
+  support `HCRM_SCRATCH=1` to boot on a temp dir (removes the `:8000` + `./data`
+  footgun that produced F5).
+- W6.1's upgrade note gains the WAL caveat: a migrated DB whose changes live only in the
+  WAL is *not* migrated on disk; backups and copies must checkpoint first.
+- **D7 (owner):** is `users.name = 'admin'` an intentional operator edit? If not, restore
+  from `/tmp/hcrm-data-backup-vFJS/data/` (pre-mutation snapshot) — but only after a
+  checkpoint and only with the owner's say-so. Nobody touches `./data` before D7 is answered.
+
+**W5.4 / W5.5 Close the test gaps (F6).** size S · owner **C** (rides with W4.2)
+- `pyproject.version == app.main.app.version`; `HCRM_DOCS=0` subprocess test →
+  404×3 and `/` 200; CSP present on `/api/healthz` and on a 404 API path; hygiene test
+  (no tracked `*copy*`, `data/` untracked/ignored).
+
+**W6.0 Pull two README corrections forward (do not wait for W6.1).** size S · owner **B**
+- Strike the `BEGIN IMMEDIATE` sentence and the "strict CSP" / "fully offline `/docs`"
+  claims *in place*. The banner is 25 lines above the false sentence; a reader who
+  skims copies the lie. Full rewrite stays W6.1.
+
+### 8.4 Updated ordering
+
+```
+W2.3 + W2.4 (A) ──> W7.1 CI-2        [CI-2 must NOT be enabled before W2.3:
+        │                             a green-but-blind browser gate in CI is worse
+        │                             than none, and runners ship the 15x line]
+W1.3 (owner+A) ── parallel, no code dependency
+W1.4 + W6.0 (B) ── then W3.1/W3.2/W3.3 + W5.3 (B)
+                                    └──> W4.1 (C)  [hard edge: scripts before item 5]
+W5.4/W5.5 (C) with W4.2 · W4.3/W4.4/W4.5 (D) · W6.1 last · W7.2 deferred
+```
+
+Board: **done** W1.1, W1.2 (local only — see W1.3), W2.1 (with F1/F2 defects), W2.2
+(with F3 defect), W5.1 (with F6 gaps). **Open** W2.3, W2.4, W1.3, W1.4, W6.0, W3.*,
+W4.*, W5.2-W5.5, W6.1, W7.1.
+
+---
+
+## 9. Round 5c — synthesis after the two reviews of §8 (B's re-verification)
+
+Everything below was executed against `8c2d9cb`; scratch servers on ports 8153-8154 with
+`HCRM_DATA_DIR=$(mktemp -d)`, all stopped, `data/hcrm.db` byte-identical afterwards
+(mtime 09:45, WAL 8 272 B unchanged).
+
+### 9.1 RETRACTION — §8.2 F5's "user-data edit" was my own misread (D7 resolved)
+
+F5 claimed `users.name` had been changed `'Shop Administrator'` → `'admin'`. **It was
+not.** My 14:04 probe selected `id,email,role,must_change_password,created_at`; the
+`'admin'` I reported as a name is the **role** column. Explicit re-query, from db+WAL
+and from the main file alone:
+
+```
+id=1 email='admin@shop.local' name='Shop Administrator' role='admin' flagged=1
+```
+
+Engineer 2's discrepancy note was right, Engineer 1's "D7 is moot" was right, and the
+accusation was wrong. **D7 is closed: no user data was edited; nothing to restore.**
+The durable half of F5 stands, unchanged and re-measured: the migration exists **only**
+in `hcrm.db-wal` (8 272 B) while `hcrm.db` (77 824 B, mtime 09:45) is **still
+pre-migration** (`PRAGMA table_info(users)` on the main file alone → no
+`must_change_password`), so any copy that takes `hcrm.db` alone silently loses it; and a
+server was run against `./data` at all, which ground rule 3 forbids. Lesson recorded for
+the process rules: *quote the column list next to any row you use as evidence.*
+
+Pushback on Engineer 1's remedy, though: "nothing in `./data` is irreproducible … simply
+delete it" is true **today by accident** and dangerous as a rule. The mechanical form is
+the gate — `./data` is disposable only while a read-only query shows
+`users==1 AND items==12 AND skus==EX-001…EX-012` (**verified true right now**), and
+`scripts/backup_db.sh` (W1.4) runs first regardless. The moment an operator adds one real
+item, that check fails and "delete it" becomes data loss.
+
+### 9.2 F7 accepted in full — and it invalidates part of my own W2.3 spec
+
+Measured on this machine, `console.error` probe page over `file://`, `:CONSOLE` record
+counts:
+
+| binary | `--headless=new` | `--headless=old` |
+|---|---|---|
+| `chrome-headless-shell` 131 | **0 records** | **0 records** |
+| full `chrome` 131 (puppeteer) | 2 | **0** |
+| `/usr/bin/google-chrome` 150 | 2 | 2 |
+
+So my "prefer `chrome-headless-shell` (smallest, CI-friendly)" would have made the
+console detector **permanently blind on the exact binary `INSTALL_HELP` recommends and CI
+would install**. Withdrawn. Adopted instead:
+
+1. **Detector self-probe** (Engineer 1) *before* any check, per candidate binary, with
+   **the identical flag set used for the real checks** (a probe run with different flags
+   proves nothing — full Chrome 131 logs records with `--headless=new` and none with
+   `--headless=old`). Probe page = a temp **file** (`data:` URLs emit 0 records —
+   confirmed). No candidate passes → **exit 4 "detector blind"**, distinct from 3
+   ("no browser"), never skippable in CI.
+2. **Probe payload must defeat truncation, not just silence**:
+   `console.error("uicheck-probe-<rand> \"inner\"\nsecond-line")`, and the probe asserts
+   the token *and* that `inner` + `second-line` both survive. A parser that stops at an
+   inner quote then fails the probe instead of silently truncating real violations.
+3. **Keep the per-page liveness guard as well** (`record_count(stderr) > 0` but
+   `parsed == 0` → fail). Engineer 1 is right that it cannot catch F7 (zero records); it
+   still catches a parser regression on pages that *do* log, on every page, with no extra
+   browser launch. Probe = capability once per binary; guard = per-page sanity. Both.
+4. `--browser` / `HCRM_BROWSER` pin; discovery order full-Chrome-first (probe-validated,
+   so order is no longer load-bearing).
+
+### 9.3 Correction to Engineer 1's regex claim (their conclusion is right, the premise isn't)
+
+Measured against the **committed** parser: it does **not** truncate at inner quotes —
+the *required* `, source:` group anchors the closing quote. Benign advisory: parsed
+127/127 chars, identical to the input. Adversarial message
+`"Blocked \"foo\" Refused to connect"` → parsed whole, `is_error=True`.
+
+The truncation appears only in the **naive "make the suffix optional"** variant — which is
+literally what my §8.3 wording invited (`"(.*?)"` + optional suffix):
+
+| parser | `"Blocked \"foo\" Refused to connect"` | `is_error` |
+|---|---|---|
+| committed (suffix required) | full message | **True** |
+| naive optional-suffix | `'Blocked '` | **False** ← a real violation, missed |
+
+Conclusion: **don't regex the message body at all — split on record headers.** And add
+"FAIL pattern after an inner double quote" to the parser fixtures; it is the single
+fixture that separates a correct parser from a silently-blind one (neither review had it).
+
+### 9.4 Reference implementation (validated — A can lift it straight into W2.3)
+
+```python
+_RECORD_RE = re.compile(r"\[\d+:\d+:[^\]]*?:\w+:CONSOLE(?::|\()(\d+)\)?\]")  # (n)] and :n]
+
+def console_records(stderr: str) -> list[str]:
+    hits = list(_RECORD_RE.finditer(stderr)); out = []
+    for i, mt in enumerate(hits):
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(stderr)
+        body = stderr[mt.end():end].strip()
+        if body.startswith('"'): body = body[1:]
+        cut = body.rfind('", source: ')
+        body = body[:cut] if cut != -1 else re.sub(r'"\.?$', "", body.rstrip())
+        out.append(body.rstrip())
+    return out
+
+def record_count(stderr: str) -> int:      # liveness-guard denominator
+    return len(_RECORD_RE.findall(stderr))
+```
+
+Validation, all green: 131 & 150 shapes · missing `, source:` · inner quotes ·
+embedded newline · FAIL-pattern-after-inner-quote (`is_error=True`) · two mixed records ·
+empty stderr · stderr with only non-console lines (0/0, guard silent). Against the real
+captured logs: `chrome-log.txt` 1/1 parsed **1 error** (the `EvalError`),
+`docs-log.txt` 3/3 parsed **3 errors** (jsdelivr CSS, jsdelivr JS, inline hash),
+`fix-log-root.txt` 1/1 parsed **0 errors** (benign advisory), `fix-log-docs.txt` 0/0.
+Self-probe against the three binaries: full Chrome 131 **PASS**, `chrome-headless-shell`
+**BLIND**, Chrome 150 **PASS** → picks full Chrome, exit 0. (Prototype: `/tmp/proto_uic.py`;
+B will hand it over or fold it into W2.3's PR as A prefers.)
+
+### 9.5 Engineer 2's finding #2 CONFIRMED — new item W2.5
+
+An unhandled exception produces a 500 with **none** of our headers (probe route raising
+`RuntimeError`, registered ahead of the `StaticFiles` mount):
+
+```
+GET /api/__boom   -> 500  (no x-content-type-options, no x-frame-options,
+                           no referrer-policy, no content-security-policy)
+GET /no/such/path -> 404  all four present
+GET /api/items?…  -> 401  all four present
+```
+
+Cause: `BaseHTTPMiddleware` code after `await call_next()` never runs when the endpoint
+raises; Starlette's outer `ServerErrorMiddleware` emits the bare 500. The docstring
+"Baseline browser hardening on every response" is therefore false. Impact is low (the
+body is 21 bytes of `text/plain`), but the fix is cheap and removes a false claim:
+
+- Extract `apply_security_headers(response, path) -> None` as the single source of truth;
+  the middleware calls it, and a new `@app.exception_handler(Exception)` returns
+  `JSONResponse({"detail": "Internal server error"}, status_code=500)` with the same
+  headers applied (Starlette sends the handler's response, then re-raises for logging).
+- Correct the docstring either way; note that headers cannot be added once a response has
+  started streaming (`response_started`).
+- Test: temporary raising route + `TestClient(app, raise_server_exceptions=False)` →
+  assert 500 **and** all four headers; fixture removes the route afterwards.
+- Also (my first probe's mistake, worth pinning as a test): a route appended *after*
+  `app.mount("/", StaticFiles(...))` is unreachable — 404, not 500. If W2.5's test adds a
+  route it must insert it before the mount.
+
+### 9.6 Two implementation changes to §8.3 items
+
+- **W2.4**: don't test the bound by writing `static/docs.html` into the real tree
+  (filesystem writes in tests leak into concurrent runs and the working tree). Extract
+  `_is_docs_path(path) -> bool` and unit-test the predicate: True for `/docs`,
+  `/docs/oauth2-redirect`, `/redoc`, `/openapi.json`; False for `/docs.html`, `/redocx`,
+  `/`, `/api/items`. Keep one browser-level assertion in ui_check as the end-to-end check.
+- **W2.3 `--self-host`**: depends on W3.1's helper. W3.1 lands first (B, small), so
+  `--self-host` imports it rather than degrading gracefully.
+
+### 9.7 NEW ITEM W4.0 — dev admin credentials `admin` / `admin` (owner instruction)
+
+Owner directive, this round: *"The admin login information should be username: `admin`
+and password: `admin` for testing or debugging purposes and until further notice."*
+This deliberately weakens the control W4.1 exists to add, so it is implemented as an
+explicit, loud, reversible **mode**, not as a new hard-coded default:
+
+- `app/security.py`: `DEV_ADMIN` (env `HCRM_DEV_ADMIN`, **default on** per the directive),
+  `DEV_ADMIN_USERNAME = "admin"`, `DEV_ADMIN_PASSWORD = "admin"`.
+- Verified no schema change is needed: `LoginIn` has no email pattern and no password
+  `min_length`, so `{"email":"admin","password":"admin"}` authenticates as-is;
+  `RegisterIn`'s pattern **rejects** a bare `admin`, so public signup cannot squat the
+  username. `ChangePasswordIn`/`MemberPatch.password` keep `min_length=8`, i.e. nobody can
+  *re-set* a 5-character password through the API — the dev credential is seed-only.
+- `app/main.py`: in dev mode, `seed_default_admin` **ensures** a `admin`/`admin` account
+  (role `admin`, `must_change_password=False`) — create if absent, never touch existing
+  accounts' passwords; `_flag_default_password` skips it (otherwise it would be blocked by
+  the very flag that makes the credential useless). Non-dev mode keeps
+  `admin@shop.local` / `changeme` + flagged, exactly as today.
+- **Guards, all mandatory in the same PR:** loud startup `WARNING`; `healthz` gains
+  `"insecure_dev_admin": true`; `scripts/run.sh` refuses a non-loopback `HCRM_HOST` while
+  dev mode is on unless `HCRM_ALLOW_INSECURE_BIND=1`; `tests/conftest.py` sets
+  `HCRM_DEV_ADMIN=0` so **every existing security test keeps testing the secure default**
+  (dev convenience must not delete the guarantees); new tests cover dev mode on
+  (login works, not flagged, healthz reports it) and off (unchanged behaviour).
+- Interaction with **W4.1**: the reject-list becomes "well-known passwords" =
+  `{DEFAULT_ADMIN_PASSWORD}` always, plus `{DEV_ADMIN_PASSWORD}` **when dev mode is off**.
+  W4.0 must land **before** W4.1 so C writes against it instead of around it.
+- UI: the login field must become `type="text"` (+ `autocomplete="username"`,
+  `inputmode="email"`) or browsers refuse to submit `admin` into `type="email"`. Bonus:
+  adding `autocomplete` attributes removes the benign `[DOM]` advisory, so ui_check's
+  allowlist entry can be **deleted** (W6.2 pulled into W4.0 — a shrinking allowlist).
+- Local `./data`: seed-only per §9.1's check, so after `scripts/backup_db.sh` either
+  checkpoint or delete it and let the next boot seed `admin`/`admin`. Owner's call, one
+  line in the PR.
+
+### 9.8 Synthesized board, ownership and order
+
+```
+NOW   W4.0 dev admin (B, small)        ── owner directive; unblocks W4.1 and W3 gates
+      W1.4 backup_db.sh + run.sh guard (Eng1)   W6.0 README strikes (Eng1)
+      W2.3 + W2.4 + W2.5 (A)           ── probe/exit 4, record-splitting parser,
+                                          parser fixtures incl. inner-quote FAIL case,
+                                          _is_docs_path predicate + unit test,
+                                          500-header handler; --self-host after W3.1
+      W1.3 GitHub purge (owner + A)    ── parallel, no code dependency
+THEN  W3.1 helper (B) ─> W3.2 load / W3.3 smoke + W5.3 (B)   [hard edge before W4.1]
+      W4.1 + W4.2 + W5.2 + W5.4/W5.5 (C)      W4.3 + W4.4 + W4.5 (D)
+LAST  W6.1 README rewrite ─> W7.1 CI-1/2/3 (CI-2 only after W2.3's probe is in,
+      and CI must FAIL on exit 4, never skip)
+```
+
+Review rotation unchanged (A↔C, B↔D) with one addition: **A's W2.3 PR is reviewed by
+both B and Engineer 1** — Engineer 1 holds the F7 evidence and the three real-format
+console logs, and the detector is the one component whose failure mode is "silently
+green". Gates for W2.3 (all must be in the commit message): probe marks
+`chrome-headless-shell` BLIND and picks full Chrome; the injected-external-script page
+exits **1** under Chrome 131 *and* Chrome 150 (today Chrome 150 exits 0 — §8.2 F1);
+pre-fix tree exits 1 under both; parser fixtures green under `pytest` with no browser
+installed (`HCRM_BROWSER=/nonexistent` must not skip them).
