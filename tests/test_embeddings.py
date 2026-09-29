@@ -126,7 +126,15 @@ def test_background_retry_publishes_a_model_that_later_requests_see(monkeypatch)
 
 
 def test_schedule_retry_is_idempotent_while_running(monkeypatch):
-    _reset(monkeypatch, failed=True, failed_at=0.0)
+    # The cooldown must be pinned and failed_at must be *relative to the
+    # clock*: with the default RETRY_SECONDS=60 and failed_at=0.0 the first
+    # _schedule_retry() only succeeds once the host's monotonic clock (uptime
+    # on Linux) exceeds 60s, so a freshly booted CI runner fails this test
+    # (observed on a GitHub-hosted runner) while a long-lived dev machine
+    # always passes it.
+    monkeypatch.setattr(emb, "RETRY_SECONDS", 0.0)
+    _reset(monkeypatch, failed=True,
+           failed_at=time.monotonic() - emb.MIN_RETRY_SECONDS - 5)
     started = threading.Event()
     release = threading.Event()
 
@@ -146,8 +154,10 @@ def test_schedule_retry_is_idempotent_while_running(monkeypatch):
     while emb.retry_in_flight() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert emb.retry_in_flight() is False
-    # …and a new one can be scheduled afterwards.
-    monkeypatch.setattr(emb, "_model_failed_at", 0.0)
+    # …and a new one can be scheduled afterwards. The worker's failure set
+    # _model_failed_at to now, so push it back past the cooldown first.
+    monkeypatch.setattr(emb, "_model_failed_at",
+                        time.monotonic() - emb.MIN_RETRY_SECONDS - 5)
     release.set()
     assert emb._schedule_retry() is True
     deadline = time.monotonic() + 5
