@@ -17,6 +17,13 @@ Usage (server must be running; scanner in USB-COM or RS-232C mode):
     # machine-readable output (one JSON object per scan on stdout):
     ... --json
 
+Scans of an HCRM QR badge (payload "HCRM1:…") are NOT looked up in the
+catalogue: they are exchanged for a login session via /api/auth/qr-login
+and the resulting session token is printed (useful for headless/kiosk
+setups and for testing badges from the command line). For interactive
+browser login, put the scanner in USB-HID mode and scan into the badge
+field on the login page instead (docs/opticon-m10.md §10).
+
 Environment overrides: HCRM_BASE, HCRM_SCANNER_PORT.
 Run from the repo root, like the other scripts. Stdlib only, except the
 optional pyserial (see app/scanner/transport.py).
@@ -39,6 +46,13 @@ from app.scanner import OpticonM10, find_scanner_ports  # noqa: E402
 from app.scanner.transport import SerialOpenError  # noqa: E402
 
 BASE = os.environ.get("HCRM_BASE", "http://localhost:8000")
+BADGE_PREFIX = "HCRM1:"  # keep in sync with app.qrbadge.BADGE_PREFIX
+
+
+class ApiError(Exception):
+    def __init__(self, status, path, detail):
+        super().__init__(f"API error {status} on {path}: {detail}")
+        self.status = status
 
 
 def api(path, method="GET", token=None, body=None):
@@ -60,7 +74,7 @@ def api(path, method="GET", token=None, body=None):
             detail = json.loads(detail).get("detail", detail)
         except ValueError:
             pass
-        raise SystemExit(f"API error {exc.code} on {method} {path}: {detail}")
+        raise ApiError(exc.code, f"{method} {path}", detail) from exc
 
 
 def find_item(token, code):
@@ -90,8 +104,11 @@ def main():
     args = parser.parse_args()
 
     password = args.password or getpass.getpass("HCRM password: ")
-    status, auth = api("/api/auth/login", method="POST",
-                       body={"email": args.email, "password": password})
+    try:
+        status, auth = api("/api/auth/login", method="POST",
+                           body={"email": args.email, "password": password})
+    except ApiError as exc:
+        raise SystemExit(str(exc))
     token = auth["token"]
     user = auth["user"]
     adjust = args.stock_in if args.stock_in else (-args.stock_out if args.stock_out else 0)
@@ -122,19 +139,48 @@ def main():
         else:
             print(f"[{record['code']}] no catalogue match", flush=True)
 
+    def badge_login(code):
+        """Exchange a scanned QR badge for a session; never kills the bridge."""
+        try:
+            _, authd = api("/api/auth/qr-login", method="POST", body={"token": code})
+        except ApiError as exc:
+            record = {"code": code, "badge_login": False, "error": str(exc)}
+        else:
+            record = {
+                "code": code,
+                "badge_login": True,
+                "user": authd["user"],
+                "token": authd["token"],
+            }
+        if args.json:
+            print(json.dumps(record), flush=True)
+        elif record["badge_login"]:
+            u = record["user"]
+            print(f"[badge] logged in: {u['name']} <{u['email']}> ({u['role']})\n"
+                  f"        session token: {record['token']}", flush=True)
+        else:
+            print(f"[badge] login failed: {record['error']}", flush=True)
+
     def on_scan(code):
-        item, how = find_item(token, code)
-        record = {"code": code, "found": item is not None, "match": how, "item": item}
-        if item is not None and adjust:
-            old = item["stock"]
-            new = max(0, old + adjust)
-            if new != old:
-                _, updated = api(f"/api/items/{item['id']}", method="PATCH",
-                                 token=token, body={"stock": new})
-                record.update(old_stock=old, new_stock=updated["stock"],
-                              item=updated)
-            else:
-                record.update(old_stock=old, new_stock=old)
+        if code.startswith(BADGE_PREFIX):
+            badge_login(code)
+            return
+        try:
+            item, how = find_item(token, code)
+            record = {"code": code, "found": item is not None, "match": how,
+                      "item": item}
+            if item is not None and adjust:
+                old = item["stock"]
+                new = max(0, old + adjust)
+                if new != old:
+                    _, updated = api(f"/api/items/{item['id']}", method="PATCH",
+                                     token=token, body={"stock": new})
+                    record.update(old_stock=old, new_stock=updated["stock"],
+                                  item=updated)
+                else:
+                    record.update(old_stock=old, new_stock=old)
+        except ApiError as exc:
+            raise SystemExit(str(exc))
         emit(record)
 
     try:

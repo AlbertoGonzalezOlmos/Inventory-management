@@ -492,3 +492,17 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
   .selection-panel { position: static; order: -1; }
   .admin-split { grid-template-columns: 1fr; }
 }
+
+/* ---------- QR badge login ---------- */
+.divider { border: none; border-top: 1px solid var(--border); margin: 1.2rem 0; }
+.qr-badge {
+  display: flex;
+  justify-content: center;
+  padding: 1rem;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin: .8rem 0;
+}
+.qr-badge svg { width: 200px; height: 200px; }
+.badge-actions { display: flex; gap: .5rem; flex-wrap: wrap; }

@@ -47,6 +47,22 @@
         <p v-if="loginError" class="error">{{ loginError }}</p>
         <button class="btn block" :disabled="busy">Log in</button>
       </form>
+      <hr class="divider" />
+      <form @submit.prevent="doBadgeLogin">
+        <label>QR badge
+          <input
+            type="text"
+            v-model="badgeCode"
+            placeholder="Scan your QR badge here"
+            autocomplete="off"
+          />
+        </label>
+        <p class="muted">
+          Point the scanner at your badge — the code is typed in and submitted
+          automatically.
+        </p>
+        <button class="btn block" :disabled="busy || !badgeCode">Log in with badge</button>
+      </form>
       <p class="muted">No account yet? <a href="#/register">Create a member account</a></p>
     </section>
 
@@ -182,6 +198,24 @@
         <p v-if="pwOk" class="ok">Password updated. Other sessions were signed out.</p>
         <button class="btn block" :disabled="busy">Change password</button>
       </form>
+
+      <h2>QR badge login</h2>
+      <p class="muted">
+        A QR badge logs you in without email and password — anyone holding the
+        printed code can log in as you, so treat it like a password.
+        <template v-if="user.has_qr_badge">A badge is currently <strong>active</strong> for this account.</template>
+        <template v-else>No badge is active for this account.</template>
+      </p>
+      <div v-if="badgeSvg" class="qr-badge" v-html="badgeSvg"></div>
+      <div class="badge-actions">
+        <button class="btn" :disabled="busy" @click="generateMyBadge">
+          {{ user.has_qr_badge ? "Regenerate badge (revokes the old one)" : "Generate QR badge" }}
+        </button>
+        <button v-if="badgeSvg" class="btn ghost" @click="() => window.print()">Print</button>
+        <button v-if="user.has_qr_badge" class="btn ghost danger" @click="revokeMyBadge">
+          Revoke badge
+        </button>
+      </div>
     </section>
 
     <!-- ================= Table view (items + export + analysis) ================= -->
@@ -387,15 +421,26 @@
           <h2>Members ({{ members.length }})</h2>
           <table class="table">
             <thead>
-              <tr><th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th></th></tr>
+              <tr><th>Name</th><th>Email</th><th>Role</th><th>Badge</th><th>Joined</th><th></th></tr>
             </thead>
             <tbody>
               <tr v-for="m in members" :key="m.id">
                 <td>{{ m.name }}</td>
                 <td>{{ m.email }}</td>
                 <td>{{ m.role }}</td>
+                <td>{{ m.has_qr_badge ? "✓ active" : "—" }}</td>
                 <td>{{ formatDate(m.created_at) }}</td>
                 <td class="actions">
+                  <button
+                    v-if="user && (user.role === 'admin' || m.role !== 'admin')"
+                    class="btn tiny"
+                    @click="showMemberBadge(m)"
+                  >QR badge</button>
+                  <button
+                    v-if="user && (user.role === 'admin' || m.role !== 'admin') && m.has_qr_badge"
+                    class="btn tiny danger"
+                    @click="revokeMemberBadge(m)"
+                  >Revoke</button>
                   <button
                     v-if="user && user.role === 'admin' && m.id !== user.id"
                     class="btn tiny"
@@ -444,6 +489,23 @@
         >
           {{ detailItem.stock === 0 ? 'Out of stock' : 'Add to purchase list' }}
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= Member QR badge modal ================= -->
+  <div class="modal-backdrop" v-if="memberBadge" @click.self="memberBadge = null">
+    <div class="modal">
+      <button class="modal-close" @click="memberBadge = null">✕</button>
+      <h2>QR badge — {{ memberBadge.name }}</h2>
+      <p class="muted">
+        {{ memberBadge.email }} · any previous badge for this account was just revoked.
+        Whoever holds this code can log in as the member — hand it over privately.
+      </p>
+      <div class="qr-badge" v-html="memberBadge.svg"></div>
+      <div class="modal-footer">
+        <button class="btn ghost" @click="memberBadge = null">Close</button>
+        <button class="btn" @click="() => window.print()">Print</button>
       </div>
     </div>
   </div>
