@@ -79,6 +79,15 @@ def _migrate_schema() -> None:
                 "BOOLEAN NOT NULL DEFAULT 0"
             )
             logger.info("Added users.must_change_password column (migration).")
+        if "qr_badge_hash" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN qr_badge_hash TEXT"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_users_qr_badge_hash "
+                "ON users (qr_badge_hash)"
+            )
+            logger.info("Added users.qr_badge_hash column (migration).")
 
 
 def _flag_default_password(session: Session) -> None:
