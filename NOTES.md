@@ -98,20 +98,29 @@ Inventory-management/
 │   ├── deps.py        # get_current_user / require_staff / require_admin,
 │   │                  #   must_change_password gate
 │   ├── embeddings.py  # fastembed wrapper, cooldown retry, blob serialization
+│   ├── barcodes.py    # GTIN/GS1 number systems: validate, normalise,
+│   │                  #   classify (docs/barcodes.md); used by items API +
+│   │                  #   scripts/scan_intake.py
 │   ├── seed.py        # 12 example items + embedding backfill
 │   └── routers/       # auth.py, items.py, members.py (all under /api)
 ├── static/            # Vue 3 SPA: index.html (in-DOM template), app.js, style.css
 │   └── vendor/        # vue.global.prod.js, jspdf, jspdf-autotable (pinned)
 ├── docs/
-│   └── scanner-opn2001.md   # Opticon OPN-2001 scanner: connection + protocol
-├── tests/             # pytest suite (~70 tests, ~20 s, no network/model;
-│                      #   test_opn2001.py runs offline w/o hardware)
+│   ├── scanner-opn2001.md   # Opticon OPN-2001 scanner: connection + protocol
+│   │                      #   (+ §3.4 WSL2, §3.5 HID-mode scanners)
+│   └── barcodes.md        # GTIN/GS1 number systems; same-item vs new-entry rules
+├── tests/             # pytest suite (~160 tests, ~25 s, no network/model;
+│                      #   scanner tests run offline w/o hardware)
 ├── scripts/
 │   ├── run.sh         # startup
 │   ├── ui_check.py    # headless-Chrome browser gate (see §7)
 │   ├── smoke_test.py  # end-to-end API test vs a live server (KNOWN FLAWS, §7)
 │   ├── load_test.py   # concurrent login/read availability check (KNOWN FLAWS, §7)
-│   └── opn2001.py     # Opticon OPN-2001 scanner connector (docs/scanner-opn2001.md)
+│   ├── opn2001.py     # Opticon OPN-2001 connector: serial + raw-USB (pyusb)
+│   │                  #   backends, detect (docs/scanner-opn2001.md)
+│   ├── scanner_hid.py # live capture from USB-HID keyboard-mode scanners
+│   ├── scan_intake.py # scans → catalogue verdicts (same/new/invalid, read-only)
+│   └── udev/99-opticon-scanner.rules  # device-node permissions (one-time sudo)
 ├── PLAN.md            # round-4 remediation plan (historical; findings A–H, P-1…P-4)
 ├── PLAN-v2.md         # round-5+ plan — AUTHORITATIVE for status & next work
 ├── REVIEW.md          # round-3 code review (historical; most items since fixed)
@@ -369,7 +378,18 @@ round — see `app/security.py` and `tests/test_dev_admin.py`).
 
 **Feature branch `feature/opn2001-scanner-connection`**: Opticon OPN-2001
 scanner connection + documentation (`docs/scanner-opn2001.md`,
-`scripts/opn2001.py`, `tests/test_opn2001.py`).
+`scripts/opn2001.py`, `tests/test_opn2001.py`), extended with:
+barcode number-system layer (`app/barcodes.py`, `docs/barcodes.md`,
+`items.barcode` GTIN-14 column + migration + API normalisation/uniqueness/
+lookup), device detection (`opn2001.py detect`), raw-libusb backend for
+WSL2 kernels without `CONFIG_USB_SERIAL_OPTICON` (`--backend usb`),
+HID-keyboard-mode capture (`scripts/scanner_hid.py`, Opticon `065A:A001`),
+and the read-only intake classifier (`scripts/scan_intake.py`). Verified on
+the real machine (WSL2 + usbipd-win): an `065A:A001` HID-mode Opticon
+attaches and enumerates as `/dev/hidraw0`; a second USB device fails
+enumeration on Windows (problem 43 — deep-discharge/cable signature,
+docs §3.4 state log). Capture requires the one-time udev rule
+(`scripts/udev/99-opticon-scanner.rules`, sudo).
 
 **Open workstreams** (see PLAN-v2 §9.8 for the board and owners):
 W2.3/W2.4/W2.5

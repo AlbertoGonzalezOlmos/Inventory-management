@@ -2,12 +2,27 @@
 """opn2001 — connect to and interact with the Opticon OPN-2001 pocket memory scanner.
 
 The protocol layer (frames, CRC-16, timestamps, barcode records) is stdlib-only
-and unit-tested offline (tests/test_opn2001.py). pyserial is imported lazily,
-only when a subcommand actually opens the port, so the module stays importable
-in any environment:
+and unit-tested offline (tests/test_opn2001.py). pyserial / pyusb are imported
+lazily, only when a subcommand actually opens the device, so the module stays
+importable in any environment:
 
     uv run --with pyserial python scripts/opn2001.py info
     uv run --with pyserial python scripts/opn2001.py read --json
+
+Two backends can carry the protocol:
+
+* ``serial`` (default) — the kernel's opticon usb-serial driver exposes the
+  scanner as ``/dev/ttyUSB*`` (Linux) or the Opticon driver as ``COMx``
+  (Windows).
+* ``usb`` — raw libusb via pyusb, reimplementing what the kernel driver does
+  (writes as vendor control requests — the device has no bulk-out endpoint;
+  bulk-in packets carry a 2-byte header). This is the backend for WSL2 and
+  other kernels that ship without CONFIG_USB_SERIAL_OPTICON:
+
+      uv run --with pyusb python scripts/opn2001.py --backend usb info
+
+``scripts/opn2001.py detect`` finds the scanner and explains what stands
+between it and a working connection on this machine.
 
 Protocol background, hardware operation and troubleshooting live in
 docs/scanner-opn2001.md. Every raw frame below is a known-answer vector
@@ -21,9 +36,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import glob
 import json
+import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
 from dataclasses import dataclass
 
@@ -35,6 +54,18 @@ VID_PID = (0x065A, 0x0009)  # Opticon OPN-2001 (USB-VCP)
 
 DEFAULT_PORT = "/dev/ttyUSB0"  # Linux: the in-kernel `opticon` usb-serial driver
 SERIAL_SETTINGS = dict(baudrate=9600, bytesize=8, parity="O", stopbits=1)
+
+# Raw-USB backend constants — mirroring drivers/usb/serial/opticon.c:
+# writes go out as vendor control requests (bmRequestType 0x41, bRequest 0x01,
+# wValue/wIndex 0, the whole frame as the transfer buffer) because the device
+# has no bulk-out endpoint; bulk-in transfers arrive with a 2-byte header
+# (00 00 = data, 00 01 = CTS line-state change); open sequences send
+# CONTROL_RTS(0) then RESEND_CTS_STATE(1) and clear the bulk-in halt.
+USB_WRITE_REQUEST_TYPE = 0x41  # USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_INTERFACE
+USB_WRITE_REQUEST = 0x01
+USB_CONTROL_RTS = 0x02
+USB_RESEND_CTS_STATE = 0x03
+USB_BULK_PACKET_SIZE = 64  # full-speed bulk max packet; keeps header boundaries
 
 # Command opcodes (TX). The second byte of every frame is always 0x02.
 OP_INTERROGATE = 0x01  # wake the link; reply carries device id + firmware
@@ -376,35 +407,436 @@ class OPN2001:
 
 
 # --------------------------------------------------------------------------
+# Raw-USB backend (pyusb) — for kernels without the `opticon` module (WSL2)
+# --------------------------------------------------------------------------
+
+
+def parse_bulk_packet(packet: bytes) -> tuple[str, bytes]:
+    """Interpret one bulk-in transfer the way drivers/usb/serial/opticon.c does.
+
+    Returns ("data", payload) for header 00 00, ("cts", level) for header
+    00 01, or ("unknown", packet) for anything else / malformed short packets.
+    """
+    if len(packet) <= 2:
+        return ("unknown", packet)
+    if packet[0] == 0x00 and packet[1] == 0x00:
+        return ("data", packet[2:])
+    if packet[0] == 0x00 and packet[1] == 0x01:
+        return ("cts", packet[2:])
+    return ("unknown", packet)
+
+
+class UsbStream:
+    """pyserial-shaped stream (.read(n)/.write()/.close()) over raw libusb.
+
+    Reimplements the kernel opticon driver's behaviour (see constants above):
+    every host→scanner frame goes out as ONE vendor control transfer; every
+    device→host bulk packet gets its 2-byte header stripped (CTS packets are
+    tracked, not delivered). read(n) blocks until n bytes are available or
+    the timeout expires, then returns whatever was accumulated — exactly the
+    contract the protocol layer's _read_exact expects (b"" means timeout).
+    """
+
+    def __init__(self, vid_pid=VID_PID, timeout_ms: int = 3000):
+        try:
+            import usb.core
+            import usb.util
+        except ImportError:
+            raise SystemExit(
+                "pyusb is required for --backend usb:\n"
+                "  uv run --with pyusb python scripts/opn2001.py --backend usb ...\n"
+                "(also needs libusb-1.0 on the system: apt install libusb-1.0-0)"
+            )
+        self._usb_util = usb.util
+        # Stash the exception classes so read() needs no repeated lazy import
+        # (and tests can inject stand-ins when __init__ is bypassed).
+        self._timeout_exc = usb.core.USBTimeoutError
+        self._usb_error = usb.core.USBError
+        dev = usb.core.find(idVendor=vid_pid[0], idProduct=vid_pid[1])
+        if dev is None:
+            raise SystemExit(
+                f"no USB device {vid_pid[0]:04x}:{vid_pid[1]:04x} found — is the "
+                "scanner plugged in and enumerated? Run: scripts/opn2001.py detect"
+            )
+        self.dev = dev
+        self.timeout_ms = timeout_ms
+        self.cts: bool | None = None
+        self._buf = b""
+
+        try:
+            if dev.is_kernel_driver_active(0):
+                dev.detach_kernel_driver(0)
+                self._detached = True
+        except Exception:
+            self._detached = False
+        try:
+            dev.set_configuration()
+        except usb.core.USBError:
+            pass  # already configured
+        cfg = dev.get_active_configuration()
+        intf = cfg[(0, 0)]
+        self.interface = intf.bInterfaceNumber
+        ep_in = next(
+            e for e in intf
+            if self._usb_util.endpoint_direction(e.bEndpointAddress)
+            == self._usb_util.ENDPOINT_IN
+        )
+        self.ep_in = ep_in
+        try:
+            self._control_msg(USB_CONTROL_RTS, 0)  # clear RTS (as on open)
+            try:
+                dev.reset_endpoint(ep_in.bEndpointAddress)  # clear halt
+            except (usb.core.USBError, NotImplementedError, AttributeError):
+                pass
+            self._control_msg(USB_RESEND_CTS_STATE, 1)  # ask for CTS state
+        except usb.core.USBError as exc:
+            raise SystemExit(f"USB handshake failed: {exc}")
+
+    def _control_msg(self, request: int, val: int) -> None:
+        """send_control_msg() from opticon.c: bmRequestType 0x41, bRequest =
+        request, wValue = wIndex = 0, and the value travels in a 1-byte data
+        stage (NOT in wValue)."""
+        self.dev.ctrl_transfer(
+            USB_WRITE_REQUEST_TYPE, request, 0, self.interface,
+            bytes([val]), self.timeout_ms,
+        )
+
+    def write(self, data: bytes) -> int:
+        """Send a whole frame as one vendor control request (opticon_write)."""
+        self.dev.ctrl_transfer(
+            USB_WRITE_REQUEST_TYPE, USB_WRITE_REQUEST, 0, self.interface,
+            data, self.timeout_ms,
+        )
+        return len(data)
+
+    def read(self, n: int) -> bytes:
+        """Accumulate n payload bytes from header-stripped bulk packets."""
+        out = b""
+        while len(self._buf) + len(out) < n:
+            try:
+                packet = self.ep_in.read(USB_BULK_PACKET_SIZE, self.timeout_ms)
+            except self._timeout_exc:
+                break
+            except self._usb_error:
+                break
+            kind, payload = parse_bulk_packet(bytes(packet))
+            if kind == "data":
+                out += payload
+            elif kind == "cts":
+                self.cts = bool(payload[:1] and payload[0])
+        result = (self._buf + out)[:n]
+        self._buf = (self._buf + out)[n:]
+        return result
+
+    def close(self) -> None:
+        try:
+            self._usb_util.release_interface(self.dev, self.interface)
+            if getattr(self, "_detached", False):
+                self.dev.attach_kernel_driver(self.interface)
+        except Exception:
+            pass
+        self._usb_util.dispose_resources(self.dev)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+# --------------------------------------------------------------------------
+# Device detection (Linux sysfs / Windows COM+PnP / WSL2 specifics)
+# --------------------------------------------------------------------------
+
+
+def is_wsl() -> bool:
+    try:
+        with open("/proc/version", "rb") as fh:
+            return b"microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
+def find_linux_usb_devices(root: str = "/sys/bus/usb/devices",
+                           vendor: int = VID_PID[0]) -> list[dict]:
+    """Scan sysfs for Opticon devices (any PID of the vendor): each entry is
+    {sysfs, vid, pid, busnum, devnum, ttys}. The OPN-2001 (065a:0009) binds
+    the `opticon` usb-serial driver (ttyUSB*); M-10-family scanners appear as
+    065a:a001 (USB-HID keyboard → hidraw) or 065a:a002 (CDC-ACM → ttyACM*)."""
+    found = []
+    for path in glob.glob(os.path.join(root, "*")):
+        try:
+            with open(os.path.join(path, "idVendor")) as fh:
+                vid = int(fh.read().strip(), 16)
+            with open(os.path.join(path, "idProduct")) as fh:
+                pid = int(fh.read().strip(), 16)
+        except (OSError, ValueError):
+            continue
+        if vid != vendor:
+            continue
+        ttys = []
+        for iface in glob.glob(os.path.join(path, "*:1.*")):
+            tty_dir = os.path.join(iface, "tty")
+            if os.path.isdir(tty_dir):
+                ttys += [f"/dev/{t}" for t in sorted(os.listdir(tty_dir))]
+        hidraws = []
+        for iface in glob.glob(os.path.join(path, "*:1.*", "0*", "hidraw")):
+            hidraws += [f"/dev/{t}" for t in sorted(os.listdir(iface))]
+        def _int(name):
+            try:
+                with open(os.path.join(path, name)) as fh:
+                    return int(fh.read().strip())
+            except (OSError, ValueError):
+                return None
+        found.append({"sysfs": path, "vid": vid, "pid": pid,
+                      "busnum": _int("busnum"), "devnum": _int("devnum"),
+                      "ttys": ttys, "hidraws": hidraws})
+    return found
+
+
+def wsl_kernel_has_opticon() -> bool | None:
+    """True/False if determinable, None if the kernel exposes no config."""
+    try:
+        import gzip
+        with gzip.open("/proc/config.gz", "rt") as fh:
+            for line in fh:
+                if line.startswith("CONFIG_USB_SERIAL_OPTICON"):
+                    return not line.split("=", 1)[1].strip().startswith("n") \
+                        if "=" in line else False
+    except OSError:
+        pass
+    for path in (f"/lib/modules/{os.uname().release}/modules.builtin",
+                 f"/lib/modules/{os.uname().release}/modules.order"):
+        try:
+            with open(path) as fh:
+                if "opticon" in fh.read():
+                    return True
+        except OSError:
+            continue
+    if glob.glob(f"/lib/modules/{os.uname().release}/kernel/drivers/usb/serial/opticon.ko*"):
+        return True
+    return False if os.path.exists("/proc/config.gz") else None
+
+
+def probe_windows_pnp() -> list[dict] | None:
+    """Ask the Windows host (via WSL interop or natively) about the scanner.
+
+    Returns a list of {Status, FriendlyName, InstanceId} for Opticon devices
+    *and* for failed USB devices (problem 43 — 'Device Descriptor Request
+    Failed'), which is how a deeply-discharged OPN-2001 shows up.
+    None when powershell is unavailable.
+    """
+    exe = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not exe:
+        return None
+    script = (
+        "Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.InstanceId -like '*VID_065A*' -or "
+        "($_.InstanceId -like 'USB*' -and $_.Status -ne 'OK' "
+        " -and $_.Class -in @('USB','Ports','Unknown',$null)) } | "
+        "Select-Object Status,Class,FriendlyName,InstanceId | ConvertTo-Json"
+    )
+    try:
+        out = subprocess.run(
+            [exe, "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not out:
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    return [data] if isinstance(data, dict) else data
+
+
+def find_windows_ports() -> list[dict]:
+    """COM ports matching the scanner VID/PID (needs pyserial)."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    return [
+        {"port": p.device, "description": p.description}
+        for p in list_ports.comports()
+        if (p.vid, p.pid) == VID_PID
+    ]
+
+
+def detect_device() -> dict:
+    """Collect everything needed to reach the scanner on this machine."""
+    report: dict = {"platform": sys.platform, "wsl": False, "found": False,
+                    "usable": False, "candidates": [], "guidance": []}
+    if sys.platform.startswith("linux"):
+        report["wsl"] = is_wsl()
+        devs = find_linux_usb_devices()
+        opn = [d for d in devs if d["pid"] == VID_PID[1]]
+        report["opn_enumerated"] = bool(opn)
+        for d in opn:
+            report["candidates"].append({"backend": "serial", **d})
+            if d["ttys"]:
+                report["found"] = report["usable"] = True
+        if opn and not any(d["ttys"] for d in opn):
+            report["found"] = True
+            report["guidance"].append(
+                "device enumerated but no /dev/ttyUSB*: the kernel lacks the "
+                "opticon usb-serial driver — use --backend usb (pyusb) or a "
+                "kernel with CONFIG_USB_SERIAL_OPTICON=m"
+            )
+        # Other Opticon personalities: HID keyboard (a001) / CDC-ACM (a002).
+        for d in devs:
+            if d["pid"] == 0xA001:
+                report["found"] = True
+                report["candidates"].append({"backend": "hidraw", **d})
+                if d["hidraws"]:
+                    report["usable"] = True
+                    report["guidance"].append(
+                        f"Opticon scanner in USB-HID keyboard mode on "
+                        f"{', '.join(d['hidraws'])} — receive scans with "
+                        f"scripts/scanner_hid.py (needs read permission: see "
+                        f"docs/scanner-opn2001.md §3.5)"
+                    )
+                else:
+                    report["guidance"].append(
+                        "Opticon HID-mode scanner enumerated but no hidraw "
+                        "node (kernel lacks CONFIG_HIDRAW?)"
+                    )
+            elif d["pid"] == 0xA002:
+                report["found"] = True
+                report["candidates"].append({"backend": "serial", **d})
+                if d["ttys"]:
+                    report["usable"] = True
+                    report["guidance"].append(
+                        f"Opticon scanner in USB-COM (CDC-ACM) mode on "
+                        f"{', '.join(d['ttys'])} — M-10 family serial protocol "
+                        f"(see feature/opticon-m10-scanner branch docs)"
+                    )
+        if report["wsl"]:
+            has_bus = os.path.isdir("/dev/bus/usb") and any(
+                glob.glob(f"/dev/bus/usb/{b}/*") for b in os.listdir("/dev/bus/usb")
+            )
+            report["usbipd_attached"] = has_bus
+            report["wsl_kernel_opticon"] = wsl_kernel_has_opticon()
+            if not has_bus:
+                report["guidance"].append(
+                    "WSL2 sees no USB devices: the scanner is attached to the "
+                    "Windows host. Pass it through with usbipd-win (admin "
+                    "PowerShell): usbipd bind --busid <id> ; then "
+                    "usbipd attach --wsl --busid <id> — see docs/scanner-opn2001.md §3.4"
+                )
+            elif report.get("opn_enumerated") and report["wsl_kernel_opticon"] is False:
+                report["guidance"].append(
+                    "this WSL2 kernel has no CONFIG_USB_SERIAL_OPTICON — the "
+                    "attached device will not get a /dev/ttyUSB*; use "
+                    "--backend usb (uv run --with pyusb …), which talks raw "
+                    "libusb exactly like the kernel driver would"
+                )
+        pnp = probe_windows_pnp() if report["wsl"] else None
+        if pnp is not None:
+            report["windows_pnp"] = pnp
+            if not report["found"] and pnp:
+                report["found"] = True
+                for entry in pnp:
+                    status = (entry.get("Status") or "").lower()
+                    name = entry.get("FriendlyName") or ""
+                    if status == "error" or "Descriptor Request Failed" in name:
+                        report["guidance"].append(
+                            "Windows reports a FAILED USB enumeration "
+                            f"({name!r}): the scanner is not talking to the "
+                            "host at all. Usual causes: deeply-discharged "
+                            "battery (leave it plugged in 30+ min; a charging "
+                            "device shows a steady red LED) or a charge-only "
+                            "mini-B cable (try a known-good DATA cable)"
+                        )
+                    elif "vid_065a" in (entry.get("InstanceId") or "").lower():
+                        report["guidance"].append(
+                            "scanner enumerated on Windows — install the "
+                            "Opticon driver (docs §3.2) and use the COMx port, "
+                            "or attach it to WSL with usbipd"
+                        )
+    elif sys.platform == "win32":
+        ports = find_windows_ports()
+        report["candidates"] += [{"backend": "serial", **p} for p in ports]
+        if ports:
+            report["found"] = report["usable"] = True
+        pnp = probe_windows_pnp()
+        if pnp is not None:
+            report["windows_pnp"] = pnp
+            if any((e.get("Status") or "").lower() == "error" for e in pnp):
+                report["found"] = True
+                report["guidance"].append(
+                    "a USB device is failing to enumerate (Device Manager → "
+                    "'Unknown USB Device (Device Descriptor Request Failed)'): "
+                    "charge the scanner 30+ min on a DATA cable and re-plug"
+                )
+        if not report["found"]:
+            report["guidance"].append(
+                "scanner not seen: check the cable/port, and install the "
+                "Opticon USB driver BEFORE plugging in (docs §3.2)"
+            )
+    else:  # macOS and friends
+        report["guidance"].append(
+            "no vendor driver exists for the OPN-2001's vendor interface on "
+            "macOS (docs §3.3) — use a Linux host/VM with USB passthrough"
+        )
+    if report.get("opn_enumerated") and not report["usable"] \
+            and sys.platform.startswith("linux") and os.path.isdir("/dev/bus/usb"):
+        # The OPN-2001 is enumerated (or usbipd-attached) but has no tty:
+        # raw libusb can still drive it (--backend usb).
+        report["usable"] = True
+        report["candidates"].append({"backend": "usb", "vid_pid": "%04x:%04x" % VID_PID})
+    return report
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
 
-def _open_port(port: str):
+def _open_serial(port: str):
     try:
         import serial  # pyserial, imported lazily
     except ImportError:
         sys.exit(
-            "pyserial is required to talk to the scanner:\n"
+            "pyserial is required to talk to the scanner over a serial port:\n"
             "  uv run --with pyserial python scripts/opn2001.py ... "
             "(or: pip install pyserial)"
         )
     return serial.Serial(port=port, timeout=3, **SERIAL_SETTINGS)
 
 
-def _find_port() -> str:
-    """Default port: $OPN2001_PORT, else /dev/ttyUSB0 (Linux kernel driver)."""
-    import os
+def _open_stream(args):
+    """Open the connection for the chosen backend ('auto' picks one)."""
+    backend = args.backend
+    if backend == "auto":
+        if args.port and os.path.exists(args.port):
+            backend = "serial"
+        elif sys.platform == "win32" and args.port:
+            backend = "serial"  # COMx: existence is not a file test
+        else:
+            backend = "usb"
+    if backend == "serial":
+        if not args.port:
+            sys.exit("--backend serial needs --port (or $OPN2001_PORT)")
+        return _open_serial(args.port)
+    return UsbStream()
 
+
+def _default_port() -> str | None:
+    """Default port: $OPN2001_PORT, else /dev/ttyUSB0 if it exists, else None
+    (None lets --backend auto fall through to raw USB)."""
     port = os.environ.get("OPN2001_PORT")
     if port:
         return port
-    if sys.platform.startswith("linux"):
+    if sys.platform.startswith("linux") and os.path.exists(DEFAULT_PORT):
         return DEFAULT_PORT
-    sys.exit(
-        "No default port on this platform — pass --port (Windows: the COMx "
-        "number from Device Manager; see docs/scanner-opn2001.md §Connecting)."
-    )
+    if sys.platform == "win32":
+        ports = find_windows_ports()
+        if ports:
+            return ports[0]["port"]
+    return None
 
 
 def _resolve_param(name: str) -> int:
@@ -492,15 +924,61 @@ def cmd_param(dev: OPN2001, args) -> int:
     return 0
 
 
+def cmd_detect(dev, args) -> int:
+    """Report where the scanner is and what stands between us and it."""
+    report = detect_device()
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"platform: {report['platform']}" + (" (WSL2)" if report.get("wsl") else ""))
+        if report["candidates"]:
+            for c in report["candidates"]:
+                if c["backend"] == "hidraw":
+                    print(f"Opticon HID-mode scanner on {c['sysfs']} → "
+                          f"{', '.join(c['hidraws']) or '(no hidraw node)'} "
+                          f"(scripts/scanner_hid.py)")
+                elif c["backend"] == "serial" and c.get("ttys"):
+                    print(f"scanner on {c['sysfs']} → {', '.join(c['ttys'])} (serial backend)")
+                elif c["backend"] == "serial" and "port" in c:
+                    print(f"serial port candidate: {c['port']} ({c.get('description', '')})")
+                elif c["backend"] == "serial":
+                    print(f"scanner enumerated at {c['sysfs']} but no tty bound")
+                else:
+                    print(f"raw-USB candidate: {c.get('vid_pid', '')} (--backend usb)")
+        else:
+            print("no serial port / USB interface for 065a:0009 available yet")
+        if "usbipd_attached" in report:
+            print(f"usbipd USB bus visible in WSL: {report['usbipd_attached']}")
+        if report.get("wsl_kernel_opticon") is not None:
+            print(f"WSL kernel has opticon module: {report['wsl_kernel_opticon']}")
+        for entry in report.get("windows_pnp") or []:
+            print("windows PnP: [{Status}] {FriendlyName} ({InstanceId})".format(**entry))
+        for line in report["guidance"]:
+            print(f"→ {line}")
+        print(f"found: {report['found']}  usable: {report['usable']}")
+    return 0 if report["usable"] else (1 if report["found"] else 2)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Connect to an Opticon OPN-2001 pocket memory scanner "
         "(protocol: see docs/scanner-opn2001.md)"
     )
     parser.add_argument(
-        "--port", default=_find_port(), help="serial device (default: %(default)s)"
+        "--port", default=_default_port(),
+        help="serial device (default: %(default)s; not needed for --backend usb)",
+    )
+    parser.add_argument(
+        "--backend", choices=("auto", "serial", "usb"), default="auto",
+        help="serial = kernel/VCP COM port (pyserial); usb = raw libusb "
+        "(pyusb, for WSL2 & kernels without the opticon module); "
+        "auto picks serial when a port exists (default: %(default)s)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("detect", help="find the scanner and diagnose the connection path")
+    p.add_argument("--json", action="store_true", help="machine-readable report")
+    p.set_defaults(func=cmd_detect, no_device=True)
 
     sub.add_parser("info", help="wake the link; show device id, firmware, clock, scan count") \
         .set_defaults(func=cmd_info)
@@ -525,8 +1003,10 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_param)
 
     args = parser.parse_args(argv)
-    with _open_port(args.port) as stream:
-        dev = OPN2001(stream, timeout_desc=args.port)
+    if getattr(args, "no_device", False):
+        return args.func(None, args)
+    with _open_stream(args) as stream:
+        dev = OPN2001(stream, timeout_desc=args.port or "usb")
         return args.func(dev, args)
 
 

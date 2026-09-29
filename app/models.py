@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, LargeBinary
+from sqlalchemy import Column, DateTime, LargeBinary, String
 from sqlmodel import Field, SQLModel
 
 
@@ -40,6 +40,16 @@ class Item(SQLModel, table=True):
     price_cents: int = 0
     stock: int = 0
     image_url: str = ""
+    # Canonical GTIN-14 of the product's retail barcode (unique, nullable).
+    # Every EAN/UPC representation normalises to this form on input
+    # (app/barcodes.py), so one physical product cannot get two entries
+    # through its EAN-13 and its UPC-E, say. NULL = no retail barcode
+    # (internal SKU-labelled stock); SQLite unique indexes allow many NULLs.
+    barcode: str | None = Field(
+        default=None,
+        sa_column=Column("barcode", String(14), unique=True, index=True,
+                         nullable=True),
+    )
     # Embedding of name+description as a float32 BLOB (sqlite-vector format).
     embedding: bytes | None = Field(
         default=None,

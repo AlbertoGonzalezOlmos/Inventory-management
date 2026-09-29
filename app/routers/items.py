@@ -8,6 +8,7 @@ from sqlmodel import Session, or_, select
 from app.database import VECTOR_OPTIONS, get_session
 from app.deps import get_current_user, require_staff
 from app.embeddings import embed_text, embed_text_blob, item_embedding_text, vec_to_blob
+from app.barcodes import normalize_gtin
 from app.models import Item, User, utcnow
 from app.schemas import ItemIn, ItemOut, ItemPatch, VectorSearchOut
 
@@ -18,13 +19,31 @@ router = APIRouter(prefix="/api/items", tags=["items"])
 def list_items(
     q: str = Query(default="", description="Search in name/description/SKU"),
     category: str = "",
+    barcode: str = Query(
+        default="",
+        description="Exact GTIN lookup (any EAN/UPC form; normalised first)",
+    ),
     limit: int = Query(default=24, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
-    """Paginated catalogue listing used by the scrollable frontend."""
+    """Paginated catalogue listing used by the scrollable frontend.
+
+    `barcode=` is the scanner/POS path: an exact match on the canonical
+    GTIN-14 after normalisation, so scanning a UPC-E finds the item filed
+    under its EAN-13. An invalid GTIN is a client error (422), not an empty
+    list — a misread must not masquerade as "product not in catalogue".
+    """
     statement = select(Item)
+    if barcode:
+        gtin = normalize_gtin(barcode)
+        if gtin is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"not a valid GTIN (bad check digit or length): {barcode!r}",
+            )
+        statement = statement.where(Item.barcode == gtin)
     if q:
         # Escape LIKE wildcards so q="%" or q="___" search literally instead
         # of matching every row.
@@ -35,6 +54,11 @@ def list_items(
                 Item.name.ilike(needle, escape="\\"),
                 Item.description.ilike(needle, escape="\\"),
                 Item.sku.ilike(needle, escape="\\"),
+                # Stored barcodes are canonical GTIN-14 (zero-padded), so a
+                # typed/scanned 13- or 12-digit form still substring-matches;
+                # a keyboard-mode scanner typing into the search box finds
+                # the item without any dedicated integration.
+                Item.barcode.ilike(needle, escape="\\"),
             )
         )
     if category:
@@ -151,6 +175,18 @@ def create_item(
     duplicate = session.exec(select(Item).where(Item.sku == payload.sku)).first()
     if duplicate:
         raise HTTPException(status.HTTP_409_CONFLICT, "SKU already exists")
+    if payload.barcode:
+        # Same-product guard: the GTIN is the global product identity, so a
+        # second entry under the same barcode is always a mistake (the scan
+        # that found it should have matched the existing item).
+        duplicate = session.exec(
+            select(Item).where(Item.barcode == payload.barcode)
+        ).first()
+        if duplicate:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Barcode already assigned to item {duplicate.sku}",
+            )
 
     item = Item(**payload.model_dump())
     blob = embed_text_blob(item_embedding_text(item.name, item.description))
@@ -168,9 +204,12 @@ def create_item(
     try:
         session.commit()
     except IntegrityError:
-        # Concurrent insert with the same SKU raced past the check above.
+        # Concurrent insert raced past the checks above (SKU or barcode).
         session.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "SKU already exists")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "SKU or barcode already exists (concurrent create)",
+        )
     session.refresh(item)
     return ItemOut.model_validate(item)
 
@@ -187,6 +226,17 @@ def update_item(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
 
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("barcode"):
+        duplicate = session.exec(
+            select(Item).where(
+                Item.barcode == changes["barcode"], Item.id != item_id
+            )
+        ).first()
+        if duplicate:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Barcode already assigned to item {duplicate.sku}",
+            )
     for field, value in changes.items():
         setattr(item, field, value)
 

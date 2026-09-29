@@ -237,3 +237,154 @@ def test_get_data_sends_reference_frame():
     _, scans = OPN2001(stream).get_data()
     assert stream.sent.hex().upper() == "0702009E3E"
     assert [s.barcode for s in scans] == ["EX-001"]
+
+
+# --- Raw-USB backend (pyusb path for WSL2 kernels without `opticon`) ---------
+#
+# The wire behaviour these tests pin comes from drivers/usb/serial/opticon.c
+# (fetched from kernel.org): writes are vendor control requests
+# (bmRequestType 0x41, bRequest 0x01, wValue=wIndex=0, frame as data stage);
+# bulk-in packets carry a 2-byte header (00 00 data / 00 01 CTS); open
+# sequence sends CONTROL_RTS(0) and RESEND_CTS_STATE(1).
+
+from scripts.opn2001 import (  # noqa: E402  (grouped with the section)
+    USB_BULK_PACKET_SIZE,
+    USB_CONTROL_RTS,
+    USB_RESEND_CTS_STATE,
+    USB_WRITE_REQUEST,
+    USB_WRITE_REQUEST_TYPE,
+    UsbStream,
+    find_linux_usb_devices,
+    parse_bulk_packet,
+)
+
+
+def test_usb_constants_match_kernel_driver():
+    # USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_INTERFACE
+    assert USB_WRITE_REQUEST_TYPE == 0x41
+    assert USB_WRITE_REQUEST == 0x01        # dr->bRequest in opticon_write
+    assert USB_CONTROL_RTS == 0x02          # CONTROL_RTS
+    assert USB_RESEND_CTS_STATE == 0x03     # RESEND_CTS_STATE
+    assert USB_BULK_PACKET_SIZE == 64       # full-speed bulk max packet
+
+
+def test_parse_bulk_packet_headers():
+    assert parse_bulk_packet(b"\x00\x00ABC") == ("data", b"ABC")
+    assert parse_bulk_packet(b"\x00\x01\x01") == ("cts", b"\x01")
+    assert parse_bulk_packet(b"\x00\x02XYZ") == ("unknown", b"\x00\x02XYZ")
+    assert parse_bulk_packet(b"\x00") == ("unknown", b"\x00")
+    assert parse_bulk_packet(b"") == ("unknown", b"")
+
+
+class _FakeTimeout(Exception):
+    pass
+
+
+class _FakeUsbError(Exception):
+    pass
+
+
+class _FakeEndpoint:
+    """Stands in for a pyusb endpoint: yields queued bulk packets."""
+
+    def __init__(self, packets):
+        self.packets = list(packets)
+        self.bEndpointAddress = 0x81
+
+    def read(self, size, timeout=None):
+        if not self.packets:
+            raise _FakeTimeout()
+        pkt = self.packets.pop(0)
+        assert len(pkt) <= size, "reader must request full-speed packet size"
+        return pkt
+
+
+class _FakeDevice:
+    def __init__(self):
+        self.ctrl_calls = []
+
+    def ctrl_transfer(self, bmRequestType, bRequest, wValue, wIndex, data,
+                      timeout=None):
+        self.ctrl_calls.append((bmRequestType, bRequest, wValue, wIndex,
+                                bytes(data)))
+
+
+def _usb_stream_with(packets) -> UsbStream:
+    """A UsbStream whose __init__ (device discovery) is bypassed; only the
+    read/write paths under test are wired to the fakes."""
+    stream = UsbStream.__new__(UsbStream)
+    stream.dev = _FakeDevice()
+    stream.ep_in = _FakeEndpoint(packets)
+    stream.interface = 0
+    stream.timeout_ms = 1
+    stream.cts = None
+    stream._buf = b""
+    stream._timeout_exc = _FakeTimeout
+    stream._usb_error = _FakeUsbError
+    return stream
+
+
+def test_usb_write_is_one_vendor_control_request():
+    stream = _usb_stream_with([])
+    frame = build_frame(OP_INTERROGATE)
+    assert stream.write(frame) == len(frame)
+    assert stream.dev.ctrl_calls == [
+        (0x41, 0x01, 0, 0, frame),
+    ]
+
+
+def test_usb_read_strips_headers_spans_packets_and_tracks_cts():
+    # A 23-byte interrogate reply arrives split across bulk packets, with a
+    # CTS status packet interleaved — the protocol layer must never see the
+    # headers or the CTS noise.
+    payload = b"\x00" + struct.pack(">Q", 42) + b"RBBV1.00"
+    response = build_frame(0x06, payload)
+    chunks = [response[i:i + 7] for i in range(0, len(response), 7)]
+    packets = [b"\x00\x00" + c for c in chunks]
+    packets.insert(2, b"\x00\x01\x01")  # CTS went high mid-stream
+    stream = _usb_stream_with(packets)
+    info = OPN2001(stream).interrogate()
+    assert info["device_id"] == 42
+    assert info["firmware"] == "RBBV1.00"
+    assert stream.cts is True
+
+
+def test_usb_read_timeout_returns_empty_like_pyserial():
+    stream = _usb_stream_with([])
+    assert stream.read(5) == b""  # _read_exact turns this into ProtocolError
+
+
+# --- Detection helpers --------------------------------------------------------
+
+
+def test_find_linux_usb_devices_fake_sysfs(tmp_path):
+    root = tmp_path / "devices"
+    # The scanner, with a bound opticon tty:
+    dev = root / "1-3"
+    (dev / "1-3:1.0" / "tty").mkdir(parents=True)
+    (dev / "1-3:1.0" / "tty" / "ttyUSB0").mkdir()
+    (dev / "idVendor").write_text("065a\n")
+    (dev / "idProduct").write_text("0009\n")
+    (dev / "busnum").write_text("1\n")
+    (dev / "devnum").write_text("3\n")
+    # An unrelated device that must be ignored:
+    other = root / "1-4"
+    other.mkdir(parents=True)
+    (other / "idVendor").write_text("1234\n")
+    (other / "idProduct").write_text("5678\n")
+
+    found = find_linux_usb_devices(root=str(root))
+    assert len(found) == 1
+    assert found[0]["ttys"] == ["/dev/ttyUSB0"]
+    assert (found[0]["busnum"], found[0]["devnum"]) == (1, 3)
+
+
+def test_find_linux_usb_devices_no_tty_when_driver_missing(tmp_path):
+    # Enumerated but no tty bound (e.g. WSL2 kernel without CONFIG_USB_SERIAL_OPTICON):
+    root = tmp_path / "devices"
+    dev = root / "2-1"
+    (dev / "2-1:1.0").mkdir(parents=True)
+    (dev / "idVendor").write_text("065a\n")
+    (dev / "idProduct").write_text("0009\n")
+    found = find_linux_usb_devices(root=str(root))
+    assert len(found) == 1 and found[0]["ttys"] == []

@@ -35,8 +35,17 @@ batch against the catalogue in one go.
 | Battery | Internal Li-ion, charged over USB (~2.5 h for a full charge) |
 
 The sibling PID `065A:0001` belongs to the **OPR-2001 / NLV-1001 in keyboard
-mode** — a different beast (types scans as keystrokes). The OPN-2001 never
-emulates a keyboard; it only talks the serial protocol described in §4.
+mode** — a different beast (types scans as keystrokes). The OPN-2001 itself
+never emulates a keyboard; it only talks the serial protocol described in §4.
+
+Other Opticon PIDs you may meet on the same cable (all handled by this
+repo's tooling — `scripts/opn2001.py detect` tells them apart):
+
+| VID:PID | Personality | Tool |
+|---|---|---|
+| `065A:0009` | OPN-2001 vendor serial ("RBBV", this document) | `scripts/opn2001.py` |
+| `065A:A001` | **USB-HID keyboard mode** (M-10 family and other presentation scanners; bus-reported name "Opticon USB Barcode Reader") | `scripts/scanner_hid.py` (§3.5) |
+| `065A:A002` | USB-COM (CDC-ACM) mode of the same family — a plain serial line, *not* the RBBV protocol | see `feature/opticon-m10-scanner` branch docs |
 
 ---
 
@@ -105,6 +114,9 @@ line settings (needed by whichever program opens the port) are:
 
 ### 3.1 Linux — works out of the box
 
+*(Native Linux with a distro kernel, that is — **WSL2 is different**, see
+§3.4.)*
+
 The kernel has shipped a dedicated driver since 2008:
 `drivers/usb/serial/opticon.c` (maintained upstream with contributions from
 Opticon themselves). Its device table contains exactly one entry — the
@@ -145,6 +157,10 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="065a", ATTRS{idProduct}=="0009", \
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
+A ready-made rule covering every Opticon personality (tty, hidraw and the
+raw-USB nodes for `--backend usb`) ships as
+`scripts/udev/99-opticon-scanner.rules`.
+
 Kernel-driver details worth knowing (they explain occasional quirks):
 
 * The device has **no bulk-out endpoint** — host→scanner writes are sent as
@@ -181,6 +197,89 @@ Information* but not as a serial port. Practical options:
 (On other Opticon models that enumerate as standard CDC-ACM, macOS works out
 of the box — the OPN-2001's 2006-era vendor interface is the problem, not the
 protocol.)
+
+### 3.4 WSL2 — three layers, and how this repo handles each
+
+**This repository's machine is WSL2 (Ubuntu on Windows 11).** "Linux — works
+out of the box" (§3.1) does *not* apply unchanged; verified facts as of
+2026-09-29:
+
+1. **USB devices belong to the Windows host.** WSL2 only sees them after a
+   `usbipd-win` passthrough. Installed here via
+   `winget install --id dorssel.usbipd-win` (needs one UAC approval), then:
+   ```powershell
+   usbipd list                          # find the BUSID of 065a:0009
+   usbipd bind --busid <id>             # admin PowerShell, once per machine
+   usbipd attach --wsl --busid <id>     # after every replug / reboot
+   ```
+   `attach` is **not persistent**: re-run it after a reboot or unplug.
+2. **The stock WSL2 kernel has no `opticon` module**
+   (`CONFIG_USB_SERIAL_OPTICON is not set` in `/proc/config.gz`; the module
+   directory ships ch341/cp210x/ftdi/pl2303/… only). So even attached, the
+   scanner gets **no `/dev/ttyUSB*`** here, and the generic usb-serial driver
+   cannot substitute: the device has no bulk-out endpoint — the real driver
+   sends host→device data as *vendor control requests* (§3.1, `opticon.c`).
+   Two ways out, both supported:
+   * **Raw-libusb backend (recommended here)** — `scripts/opn2001.py
+     --backend usb` re-implements `opticon.c`'s behaviour in userspace with
+     pyusb: writes as control transfers (`bmRequestType 0x41`, `bRequest
+     0x01`, frame in the data stage), bulk-in reads with the 2-byte header
+     stripped (`00 00` data / `00 01` CTS), and the same open handshake
+     (RTS clear → halt clear → CTS-state request):
+     ```bash
+     uv run --with pyusb python scripts/opn2001.py --backend usb info
+     ```
+     Needs the device node accessible — install
+     `scripts/udev/99-opticon-scanner.rules` once (§3.1 explains the tty
+     variant of the same problem).
+   * **Custom WSL2 kernel** with `CONFIG_USB_SERIAL_OPTICON=m` (Microsoft
+     documents building one: "Build a custom Linux kernel for WSL2"). Works,
+     but recompiling a kernel to avoid an 80-line userspace backend is rarely
+     worth it.
+3. **Or skip WSL entirely**: install the Opticon driver on Windows (§3.2)
+   and run the same scripts there (`--port COMx`); `scan_intake.py` reads the
+   resulting `--json`/CSV from either side.
+
+**Device state log (this machine, 2026-09-29):** `scripts/opn2001.py detect`
+reported a USB device on root-hub port HS05 failing enumeration — Windows
+problem 43, *"Unknown USB Device (Device Descriptor Request Failed)"*
+(reported as `VID_0000&PID_0002` because the descriptor was never read). For
+an OPN-2001 that is the documented deeply-discharged-battery / charge-only-
+cable signature (§2.5, §7): the scanner charges from the same port, so leave
+it plugged in ≥ 30 min (steady **red** LED = charging) on a known-good
+**data** cable and re-plug. A second Opticon device on HS09 enumerated fine
+as `065A:A001` (USB-HID keyboard mode — §3.5), proving the cable/ports and
+tooling paths work.
+
+### 3.5 Opticon scanners in USB-HID keyboard mode (`065A:A001`)
+
+Presentation/corded Opticon scanners (M-10 family and others) ship from the
+factory in **USB-HID** mode by default: the OS sees a keyboard and each scan
+is "typed" into the focused window, terminated by Enter. That already works
+with zero integration against the SPA (the catalogue keyword search matches
+the `barcode` column, so typing a scanned GTIN into the search box finds the
+item). To capture scans **without window focus** — and to feed
+`scan_intake.py` — use `scripts/scanner_hid.py`, which reads the raw HID
+boot-keyboard reports:
+
+* **Windows/macOS**: `uv run --with hid python scripts/scanner_hid.py`
+  (hidapi claims the device from the OS keyboard driver while it runs).
+* **Linux/WSL2**: attach with usbipd as in §3.4, then
+  `uv run python scripts/scanner_hid.py` reads `/dev/hidraw*` with the
+  stdlib only (WSL2 stock kernel: `CONFIG_HIDRAW=y` ✓). The node is root-only
+  by default and WSL sessions have no seat, so the `uaccess` ACL never fires
+  — install `scripts/udev/99-opticon-scanner.rules` once (sudo) or run with
+  sudo.
+* Output is the same CSV (`timestamp,symbology,barcode`) or `--json` shape
+  as `opn2001.py read`, so intake doesn't care which device produced it:
+  ```bash
+  uv run python scripts/scanner_hid.py --count 10 \
+      | uv run python scripts/scan_intake.py --from-csv -
+  ```
+* To get the *bidirectional* protocol (and for the M-10: suffix/menu
+  control), scan the device's "USB COM Port" configuration label — it
+  re-enumerates as `065A:A002` (CDC-ACM), handled by the
+  `feature/opticon-m10-scanner` branch.
 
 ---
 
@@ -377,12 +476,24 @@ Subcommands:
 
 | Command | What it does |
 |---|---|
+| `detect` | Finds every Opticon device on this machine (sysfs/COM/PnP, incl. the Windows host from WSL2 via interop) and prints exactly what stands between it and a working connection; exit 0 = usable, 1 = found-but-blocked, 2 = not found. `--json` for scripts. |
 | `info` | Wakes the link; prints device id, firmware, scanner clock, scan count |
 | `time` | Reads the scanner clock |
 | `set-time [--datetime 2025-06-15T14:30:05]` | Sets the clock (default: now) |
 | `read [--json] [--clear-after]` | Downloads all scans as CSV (`timestamp,symbology,barcode`) or JSON; `--clear-after` wipes the scanner afterwards |
 | `clear [--yes]` | Deletes all scans (asks first) |
 | `param NAME [VALUE]` | Reads/writes a parameter by name (`volume`, `auto_clear`, …) or numeric id (`0x02`) |
+
+Global option `--backend {auto,serial,usb}` (default `auto`): `serial` uses
+the tty/COM port (pyserial); `usb` talks raw libusb (pyusb) — the WSL2 path
+from §3.4, and a fallback wherever the kernel driver is missing.
+
+Companion tools:
+
+| Tool | Role |
+|---|---|
+| `scripts/scanner_hid.py` | Live capture from Opticon scanners in USB-HID keyboard mode (`065A:A001`, §3.5) |
+| `scripts/scan_intake.py` | Classifies any of the above downloads against the catalogue: same item / new entry / misread (docs/barcodes.md §7) |
 
 Example session — a full stock-count round-trip:
 
@@ -418,31 +529,43 @@ Design rules the tool follows (matching this repo's script conventions):
 
 ## 6. Using the scanner with HCRM
 
-The OPN-2001 is a natural fit for the shop's stock counting, and needs **no
-server changes** to start being useful:
+Two catalogue identities coexist by design (docs/barcodes.md):
 
-1. **Label the stock** with Code 128 barcodes encoding the item **SKU**
-   (print from the table view's CSV/PDF export). The catalogue API's keyword
-   search (`GET /api/items?q=EX-001`) matches SKUs exactly.
-2. **Count**: walk the shop scanning items. Duplicates are meaningful (one
-   scan per physical unit) — leave "reject redundant" (`param reject_redundant
-   0`) off.
-3. **Download & reconcile** (staff or admin session):
+* **Retail products** carry their manufacturer's GTIN (EAN-13/UPC/…):
+  store it once in the item's `barcode` field (canonical GTIN-14; the API
+  normalises whatever form you submit and rejects duplicates with 409).
+  Scanning the product then identifies it **globally** — no label printing
+  needed.
+* **Stock without a retail barcode** gets the printed **Code 128 SKU label**
+  (export from the table view); its payload matches `sku` exactly.
+
+Counting round-trip:
+
+1. **Count**: walk the shop scanning items. Duplicates are meaningful (one
+   scan per physical unit) — leave "reject redundant" (`param
+   reject_redundant 0`) off.
+2. **Download & classify** (staff or admin session):
    ```bash
    uv run --with pyserial python scripts/opn2001.py read --json > /tmp/count.json
+   uv run python scripts/scan_intake.py --from-json /tmp/count.json
    ```
-   then aggregate `/tmp/count.json` per SKU and compare against the catalogue
-   (`GET /api/items?limit=100&offset=…`), applying corrections with
-   `PATCH /api/items/{id} {"stock": <counted>}`. The reconcile step is
-   intentionally not automated yet — see the note below.
+   The intake report groups the batch per unique code and applies the
+   same-item/new-item rules of docs/barcodes.md §7: known GTINs/SKUs get
+   their counted quantity; unseen valid GTINs are listed as **new entries**
+   (with number-system/region classification and a ready `POST /api/items`
+   skeleton); failed check digits are quarantined for re-scan. The
+   catalogue database is opened **read-only** — creating entries stays an
+   explicit staff action (API/UI).
+3. **Reconcile stock**: aggregate the same-item quantities and apply with
+   `PATCH /api/items/{id} {"stock": <counted>}` (a server-side
+   `POST /api/stock-count` endpoint remains future work).
 4. **Clear the scanner** only after the reconcile succeeded
    (`--clear-after`, or `clear --yes`).
 
-Future work (tracked, not implemented here): an `POST /api/stock-count`
-endpoint that accepts the JSON above and applies/audits the deltas
-server-side; an EAN/GTIN field on items so retail barcodes can be scanned
-instead of printed SKU labels; per-location counting (scan a location code
-first, then items — the OPN-2001 keeps scan order).
+Live (non-batch) scanners: an HID-mode Opticon (`065A:A001`) can be used
+with zero integration — the SPA search box accepts typed/scanned GTINs — or
+captured without focus via `scripts/scanner_hid.py | scripts/scan_intake.py
+--from-csv -` (§3.5).
 
 ---
 
@@ -451,6 +574,10 @@ first, then items — the OPN-2001 keeps scan order).
 | Symptom | Cause → fix |
 |---|---|
 | No `/dev/ttyUSB*` appears (Linux) | Check `lsusb` for `065a:0009`. If present but no tty: `sudo modprobe opticon` (driver may be a module); check `dmesg`. If the battery was deeply discharged, let it charge a few minutes first. |
+| Windows: **"Unknown USB Device (Device Descriptor Request Failed)"** (problem 43; `detect` shows it via the PnP probe) | The scanner never enumerated — it is *not talking to the host at all*. Almost always power/cable: deeply-discharged battery (leave on the cable ≥ 30 min; steady red LED = charging, §2.5) or a **charge-only mini-B cable** (swap for a known-good data cable). Re-plug afterwards; Windows re-enumerates automatically. |
+| WSL2: device attached via usbipd but still no tty | The stock WSL2 kernel has no `opticon` module (§3.4) — use `--backend usb` (pyusb). |
+| WSL2: `usbipd attach` says no device / lost after reboot | `attach` is not persistent — re-run it; after `bind` survives, `attach` does not. `usbipd list` shows STATE=Shared/Attached. |
+| `/dev/hidraw0` permission denied (HID-mode scanner) | Root-only node; WSL sessions have no seat so the uaccess ACL never applies — install `scripts/udev/99-opticon-scanner.rules` (§3.5) or run with sudo. |
 | `Permission denied: '/dev/ttyUSB0'` | Your user is not in `dialout` — see §3.1 (group membership or udev rule), then re-login. |
 | Windows: no COM port | Install the Opticon USB driver (manual §4) *before* connecting; check Device Manager. |
 | First command times out | The first frame also **wakes** the link — retry once; make sure the battery isn't empty (red LED while on cable). |
@@ -485,10 +612,21 @@ first, then items — the OPN-2001 keeps scan order).
 * **OPN-Device-application** (C-Rodg) — Electron/Node implementation; source
   of the raw wake/clear/get-data/get-time/power-down frames, the 23-byte
   interrogate reply layout and the symbology-ID table.
-* **`usb.ids`** — the `065a:0009` / `065a:0001` distinction (§1).
+* **`usb.ids`** — the `065a:0009` / `065a:0001` distinction (§1). The HID
+  (`065a:a001`) and CDC-ACM (`065a:a002`) personalities are not in usb.ids;
+  identified from the live device's bus-reported name ("Opticon USB Barcode
+  Reader") and the M-10 documentation on the `feature/opticon-m10-scanner`
+  branch.
+* **usbipd-win** (dorssel/usbipd-win README) — the `list` / `bind` /
+  `attach --wsl` workflow and its non-persistence (§3.4).
+* **This machine's kernel config** (`/proc/config.gz`, WSL2
+  6.18.33.2-microsoft-standard) — `CONFIG_USB_SERIAL_OPTICON is not set`,
+  `CONFIG_HIDRAW=y`: the reason §3.4 exists.
 * **unix.stackexchange.com #235070** — the `opticon` kernel driver binding on
   other Opticon models (the `new_id` trick is *not* needed for the OPN-2001:
   its IDs are in the driver's table).
+
+Barcode numbering facts are sourced separately — see docs/barcodes.md §9.
 
 Every raw frame, the CRC-16 parameters and the timestamp layout stated in
 this document were additionally **re-derived and verified computationally**
