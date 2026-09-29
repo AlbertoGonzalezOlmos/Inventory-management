@@ -78,6 +78,25 @@ class LoginIn(BaseModel):
     password: str = Field(max_length=128)
 
 
+class QrLoginIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # The full badge payload ("HCRM1:<token>") as scanned; the raw token
+    # without prefix is also accepted (see app.qrbadge.parse_badge_payload).
+    token: str = Field(min_length=1, max_length=64)
+
+
+class QrBadgeOut(BaseModel):
+    """A freshly generated badge: the secret payload and its printable form.
+
+    The payload is returned exactly once — afterwards only its hash exists
+    server-side, so a lost badge means generating a new one (which revokes
+    the old one automatically).
+    """
+
+    payload: str
+    svg: str
+
+
 class ChangePasswordIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     current_password: str = Field(min_length=1, max_length=128)
@@ -92,6 +111,7 @@ class UserOut(BaseModel):
     email: str
     role: str
     must_change_password: bool = False
+    has_qr_badge: bool = False
     created_at: datetime
 
 

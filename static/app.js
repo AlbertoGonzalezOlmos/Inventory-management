@@ -18,7 +18,7 @@ async function api(path, { method = "GET", body } = {}) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
-  if (res.status === 401 && !path.startsWith("/auth/login")) {
+  if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/qr-login")) {
     // Token expired or revoked: clear the session and force re-login.
     // (Login failures also return 401 but must surface their own message.)
     localStorage.removeItem(TOKEN_KEY);
@@ -82,6 +82,7 @@ Vue.createApp({
       // auth forms
       loginForm: { email: "", password: "" },
       loginError: "",
+      badgeCode: "",  // filled by the Opticon M-10 (USB-HID types it + Enter)
       registerForm: { name: "", email: "", password: "" },
       registerError: "",
 
@@ -123,6 +124,10 @@ Vue.createApp({
       pwForm: { current_password: "", new_password: "" },
       pwError: "",
       pwOk: false,
+      badgeSvg: "",      // freshly generated own badge (inline SVG markup)
+
+      // members: badge being displayed for printing
+      memberBadge: null,  // { id, name, email, svg }
 
       toast: "",
     };
@@ -272,6 +277,34 @@ Vue.createApp({
       }
     },
 
+    async doBadgeLogin() {
+      // QR badge login: the scanner (USB-HID mode) types the badge payload
+      // into the field and its CR suffix submits the form.
+      this.loginError = "";
+      this.busy = true;
+      try {
+        const data = await api("/auth/qr-login", {
+          method: "POST", body: { token: this.badgeCode.trim() },
+        });
+        this.badgeCode = "";
+        this.saveSession(data);
+        if (data.user.must_change_password) {
+          location.hash = "#/account";
+          this.route = "#/account";
+          this.showToast("Please change your password before continuing");
+        } else {
+          location.hash = "#/catalogue";
+          this.route = "#/catalogue";
+          this.reloadItems();
+          this.loadCategories();
+        }
+      } catch (e) {
+        this.loginError = e.message;
+      } finally {
+        this.busy = false;
+      }
+    },
+
     async doRegister() {
       this.registerError = "";
       this.busy = true;
@@ -325,6 +358,39 @@ Vue.createApp({
         this.pwError = e.message;
       } finally {
         this.busy = false;
+      }
+    },
+
+    async generateMyBadge() {
+      // (Re)generate the own QR login badge; replaces any existing one.
+      this.busy = true;
+      try {
+        const data = await api("/auth/qr-badge", { method: "POST" });
+        this.badgeSvg = data.svg;
+        if (this.user) {
+          this.user.has_qr_badge = true;
+          localStorage.setItem(USER_KEY, JSON.stringify(this.user));
+        }
+        this.showToast("QR badge generated — print it and keep it safe");
+      } catch (e) {
+        this.showToast(e.message);
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    async revokeMyBadge() {
+      if (!confirm("Revoke your QR badge? It will stop working immediately.")) return;
+      try {
+        await api("/auth/qr-badge", { method: "DELETE" });
+        this.badgeSvg = "";
+        if (this.user) {
+          this.user.has_qr_badge = false;
+          localStorage.setItem(USER_KEY, JSON.stringify(this.user));
+        }
+        this.showToast("QR badge revoked");
+      } catch (e) {
+        this.showToast(e.message);
       }
     },
 
@@ -686,6 +752,31 @@ Vue.createApp({
       try {
         await api("/members/" + member.id, { method: "DELETE" });
         this.showToast("Account deleted");
+        this.loadAdminData();
+      } catch (e) {
+        this.showToast(e.message);
+      }
+    },
+
+    async showMemberBadge(member) {
+      // Generate/replace the member's badge and show it for printing.
+      try {
+        const data = await api("/members/" + member.id + "/qr-badge", { method: "POST" });
+        this.memberBadge = {
+          id: member.id, name: member.name, email: member.email, svg: data.svg,
+        };
+        this.loadAdminData();
+      } catch (e) {
+        this.showToast(e.message);
+      }
+    },
+
+    async revokeMemberBadge(member) {
+      if (!confirm(`Revoke the QR badge of ${member.name}?`)) return;
+      try {
+        await api("/members/" + member.id + "/qr-badge", { method: "DELETE" });
+        this.showToast("QR badge revoked for " + member.name);
+        if (this.memberBadge && this.memberBadge.id === member.id) this.memberBadge = null;
         this.loadAdminData();
       } catch (e) {
         this.showToast(e.message);

@@ -152,6 +152,21 @@ def _migrate_schema() -> None:
             )
             logger.info("Added items.barcode column (migration).")
 
+        # Same shape as the two above, and the same reason: create_all() never
+        # ALTERs a table it finds, so a column added to the model does not
+        # reach an existing database. Only the SHA-256 hash of a badge is
+        # stored (users.qr_badge_hash), exactly like session tokens.
+        if "qr_badge_hash" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN qr_badge_hash TEXT"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_users_qr_badge_hash "
+                "ON users (qr_badge_hash)"
+            )
+            logger.info("Added users.qr_badge_hash column (migration).")
+
+
 WEAK_SCAN_KEY = "well_known_password_scan"
 
 

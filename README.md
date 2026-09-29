@@ -159,7 +159,13 @@ that adds SIMD-accelerated vector search:
   stdlib-first serial driver (`app/scanner/`, pyserial optional) plus a
   bridge script that looks scanned barcodes up in the catalogue and can
   adjust stock (`scripts/scanner_bridge.py`).
-- Full setup, protocol and troubleshooting guide: **`docs/opticon-m10.md`**.
+- **QR badge login**: every account can get a printable QR badge
+  (`HCRM1:…` payload) that logs in instead of email+password — scan it into
+  the badge field on the login page (USB-HID mode) or exchange it via
+  `POST /api/auth/qr-login` (bridge/kiosk). Badges are bearer credentials:
+  only the SHA-256 hash is stored, regenerating revokes the previous one.
+- Full setup, protocol, QR-badge and troubleshooting guide:
+  **`docs/opticon-m10.md`**.
 
 ## Project layout
 
@@ -174,8 +180,10 @@ that adds SIMD-accelerated vector search:
 │   ├── embeddings.py     # fastembed wrapper + float32 BLOB serialization
 │   ├── seed.py           # 12 example items + embedding backfill
 │   ├── scanner/          # Opticon M-10 driver (protocol, transport, m10)
+│   ├── qrbadge.py        # QR badge payloads + inline-SVG rendering
+│   ├── vendor/           # vendored pure-Python deps (Nayuki QR encoder, MIT)
 │   └── routers/
-│       ├── auth.py       # /api/auth/*      register, login, logout, me
+│       ├── auth.py       # /api/auth/*      register, login, QR badge, logout, me
 │       ├── items.py      # /api/items/*     browse, vector-search, input
 │       └── members.py    # /api/members/*   account management
 ├── static/               # Vue 3 SPA (index.html, app.js, style.css, vendored libs)
@@ -209,6 +217,11 @@ that adds SIMD-accelerated vector search:
 - `POST /api/auth/change-password` — self-service password change (verifies
   the current password, revokes all other sessions, clears
   `must_change_password`)
+- `POST /api/auth/qr-login` — log in with a QR badge (`HCRM1:…` payload or
+  raw token) → token; `POST`/`DELETE /api/auth/qr-badge` — generate/replace
+  (returns payload + printable SVG, exactly once) or revoke your own badge;
+  `POST`/`DELETE /api/members/{id}/qr-badge` — staff issue/revoke badges for
+  members (admin accounts: admins only)
 - `GET /api/healthz` — liveness probe:
   `{ok, vector, embeddings, insecure_dev_admin, pbkdf2_iterations}`. The
   extension check is cached at startup (never re-probed under load), the model

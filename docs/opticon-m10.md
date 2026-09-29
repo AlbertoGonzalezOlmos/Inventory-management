@@ -1,8 +1,8 @@
 # Opticon M-10 — connection & interaction guide
 
 How to connect the **Opticon M-10** 2D presentation scanner to a computer and
-integrate it with HCRM (this repository ships a driver in `app/scanner/` and a
-ready-made bridge in `scripts/scanner_bridge.py`).
+integrate it with HCRM (this repository ships a driver in `app/scanner/`, a
+ready-made bridge in `scripts/scanner_bridge.py`, and QR-badge login — §9).
 
 **Sources** (all retrieved from Opticon; see "References" at the bottom):
 
@@ -38,9 +38,13 @@ itself can be configured into two personalities:
 
 | Interface | What it looks like to the PC | Bidirectional? | Use it for |
 |---|---|---|---|
-| **USB-HID** (keyboard) | A keyboard; scans are "typed" wherever the cursor is | ❌ host → scanner not possible | Zero-integration data entry (click a field, scan) |
+| **USB-HID** (keyboard) | A keyboard; scans are "typed" wherever the cursor is | ❌ host → scanner not possible | Zero-integration data entry (click a field, scan) — incl. QR-badge login (§9) |
 | **USB-COM** (VCP, CDC-ACM) | A virtual serial port (`COMx` / `/dev/ttyACM0`) | ✅ full command channel | **HCRM integration (recommended)** |
 | **RS-232C** (DB9, external PSU) | A real serial port | ✅ full command channel | Legacy/POS hardware, long cable runs |
+
+USB VID/PID identifies the personality: HID keyboard = **065A:A001**,
+USB-COM = **065A:A002** (handy for checking the mode from the OS without
+scanning anything).
 
 Factory defaults (Specifications Manual §18): RS-232C line = **9600 bps, 8 data
 bits, no parity, 1 stop bit, no handshaking**; data suffix = **CR**; read mode
@@ -49,9 +53,9 @@ bits, no parity, 1 stop bit, no handshaking**; data suffix = **CR**; read mode
 
 > To switch the USB personality (or restore defaults) you scan the appropriate
 > configuration sheet: the wiki's *M-10* page links "USB COM Port" / "USB
-> Keyboard (HID)" / "RS232" sheets, and §6.1 below gives the factory-default
+> Keyboard (HID)" / "RS232" sheets, and §4.2 below gives the factory-default
 > label. For anything more advanced use the **Universal Menu Book** or
-> **OptiConfigure** (§6.2).
+> **OptiConfigure** (§7).
 
 ## 3. Physical setup
 
@@ -71,6 +75,21 @@ bits, no parity, 1 stop bit, no handshaking**; data suffix = **CR**; read mode
      open the port without root:
      `sudo usermod -aG dialout "$USER"` (log out/in afterwards).
    - **macOS**: appears as `/dev/tty.usbmodem*`.
+   - **WSL (Windows Subsystem for Linux)**: USB serial devices are *not*
+     visible inside WSL by default. Either run the bridge on the Windows
+     side (`py -m pip install pyserial`, then `python scripts\scanner_bridge.py`
+     against the `COMx` port), or attach the device into WSL with
+     [usbipd-win](https://learn.microsoft.com/windows/wsl/connect-usb):
+     `usbipd list` → `usbipd bind --busid <BUSID>` →
+     `usbipd attach --wsl --busid <BUSID>` → `/dev/ttyACM0` appears.
+
+> **Field report (this checkout's dev machine, Windows):** the connected
+> M-10 enumerates as `HID\VID_065A&PID_A001` ("HID Keyboard Device") — i.e.
+> it is in **USB-HID mode**, no `COMx` port appears. That is fine for
+> QR-badge login and catalogue-search scanning (§9). To use the driver and
+> bridge on this unit, first scan the *USB COM Port* configuration sheet
+> (wiki link in §10 references): the device re-enumerates as `065A:A002`
+> and, after Opticon's driver install, shows up as a `COMx` port.
 
 ### RS-232C
 
@@ -212,6 +231,17 @@ same item concurrently can lose an increment. If that becomes a real
 deployment mode, add a dedicated `POST /api/items/{id}/stock-adjust`
 endpoint with SQL-side arithmetic.
 
+## 6a. Bridge behaviour with QR badges
+
+Since the QR-login feature (§9), the bridge treats scans whose payload
+starts with `HCRM1:` specially: instead of a catalogue lookup it exchanges
+the badge for a session via `POST /api/auth/qr-login` and prints the
+resulting session token (honouring `--json`). A rejected badge is reported
+and the bridge keeps listening. This covers headless/kiosk setups where
+the scanned credential must reach the API without a browser field to type
+into; for an interactive PC, USB-HID + the login-page badge field (§9) is
+the simpler path.
+
 ## 7. Configuring the scanner itself
 
 1. **Restore defaults** first when in doubt: scan the factory-default label
@@ -244,8 +274,77 @@ UPC/EAN/Code 39/Code 128).
 | Commands time out | Scanner is in USB-HID mode (no command channel), or the host opened the wrong port. |
 | Driver won't install on Windows | FIPS mode enabled blocks Opticon's USB driver (Opticon's own note on the wiki). |
 | `Z1`/`Z2` rejected (ESC) | Command not executable in current state — e.g. trigger disabled config; restore defaults and retry. |
+| Badge scan logs nobody in | Badge was revoked/rotated, or never generated → issue a fresh one (§9.2). A scan of an *item* barcode in the login field also fails — only `HCRM1:` payloads are badges. |
+| Badge scan opens a Google/search page | A phone camera or a scanner in HID mode typed the payload into the wrong window — the badge is not a URL by design; use the login-page badge field (§9.3). |
 
-## 9. References
+## 9. QR badge login (scan-to-login)
+
+The M-10 reads QR codes natively (MDI3100 engine, 2D imager), so HCRM uses
+it for **passwordless login**: every account can have a printable **QR
+badge** that is scanned instead of typing email+password.
+
+### 9.1 The credential
+
+- Payload printed inside the QR: `HCRM1:<urlsafe-token>` — a versioned
+  prefix (distinguishes badges from product barcodes; the bridge keys on
+  it, §6a) plus 256 bits of randomness (`secrets.token_urlsafe(32)`).
+- A badge is a **bearer credential, exactly like a password**: whoever
+  holds the printed code logs in as that account. Only the SHA-256 hash is
+  stored (`users.qr_badge_hash`, same treatment as session tokens), so the
+  raw payload is shown **exactly once** — at generation time — and a
+  database leak does not yield printable badges.
+- The QR is generated server-side with a vendored pure-Python encoder
+  (`app/vendor/qrcodegen.py`, Nayuki, MIT — the project installs offline,
+  so no new dependency) and returned as **inline SVG** (ECC level M,
+  scuff-tolerant; no PNG tooling needed, prints crisply at any size).
+
+### 9.2 Issuing a badge
+
+| Who | Endpoint / UI |
+|---|---|
+| Self-service | Account → *QR badge login*, or `POST /api/auth/qr-badge` (replace = rotate), `DELETE /api/auth/qr-badge` (revoke) |
+| Staff at the counter | Members table → *QR badge* (prints a card), or `POST /api/members/{id}/qr-badge` / `DELETE …/qr-badge` |
+
+Staff can manage badges for member/staff accounts but **never for admin
+accounts** (same rule as account edits); admins can manage anyone's.
+Regenerating a badge immediately invalidates the previous one — that is
+the rotation path for a lost or copied card. Deleting an account destroys
+its badge with it.
+
+### 9.3 Logging in with a badge
+
+**USB-HID mode (zero setup — how the dev machine's unit is configured):**
+the login page has a *QR badge* field under the password form. Click it
+(or tab to it), scan the badge: the scanner types `HCRM1:…` and its CR
+suffix submits the form. The frontend posts it to `POST /api/auth/qr-login`
+and stores the returned session exactly like a password login.
+
+**USB-COM / RS-232C mode:** the bridge handles it (§6a) —
+
+```bash
+uv run python scripts/scanner_bridge.py --email staff@shop.local
+# scan a badge → "[badge] logged in: Alice <alice@shop.local> (member)"
+#                 session token: <bearer token>
+```
+
+**API:** `POST /api/auth/qr-login {"token": "HCRM1:…"}` → the same
+`{token, user}` shape as `POST /api/auth/login` (raw token without the
+prefix is also accepted). 401 otherwise. A badge login for an account
+flagged `must_change_password` behaves like a password login: the session
+works, but only the password-change endpoints until the flag is cleared.
+
+### 9.4 Security notes
+
+- Badges are unguessable (256-bit), so the unauthenticated `qr-login`
+  endpoint carries no rate limit; do not "simplify" badges to short
+  numeric codes.
+- No user-enumeration channel: the lookup is by exact hash match and
+  failures are a uniform 401.
+- Treat badges physically like keys: print on demand, hand over privately,
+  revoke on loss. For shared/kiosk PCs, remember the session itself is the
+  normal 7-day bearer token — log out after use.
+
+## 10. References
 
 - M-10 product page — <https://wiki.opticonusa.com/techsupport/en/M-10>
 - M-10 datasheet — <https://files.opticonusa.com/Downloads/m10datasheet.pdf>
