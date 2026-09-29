@@ -1,0 +1,121 @@
+# CI — every artifact in the repo gates (PLAN.md item 10 / PLAN-v2 W7.1).
+#
+# Staging rationale: the browser gate is only meaningful once ui_check's console
+# detector is trustworthy (W2.3), and the script gates only became CI-safe once
+# the scripts self-host, report instead of raising, and never restore a password
+# (W3). A gate that cannot run must FAIL, never skip: ui_check exits 3 (no
+# browser) and 4 (browser found but its console detector is blind — e.g.
+# chrome-headless-shell, which emits zero :CONSOLE records), and both are red.
+#
+# The real 80 MB embedding model is kept out of the PR gate: semantic ranking is
+# exercised by the `e2e` job on schedule / manual dispatch, with the model cache
+# keyed on FASTEMBED_CACHE_PATH (fastembed defaults to $TMPDIR/fastembed_cache —
+# NOT ~/.cache/fastembed, so caching that path would silently never hit).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"        # weekly: the e2e job and dependency drift
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (forward + reverse order)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: suite
+        run: uv run pytest -q
+      # Order-independence is a claimed property, so it is checked, not assumed.
+      # The reversal is done in Python, not `tac` (GNU-only): on a macOS dev
+      # machine `tac` does not exist and the step would silently run the suite
+      # FORWARD while reporting success — a gate that cannot run must fail.
+      - name: suite in reverse node-id order
+        run: |
+          TESTS="$(uv run pytest --collect-only -q | grep '::' | \
+            uv run python -c 'import sys; print("\n".join(reversed(sys.stdin.read().splitlines())))')"
+          # An empty collection must fail the step, never degrade to a full
+          # forward-order run (or worse, a vacuous pass).
+          test -n "$TESTS"
+          uv run pytest -q $TESTS
+      - name: repo hygiene (no runtime DB, no *copy* artifacts)
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+          test -z "$(git ls-files | grep -E ' copy|^data/' || true)"
+
+  ui:
+    name: browser gate (ui_check)
+    needs: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # Full Chrome, NOT chrome-headless-shell: the shell build emits no console
+      # records, so the detector would be blind (ui_check then exits 4 by design).
+      - name: install a browser that can log console messages
+        run: npx --yes puppeteer browsers install chrome
+      - name: the parser is regression-tested without a browser
+        run: uv run pytest -q tests/test_ui_check_parser.py
+      - name: render the SPA and /docs in a real browser
+        run: uv run python scripts/ui_check.py --self-host
+
+  scripts:
+    name: load + smoke (self-hosted, degraded)
+    needs: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # Both scripts boot their own throwaway server on a scratch HCRM_DATA_DIR,
+      # so they cannot touch a deployment and need no credentials here.
+      - name: availability (concurrent logins must not lock the DB)
+        run: uv run python scripts/load_test.py --fast-hashing --logins 30 --reads 10
+      # --fast-hashing is explicit and printed: the PR gate trades real PBKDF2
+      # cost for speed; the e2e job below runs the smoke test at full cost.
+      - name: end-to-end, degraded (no model -> semantic checks skipped)
+        run: uv run python scripts/smoke_test.py --allow-degraded --fast-hashing
+      - name: the checkout is still clean afterwards
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+
+  e2e:
+    name: end-to-end with real embeddings
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: resolve the model cache directory
+        run: |
+          echo "FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-/tmp/fastembed_cache}" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: fastembed-bge-small-en-v1.5
+      - name: semantic ranking + item lifecycle against a real model
+        run: uv run python scripts/smoke_test.py --model BAAI/bge-small-en-v1.5
+      - name: availability at full PBKDF2 cost
+        run: uv run python scripts/load_test.py --logins 60 --reads 20

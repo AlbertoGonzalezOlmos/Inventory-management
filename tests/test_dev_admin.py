@@ -154,20 +154,24 @@ print("JSON>>" + json.dumps(out))
     assert out["new_pw"] == 200, out
 
 
-def test_dev_admin_not_flagged_by_the_default_password_guard():
-    """`_flag_default_password` must never block the dev credential."""
+def test_dev_admin_not_flagged_by_the_well_known_password_scan():
+    """The broadened scan (N5) must never block the dev credential."""
     snippet = """
 import json
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 from app.database import engine
-from app.main import _flag_default_password, app
+from app.main import WEAK_SCAN_KEY, _flag_well_known_passwords, app
+from app.models import AppMeta
 
 out = {}
 with TestClient(app) as c:
     with Session(engine) as s:
-        _flag_default_password(s)
-        _flag_default_password(s)
+        # force the (marker-gated) scan to actually run, twice
+        s.delete(s.get(AppMeta, WEAK_SCAN_KEY)); s.commit()
+        _flag_well_known_passwords(s)
+        s.delete(s.get(AppMeta, WEAK_SCAN_KEY)); s.commit()
+        _flag_well_known_passwords(s)
     tok = c.post("/api/auth/login",
                  json={"email": "admin", "password": "admin"}).json().get("token")
     out["login"] = 200 if tok else 401

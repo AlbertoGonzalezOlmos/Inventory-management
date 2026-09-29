@@ -9,9 +9,21 @@ from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
 from app.models import AuthToken, User, utcnow
 from app.schemas import AuthOut, ChangePasswordIn, LoginIn, RegisterIn, UserOut
-from app.security import DUMMY_HASH, hash_password, new_token, token_hash, verify_password
+from app.security import (
+    DUMMY_HASH,
+    hash_password,
+    is_well_known_password,
+    new_token,
+    token_hash,
+    verify_password,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+WELL_KNOWN_DETAIL = (
+    "That password is published in this project's documentation/seed code; "
+    "choose another one"
+)
 
 
 def _issue_token(session: Session, user: User) -> AuthOut:
@@ -29,6 +41,8 @@ def _issue_token(session: Session, user: User) -> AuthOut:
 
 @router.post("/register", response_model=AuthOut, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterIn, session: Session = Depends(get_session)):
+    if is_well_known_password(payload.password):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
     email = payload.email.strip().lower()
     existing = session.exec(select(User).where(User.email == email)).first()
     if existing:
@@ -87,6 +101,21 @@ def change_password(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Current password is incorrect"
         )
+    # A no-op "change" must not count as a change: accepting new == current
+    # returned 204 AND cleared must_change_password, so a staff-issued
+    # temporary password could be kept indefinitely — B9 through the back door
+    # (the account stays on a password somebody else chose and knows).
+    if payload.new_password == payload.current_password:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "New password must differ from the current password",
+        )
+    # Rejecting the published defaults here is what closes the loop: without it,
+    # `change-password changeme -> changeme` returned 204 AND cleared
+    # must_change_password, leaving a well-known credential with full API access
+    # until the next boot (PLAN-v2 §0 B10).
+    if is_well_known_password(payload.new_password):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False  # self-service change satisfies the flag
     session.add(user)

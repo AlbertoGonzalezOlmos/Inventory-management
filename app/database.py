@@ -52,6 +52,14 @@ def _load_vector_extension(dbapi_connection, _connection_record):
     dbapi_connection.execute("PRAGMA journal_mode=WAL")
     dbapi_connection.execute("PRAGMA busy_timeout=5000")
 
+    # NOTE: PRAGMA foreign_keys stays OFF (SQLite's default), deliberately.
+    # auth_tokens.user_id declares a foreign key, but enforcing it on an
+    # *existing* database means rebuilding the table (SQLite cannot add a FK to a
+    # live table), and the only path that deletes a user
+    # (DELETE /api/members/{id}) deletes that user's tokens first. Decision D4 in
+    # PLAN-v2: document the limitation now, rebuild only if a real orphan path
+    # appears (PLAN-v2 §8.2 N7).
+
     dbapi_connection.enable_load_extension(True)
     dbapi_connection.load_extension(_extension_path())
     dbapi_connection.enable_load_extension(False)

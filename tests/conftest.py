@@ -40,6 +40,10 @@ ADMIN_DEFAULT_PASSWORD = "changeme"
 # The admin_token fixture performs the mandatory first password change; this
 # is the password the rest of the suite uses for the seeded admin.
 ADMIN_PASSWORD_AFTER_CHANGE = "admin-password-1"
+# create_user performs the mandatory change for staff-issued accounts; this is
+# the password those users end up with (change-password rejects a no-op
+# "change" to the same password, so it genuinely differs from password123).
+USER_PASSWORD_AFTER_CHANGE = "user-password-1"
 
 
 def get_db_path() -> str:
@@ -154,7 +158,14 @@ def unique_email() -> str:
 
 
 def create_user(client, admin_token: str, role: str = "member", email: str | None = None):
-    """Create a user via the API and return (user_dict, token)."""
+    """Create a user via the API and return (user_dict, token).
+
+    Staff-issued accounts are flagged must_change_password (W4.2), so the helper
+    immediately performs that change — to USER_PASSWORD_AFTER_CHANGE, a genuinely
+    different password, because change-password rejects new == current (a no-op
+    "change" must not clear the flag). change-password spares the presenting
+    session, so the returned token stays valid.
+    """
     email = email or unique_email()
     r = client.post(
         "/api/members",
@@ -162,6 +173,15 @@ def create_user(client, admin_token: str, role: str = "member", email: str | Non
         headers=auth(admin_token),
     )
     assert r.status_code == 201, r.text
+    assert r.json()["must_change_password"] is True, r.json()  # W4.2
     login = client.post("/api/auth/login", json={"email": email, "password": "password123"})
     assert login.status_code == 200, login.text
-    return r.json(), login.json()["token"]
+    token = login.json()["token"]
+    cleared = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "password123",
+              "new_password": USER_PASSWORD_AFTER_CHANGE},
+        headers=auth(token),
+    )
+    assert cleared.status_code == 204, cleared.text
+    return r.json(), token

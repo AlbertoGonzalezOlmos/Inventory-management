@@ -19,9 +19,11 @@ import threading
 from fastapi.testclient import TestClient
 
 from app.main import app
-from tests.conftest import auth, create_user
+from tests.conftest import USER_PASSWORD_AFTER_CHANGE, auth, create_user
 
 ROUNDS = 5
+BARRIER_TIMEOUT = 60   # a racer that never arrives must fail, not hang the suite
+JOIN_TIMEOUT = 120
 
 
 def _concurrently(fn_a, fn_b):
@@ -34,6 +36,12 @@ def _concurrently(fn_a, fn_b):
             results[key] = fn(barrier)
         except Exception as exc:  # pragma: no cover - surfaced as a failure
             results[key] = ("EXC", repr(exc))
+        finally:
+            # A worker that dies (or hangs) before the barrier must not leave its
+            # peer in Barrier.wait() forever: that hung the whole suite, with the
+            # main thread blocked in join() behind it. abort() releases the peer
+            # with BrokenBarrierError, which surfaces as a normal failure.
+            barrier.abort()
 
     threads = [
         threading.Thread(target=run, args=("a", fn_a)),
@@ -42,7 +50,8 @@ def _concurrently(fn_a, fn_b):
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(timeout=JOIN_TIMEOUT)
+        assert not t.is_alive(), f"worker thread still running after {JOIN_TIMEOUT}s"
     return results["a"], results["b"]
 
 
@@ -87,14 +96,21 @@ def test_concurrent_cross_demotion_never_leaves_zero_admins(client, admin_token)
         def demote(token, target_id):
             def go(barrier):
                 # Own TestClient -> own DB session; barrier maximises overlap.
-                with TestClient(app) as c:
-                    barrier.wait()
-                    r = c.patch(
-                        f"/api/members/{target_id}",
-                        json={"role": "member"},
-                        headers=auth(token),
-                    )
-                    return r.status_code, r.text
+                # Deliberately NOT `with TestClient(app)`: entering the context
+                # manager runs the whole lifespan (_startup) in every worker
+                # thread, and concurrent create_all()/trigger DDL/seed/app_meta
+                # writes are not thread-safe (finding F — it hung the suite once
+                # W4.1 added a write to _startup). A bare TestClient serves
+                # requests without the lifespan, which is all a racer needs; the
+                # session-scoped _client fixture has already started things up.
+                c = TestClient(app)
+                barrier.wait(timeout=BARRIER_TIMEOUT)
+                r = c.patch(
+                    f"/api/members/{target_id}",
+                    json={"role": "member"},
+                    headers=auth(token),
+                )
+                return r.status_code, r.text
             return go
 
         sa, sb = _concurrently(demote(a_token, b["id"]), demote(b_token, a["id"]))
@@ -105,14 +121,16 @@ def test_concurrent_cross_demotion_never_leaves_zero_admins(client, admin_token)
         assert statuses[0] == 200, (round_no, sa, sb)
         assert statuses[1] in (400, 401, 403), (round_no, sa, sb)
         assert _admin_count(client, actor_token) == 1, (round_no, sa, sb)
-        # The survivor administers the next round.
+        # The survivor administers the next round. Both racers came from
+        # create_user, so both now have USER_PASSWORD_AFTER_CHANGE.
         survivor = next(
             u["email"]
             for u in client.get("/api/members", headers=auth(actor_token)).json()
             if u["role"] == "admin"
         )
         actor_token = client.post(
-            "/api/auth/login", json={"email": survivor, "password": "password123"}
+            "/api/auth/login",
+            json={"email": survivor, "password": USER_PASSWORD_AFTER_CHANGE},
         ).json()["token"]
 
 
@@ -129,10 +147,11 @@ def test_concurrent_cross_delete_never_leaves_zero_admins(client, admin_token):
 
         def delete(token, target_id):
             def go(barrier):
-                with TestClient(app) as c:
-                    barrier.wait()
-                    r = c.delete(f"/api/members/{target_id}", headers=auth(token))
-                    return r.status_code, r.text
+                # No lifespan in worker threads — see the note in the demote racer.
+                c = TestClient(app)
+                barrier.wait(timeout=BARRIER_TIMEOUT)
+                r = c.delete(f"/api/members/{target_id}", headers=auth(token))
+                return r.status_code, r.text
             return go
 
         sa, sb = _concurrently(delete(a_token, b["id"]), delete(b_token, a["id"]))
@@ -143,12 +162,13 @@ def test_concurrent_cross_delete_never_leaves_zero_admins(client, admin_token):
         # Loser: 400 (trigger) or 401 (the actor's own account was deleted).
         assert statuses[1] in (400, 401, 403), (round_no, sa, sb)
         assert _admin_count(client, actor_token) == 1, (round_no, sa, sb)
-        # The survivor administers the next round.
+        # The survivor administers the next round (see the note above).
         survivor = next(
             u["email"]
             for u in client.get("/api/members", headers=auth(actor_token)).json()
             if u["role"] == "admin"
         )
         actor_token = client.post(
-            "/api/auth/login", json={"email": survivor, "password": "password123"}
+            "/api/auth/login",
+            json={"email": survivor, "password": USER_PASSWORD_AFTER_CHANGE},
         ).json()["token"]

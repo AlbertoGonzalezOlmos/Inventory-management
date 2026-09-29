@@ -1,11 +1,5 @@
 # HCRM — Shop Catalogue & Members
 
-> ⚠ **Known-stale sections (round 5):** this document still describes some
-> pre-round-5 behaviour — the `BEGIN IMMEDIATE` last-admin claim (the DB triggers
-> enforce it now), the "strict" CSP wording, and offline `/docs`. The rewrite is
-> tracked as W6.1 in `PLAN-v2.md` (§1 lists every stale claim). Until then, trust
-> `PLAN-v2.md` over this file where they disagree.
-
 Barebones infrastructure for a shop: staff input items into a catalogue, members
 create accounts, browse the catalogue (keyword **and AI semantic search**), build
 a purchase list, and explore the item data in a table view with export/analysis.
@@ -25,10 +19,17 @@ a purchase list, and explore the item data in a table view with export/analysis.
 Roles: **member** (browse + purchase list), **staff** (input/edit items, create
 member accounts, table view), **admin** (everything, incl. deleting accounts).
 Staff can never modify admin accounts or grant the admin role, and the **last
-remaining admin cannot be demoted or deleted** — enforced at two levels: the
-API checks run inside `BEGIN IMMEDIATE` transactions (no check-then-write
-race), and database triggers on `users` reject any UPDATE/DELETE that would
-leave zero admins, even for hand-written SQL.
+remaining admin cannot be demoted or deleted**. That invariant is enforced by
+**database triggers** on `users`, which reject any UPDATE/DELETE that would leave
+zero admins — even for hand-written SQL, and without any check-then-write race
+(SQLite serialises writers, and a trigger's `WHEN` subquery is evaluated at write
+time). The API checks run first only to produce friendly 400s.
+
+> Do **not** "fix" this with a global `BEGIN IMMEDIATE` connection hook: an
+> earlier revision did exactly that and turned every request — reads included —
+> into a write-lock holder, producing an unauthenticated DoS ("database is
+> locked" 500s) under concurrent load. `app/database.py` documents the incident
+> and `tests/test_concurrency.py` + `scripts/load_test.py` guard it.
 
 ## Quick start (Linux)
 
@@ -40,26 +41,43 @@ leave zero admins, even for hand-written SQL.
 ```
 
 Then open http://localhost:8000 — no database server to start: everything is
-embedded in `data/hcrm.db`. To expose the server on your network:
-`HCRM_HOST=0.0.0.0 ./scripts/run.sh` (only do this on a trusted network).
+embedded in `data/hcrm.db`. `run.sh` prints the database it is about to open and
+warns when that is live data; use `HCRM_SCRATCH=1 ./scripts/run.sh` for a
+throwaway database when experimenting. To expose the server on your network:
+`HCRM_HOST=0.0.0.0 ./scripts/run.sh` (only do this on a trusted network, and
+never with the dev admin credential enabled — see below).
+
+Back the database up with `scripts/backup_db.sh`: it checkpoints the WAL first
+and then verifies the copy. **Never copy `data/hcrm.db` alone** — with WAL
+enabled the main file can be behind the database, so a bare copy silently rolls
+back to an older schema/passwords.
 
 On first run the app seeds:
 
-- **dev admin (testing/debugging, owner directive "until further notice"):**
-  username `admin`, password `admin`, full admin access, not flagged for a
-  password change. It exists while `HCRM_DEV_ADMIN` is on (**the default this
-  round**) and is announced at startup and by `/api/healthz`
-  (`insecure_dev_admin: true`). `scripts/run.sh` refuses to bind a non-loopback
-  address while it is on unless you set `HCRM_ALLOW_INSECURE_BIND=1`. Turn the
-  whole thing off with `HCRM_DEV_ADMIN=0`.
+- **the dev admin (testing/debugging, owner directive "until further notice"):**
+  username `admin`, password `admin`, full admin access, not flagged. It exists
+  while `HCRM_DEV_ADMIN` is on (**the default**), is announced at startup and by
+  `/api/healthz` (`insecure_dev_admin: true`), and `run.sh` refuses a
+  non-loopback bind because of it. Turn it off with `HCRM_DEV_ADMIN=0`.
 - a default admin: `admin@shop.local` / `changeme` ← the account is
   **blocked from the API until you change it** (first login redirects to
-  Account → Change password; only logout/me work before that)
+  Account → Change password; only logout/me work before that). No endpoint will
+  accept `changeme` or `admin` as a *new* password.
 - 12 example items (SKUs `EX-001`…`EX-012`) with embeddings, so semantic
   search and the table view can be tested immediately.
 
+> **Upgrading an existing database:** the first boot adds the
+> `must_change_password` column and the `app_meta` table, invalidates every
+> existing session (tokens are stored as SHA-256 hashes now, so old plaintext
+> tokens simply stop matching — everyone logs in once more), and blocks any
+> account whose password is one this repo publishes until it is changed. That
+> last part looks like an outage if nobody announced it: back up first
+> (`scripts/backup_db.sh`), then expect a forced password change.
+
 > The embedding model (`BAAI/bge-small-en-v1.5`, 384 dims, local & offline) is
-> downloaded on first use (~80 MB) and cached.
+> downloaded on first use (~80 MB) and cached in `$FASTEMBED_CACHE_PATH` — which
+> defaults to **`/tmp/fastembed_cache`**, so a tmp-cleaner wipes it and the next
+> boot re-downloads. Set `FASTEMBED_CACHE_PATH` to a stable path to avoid that.
 
 ## Configuration
 
@@ -72,8 +90,10 @@ On first run the app seeds:
 | `HCRM_EMBED_RETRY_SECONDS` | `60` | after a model load failure, retry at most this often (a transient network blip must not disable semantic search until restart) |
 | `HCRM_DEV_ADMIN` | `1` (**this round**) | seed/ensure the well-known dev admin `admin`/`admin`. `0` restores the secure default (`admin@shop.local`/`changeme`, blocked until changed) |
 | `HCRM_ALLOW_INSECURE_BIND` | unset | let `scripts/run.sh` bind a non-loopback `HCRM_HOST` while `HCRM_DEV_ADMIN` is on (trusted networks only) |
+| `HCRM_SCRATCH` | unset | `1` makes `run.sh` boot on a throwaway database instead of `./data` |
 | `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` for production |
 | `FASTEMBED_CACHE_PATH` | `$TMPDIR/fastembed_cache` | where the embedding model is cached — note this is `/tmp` by default, so a tmp-cleaner wipes it and the next boot re-downloads ~80 MB |
+| `HCRM_BROWSER` | auto | browser binary for `scripts/ui_check.py` (it probes each candidate and refuses to run with one that cannot log console messages) |
 
 ## Vector search with sqlite-vector
 
@@ -135,12 +155,19 @@ that adds SIMD-accelerated vector search:
 │       ├── auth.py       # /api/auth/*      register, login, logout, me
 │       ├── items.py      # /api/items/*     browse, vector-search, input
 │       └── members.py    # /api/members/*   account management
-├── static/               # Vue 3 SPA (index.html, app.js, style.css)
-├── data/                 # SQLite database (created at runtime)
+├── static/               # Vue 3 SPA (index.html, app.js, style.css, vendored libs)
+├── data/                 # SQLite database (runtime only — git-ignored)
 ├── scripts/
-│   ├── run.sh            # one-command startup
-│   ├── smoke_test.py     # end-to-end API test (run with server up)
-│   └── load_test.py     # availability check: concurrent logins must not lock the DB
+│   ├── run.sh            # one-command startup (prints the DB it will open;
+│   │                     # HCRM_SCRATCH=1 for a throwaway one)
+│   ├── backup_db.sh      # WAL-checkpoint-then-verify backup (never copy .db alone)
+│   ├── _hcrm.py          # shared script contract: self-hosting, credentials,
+│   │                     # reporting, no password restore
+│   ├── ui_check.py       # browser gate: renders the SPA + /docs in headless
+│   │                     # Chrome and fails on console errors / missing DOM
+│   ├── smoke_test.py     # end-to-end API test (self-hosts by default)
+│   └── load_test.py      # availability check: concurrent logins must not lock the DB
+├── tests/                # pytest suite (per-test fresh DB, fake embeddings)
 └── pyproject.toml        # uv-managed dependencies
 ```
 
@@ -152,10 +179,13 @@ that adds SIMD-accelerated vector search:
 - `POST /api/auth/change-password` — self-service password change (verifies
   the current password, revokes all other sessions, clears
   `must_change_password`)
-- `GET /api/healthz` — liveness probe: `{ok, vector, embeddings}`. The
-  extension check is cached at startup (never re-probed under load) and the
-  model state is reported without triggering a load
-  (`ready` / `failed` / `not_loaded`)
+- `GET /api/healthz` — liveness probe:
+  `{ok, vector, embeddings, insecure_dev_admin, pbkdf2_iterations}`. The
+  extension check is cached at startup (never re-probed under load), the model
+  state is reported without triggering a load (`ready` / `failed` /
+  `not_loaded`), `insecure_dev_admin` exposes the dev credential mode, and
+  `pbkdf2_iterations` is there so a load test's latency budget can be read
+  against the hashing cost it was measured at
 - `GET /api/items?q=&category=&limit=&offset=` — paginated keyword listing
   (LIKE wildcards `%`/`_` in `q` are escaped and matched literally)
 - `GET /api/items/vector-search?q=&category=&limit=&offset=` — **semantic
@@ -182,11 +212,23 @@ Sessions & passwords:
 - Bearer tokens are stored in the DB as **SHA-256 hashes** — a leaked
   database file does not yield usable sessions. (Tokens issued before this
   change stop matching: everyone re-logs-in once.)
-- Accounts flagged `must_change_password` (seeded default admin, admin-issued
-  resets) are blocked from the API (403) until they change it via
-  `/api/auth/change-password` — enforced server-side, not just in the UI.
+- Accounts flagged `must_change_password` are blocked from the API (403) until
+  they change it via `/api/auth/change-password` — enforced server-side, not just
+  in the UI. Accounts get flagged when they are **created by staff or an admin**
+  (the UI calls it a "Temporary password"), when an admin **resets** their
+  password, and at boot for any account still using a password this repo
+  publishes.
+- **Passwords published by this repo are rejected as new passwords** (`changeme`,
+  and `admin` — the latter is also below the 8-character minimum, so the schemas
+  refuse it first). Without that rule, an admin reset to `changeme` returned 200
+  and a self-service `changeme → changeme` change returned 204 *while clearing
+  the flag*, leaving a published credential with full API access.
 
-Interactive docs: http://localhost:8000/docs
+Interactive docs: http://localhost:8000/docs — they load swagger-ui from the
+jsdelivr CDN, so `/docs` needs network access even though the SPA does not, and
+they are exempt from the CSP for that reason. Set `HCRM_DOCS=0` to disable
+`/docs`, `/redoc` and `/openapi.json` entirely (recommended for a deployment).
+Vendoring swagger-ui locally is a tracked issue.
 
 ## Security notes
 
@@ -197,10 +239,35 @@ Interactive docs: http://localhost:8000/docs
   `/api/healthz` reports `insecure_dev_admin`, and startup logs a SECURITY
   warning. Set `HCRM_DEV_ADMIN=0` for any deployment, and see the tracked item
   for making the well-known password un-settable via the API (W4.1).
-- All responses carry baseline hardening headers (`X-Content-Type-Options`,
-  `X-Frame-Options`, `Referrer-Policy`, and a strict CSP: scripts are
-  same-origin only — everything is vendored; inline style *attributes* are
-  allowed for Vue's reactive `:style` bindings).
+- Every response carries baseline hardening headers (`X-Content-Type-Options`,
+  `X-Frame-Options`, `Referrer-Policy`) — including 500s, which need an explicit
+  exception handler because an exception propagates straight through
+  `BaseHTTPMiddleware`. The CSP is:
+
+  ```
+  default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline';
+  img-src 'self' data: https:; connect-src 'self'; object-src 'none';
+  base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  ```
+
+  **This CSP is not "strict", and `'unsafe-eval'` is a real cost.** The frontend
+  deliberately uses Vue's *full* build with an in-DOM template (no build step),
+  so the runtime compiler emits `new Function(...)` — which `script-src 'self'`
+  alone forbids. A policy without `'unsafe-eval'` was shipped once and blanked the
+  entire SPA (`v-cloak` stayed on an emptied `#app`). `'unsafe-eval'` means an
+  attacker who can inject script can also run it, so the CSP's XSS value is
+  largely limited to *loading* foreign scripts. The endgame — precompiled render
+  functions with `vue.runtime.global.prod.js`, which removes `'unsafe-eval'` — is
+  a tracked issue; it needs a Node build step, which this project deliberately
+  avoids. `style-src 'unsafe-inline'` is for Vue's reactive `:style` bindings
+  (the analysis bar chart), not for scripts.
+- The docs routes (`/docs`, `/redoc`, `/openapi.json`) are **exempt** from the
+  CSP because swagger-ui comes from jsdelivr plus an inline bootstrap script. The
+  exemption is bounded (`/docs` and paths under it, never `/docs.html`), and
+  `HCRM_DOCS=0` removes the endpoints altogether.
+- Any change to the CSP or to the frontend must be verified with
+  `scripts/ui_check.py` — a real headless browser, not `curl -I`. Twice, a CSP
+  change was declared verified from headers alone while the UI was dead.
 - There is no built-in login rate limiting; put the app behind a reverse
   proxy and throttle there, e.g. nginx:
 
@@ -220,36 +287,73 @@ Interactive docs: http://localhost:8000/docs
 ## Testing
 
 ```bash
-uv run pytest                        # unit/API test suite (per-test fresh DB,
-                                     # fake embeddings — fast and offline)
+uv run pytest                          # per-test fresh DB + fake embeddings:
+                                       # fast, offline, order-independent
 
-./scripts/run.sh &                   # or another terminal
-uv run python scripts/smoke_test.py  # end-to-end test with real embeddings
+# Browser gate (real headless Chrome; renders the SPA and /docs):
+uv run python scripts/ui_check.py --self-host      # boots + tears down its own server
+uv run python scripts/ui_check.py --base http://127.0.0.1:8000
 
-# once you changed the default admin password:
-HCRM_ADMIN_PASSWORD=<new> uv run python scripts/smoke_test.py
+# End-to-end against a live server. Both scripts SELF-HOST a throwaway server by
+# default, so they cannot touch a real deployment:
+uv run python scripts/smoke_test.py --allow-degraded          # no model: semantic checks skipped
+uv run python scripts/smoke_test.py --model BAAI/bge-small-en-v1.5   # full, ~80 MB once
+uv run python scripts/load_test.py                            # 60 logins + 20 reads
 
-# availability regression check (concurrent logins must not lock the DB):
-uv run python scripts/load_test.py
+# Against an existing server you must opt in AND supply credentials:
+HCRM_ADMIN_USERNAME=... HCRM_ADMIN_PASSWORD=... \
+    uv run python scripts/load_test.py --base http://host:8000 --force
+
+scripts/backup_db.sh                   # WAL-checkpoint-then-verify backup
 ```
 
-The pytest suite covers the privilege model (staff cannot touch admin
-accounts, last-admin protection including the SQL-level trigger backstop and
-**concurrent** demotion/delete races), auth/session handling (hashed token
-storage, must-change-password enforcement, self-reset takeover rejection),
-password change and reset, validation (unknown fields, explicit nulls,
-LIKE-wildcard escaping), embedding-outage behaviour and cooldown retry, and
-vector search. The smoke test covers semantic search ranking, listing,
-auto-embedding on create/update, and permissions against a live server. The
-load test asserts 60 concurrent bogus logins + 20 concurrent reads produce
-zero 5xx and sub-second read latency (regression test for the global
-BEGIN IMMEDIATE incident).
+`ui_check.py` exits 0 on pass, 1 on a check failure, 2 when the target is
+unreachable, 3 when no browser is found and **4 when a browser is found but
+cannot log console messages** (e.g. `chrome-headless-shell`). CI must treat 3 and
+4 as failures, never as skips: a browser gate that silently detects nothing is
+worse than no gate.
+
+The scripts never restore a password. If an account had to change its password to
+proceed, the run reports that final state (and `--json` carries it) and leaves it
+— an earlier "restore the default afterwards" step re-armed `changeme` with the
+must-change flag cleared, i.e. the verification tooling made the server *less*
+safe than it found it.
+
+The pytest suite covers the privilege model (staff cannot touch admin accounts,
+last-admin protection incl. the SQL-level trigger backstop and **concurrent**
+demotion/delete races), auth and sessions (hashed token storage,
+must-change-password enforcement, self-reset takeover rejection), the password
+policy (published passwords rejected on every write path, staff-issued accounts
+flagged, the marker-gated boot scan), validation (unknown fields, explicit nulls,
+LIKE-wildcard escaping), embedding-outage behaviour and the single-flight
+background retry, vector search, security headers (CSP shape, docs exemption
+bound, 500s), the dev-admin mode and its bind guard, the backup/run scripts, the
+ui_check console parser (fixture-based, no browser needed), and the two
+verification scripts' contract (exit codes, no-restore, no crashes, never
+touching `./data`).
+
+## Tracked issues (decided, deliberately not implemented)
+
+| Issue | Status / cost |
+|---|---|
+| **Remove `'unsafe-eval'` from the CSP** | Needs `vue.runtime.global.prod.js` + precompiled render functions, i.e. a Node build step — against the project's no-build philosophy. Until then the CSP cannot stop injected script from running. |
+| **Vendor swagger-ui** (`swagger-ui-bundle.js` 1.59 MB + `swagger-ui.css` 186 KB) | Would make `/docs` work offline and let it carry a CSP (`script-src 'self' 'sha256-…'`). Today `/docs` needs the jsdelivr CDN and is CSP-exempt. |
+| **Login rate limiting** | Not built in; use the nginx snippet above. |
+| **`POST /api/auth/register` enumeration oracle** | Reveals whether an email is taken (409). Accepted trade-off for a shop signup page. |
+| **Tokens in `localStorage`** | Exfiltratable by any script that runs — which `'unsafe-eval'` makes easier. HttpOnly cookies + CSRF tokens would fix it and change the API contract. |
+| **Refresh tokens / session expiry UX** | Sessions simply expire after 7 days. |
+| **Server-side checkout** | The purchase list is client-side only (`requestPurchase()` is a placeholder). |
+| **Admin password reset uses `prompt()`** | The temporary password is typed and shown in plaintext; it should use the existing modal with `type=password`. |
+| **`PRAGMA foreign_keys` is OFF** | `auth_tokens.user_id` is declarative only; enforcing it needs a table rebuild. The only user-deleting path removes tokens first. |
+| **Quantized ANN scans** (`vector_quantize`) | Exact `vector_full_scan` is comfortable to ~100k items; see the measurements above. |
 
 ## Next steps (barebones placeholders)
 
 - Real checkout/order endpoint for the purchase list (currently client-side only)
 - Refresh tokens / proper session expiry handling
 - Image uploads (only URLs are supported now)
-- Quantized ANN scans (`vector_quantize`) for very large catalogues
 - Server-side streaming exports for very large tables
-- Production deployment: reverse proxy (nginx/caddy) + HTTPS
+- Production deployment: reverse proxy (nginx/caddy) + HTTPS, `HCRM_DEV_ADMIN=0`,
+  `HCRM_DOCS=0`
+- CI (`.github/workflows/ci.yml`): pytest → ui_check → load/smoke, each stage
+  gated on the previous one's tooling being trustworthy

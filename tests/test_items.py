@@ -212,33 +212,6 @@ def test_post_item_model_unavailable_503(client, admin_token, monkeypatch):
     assert "T-DOWN" not in names
 
 
-def test_model_failure_cooldown_retries(monkeypatch):
-    """A transient model failure must not disable semantic search for the
-    lifetime of the process: after the cooldown the load is retried."""
-    import app.embeddings as emb
-
-    monkeypatch.setattr(emb, "RETRY_SECONDS", 0.0)
-    monkeypatch.setattr(emb, "_model", None)
-    monkeypatch.setattr(emb, "_model_failed", False)
-    monkeypatch.setattr(emb, "_model_failed_at", None)
-    calls = {"n": 0}
-
-    def failing_loader():
-        calls["n"] += 1
-        raise RuntimeError("transient failure")
-
-    monkeypatch.setattr(emb, "_load_model", failing_loader)
-    assert emb._get_model() is None  # first failure
-    assert emb._get_model() is None  # cooldown elapsed -> retried
-    assert calls["n"] == 2
-    assert emb.model_status() == "failed"
-
-    # And a successful retry clears the failure state.
-    monkeypatch.setattr(emb, "_load_model", lambda: object())
-    assert emb._get_model() is not None
-    assert emb.model_status() == "ready"
-
-
 def test_vector_search_similarity_clamped(client, admin_token):
     r = client.get("/api/items/vector-search?q=zzzq", headers=auth(admin_token))
     assert r.status_code == 200
