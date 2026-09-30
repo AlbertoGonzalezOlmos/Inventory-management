@@ -1,0 +1,28 @@
+# Opticon barcode scanners — device-node permissions (all personalities).
+#
+# Install once (needs sudo; the rules survive reboots and usbipd re-attaches):
+#   sudo cp scripts/udev/99-opticon-scanner.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   then re-plug / re-attach the device (usbipd detach + attach on WSL2).
+#
+# GROUP=plugdev matches stock Ubuntu/Debian WSL images (the default user is
+# already a member; verify with `id`). On other distros use GROUP="dialout"
+# or GROUP="users" as appropriate.
+#
+# Covers:
+#  * tty subsystem    — /dev/ttyUSB* for the OPN-2001 (opticon usb-serial
+#                       driver) and /dev/ttyACM* for CDC-ACM scanners
+#  * hidraw subsystem — /dev/hidraw* for HID-keyboard-mode scanners
+#                       (scripts/scanner_hid.py)
+#  * usb subsystem    — /dev/bus/usb/... nodes so a raw-libusb backend (pyusb)
+#                       can claim the device without root — needed on hosts
+#                       whose kernel has no driver for the personality in use
+#
+# One vendor-wide file on purpose: it is installed by hand with sudo, so a
+# second file would mean a second install step and two rules that can drift.
+# The vendor ID is the layer that owns these nodes; which PID means what is
+# the hardware map's job (scripts/opticon_detect.py, docs/opticon-hardware.md).
+
+SUBSYSTEM=="tty",    ATTRS{idVendor}=="065a", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="065a", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb",    ATTRS{idVendor}=="065a", MODE="0664", GROUP="plugdev"
