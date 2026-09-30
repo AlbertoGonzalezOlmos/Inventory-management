@@ -42,9 +42,15 @@ itself can be configured into two personalities:
 | **USB-COM** (VCP, CDC-ACM) | A virtual serial port (`COMx` / `/dev/ttyACM0`) | ✅ full command channel | **HCRM integration (recommended)** |
 | **RS-232C** (DB9, external PSU) | A real serial port | ✅ full command channel | Legacy/POS hardware, long cable runs |
 
-USB VID/PID identifies the personality: HID keyboard = **065A:A001**,
-USB-COM = **065A:A002** (handy for checking the mode from the OS without
-scanning anything).
+USB VID/PID identifies the personality, so you can check the mode from the OS
+without scanning anything. **USB-COM = `065A:A002`** is documented by Opticon
+(Specifications Manual §18.5). The HID personality reports **`065A:A001`** on
+this project's machine, but `A001` appears in *no* public Opticon document we
+could find (§18.4 lists no PID), so treat "A001 = the M-10 in HID mode" as an
+observation, not a specification — `docs/opticon-hardware.md` §1 records the
+claim and its provenance, `scripts/opticon_detect.py` carries it as
+`confirmed: False`, and §3 below gives the one hardware step that settles it.
+Scan the personality you actually have, not the one you assume.
 
 Factory defaults (Specifications Manual §18): RS-232C line = **9600 bps, 8 data
 bits, no parity, 1 stop bit, no handshaking**; data suffix = **CR**; read mode
@@ -75,21 +81,30 @@ bits, no parity, 1 stop bit, no handshaking**; data suffix = **CR**; read mode
      open the port without root:
      `sudo usermod -aG dialout "$USER"` (log out/in afterwards).
    - **macOS**: appears as `/dev/tty.usbmodem*`.
-   - **WSL (Windows Subsystem for Linux)**: USB serial devices are *not*
-     visible inside WSL by default. Either run the bridge on the Windows
-     side (`py -m pip install pyserial`, then `python scripts\scanner_bridge.py`
-     against the `COMx` port), or attach the device into WSL with
-     [usbipd-win](https://learn.microsoft.com/windows/wsl/connect-usb):
-     `usbipd list` → `usbipd bind --busid <BUSID>` →
-     `usbipd attach --wsl --busid <BUSID>` → `/dev/ttyACM0` appears.
+   - **WSL (Windows Subsystem for Linux)**: USB devices are *not* visible
+     inside WSL by default — they belong to the Windows host until a
+     `usbipd-win` passthrough (`bind` once, `attach --wsl` after every
+     replug/reboot). The full three-layer story, the device-node permissions
+     and this machine's dated state log are in **`docs/opticon-hardware.md`
+     §2**; run `uv run python scripts/opticon_detect.py` to see which layer is
+     failing. Once attached, `cdc_acm` gives you `/dev/ttyACM0` and the bridge
+     runs inside WSL as on native Linux. Alternatively run it on the Windows
+     side (`py -m pip install pyserial`, then
+     `python scripts\scanner_bridge.py` against the `COMx` port).
 
-> **Field report (this checkout's dev machine, Windows):** the connected
-> M-10 enumerates as `HID\VID_065A&PID_A001` ("HID Keyboard Device") — i.e.
-> it is in **USB-HID mode**, no `COMx` port appears. That is fine for
-> QR-badge login and catalogue-search scanning (§9). To use the driver and
-> bridge on this unit, first scan the *USB COM Port* configuration sheet
-> (wiki link in §10 references): the device re-enumerates as `065A:A002`
-> and, after Opticon's driver install, shows up as a `COMx` port.
+> **Field report (this project's dev machine, 2026-09-29):** the attached
+> Opticon unit enumerates as `HID\VID_065A&PID_A001` ("HID Keyboard Device")
+> — i.e. it is in **USB-HID mode**, so no `COMx`/`ttyACM*` port appears and
+> *this driver and bridge cannot talk to it as-is*. HID mode is fine for
+> QR-badge login and catalogue-search scanning (§9). Whether that unit is an
+> M-10 is the open question from §2: `A001` is not a documented Opticon PID.
+> **The experiment that settles both at once** — scan the *USB COM Port*
+> configuration sheet (wiki link in §10): if the device re-enumerates as
+> `065A:A002` and a `COMx`/`ttyACM*` port appears, it is an M-10, the bridge
+> works, and `docs/opticon-hardware.md` §1 can upgrade `A001` to
+> `confirmed`. Until then, receive from it with
+> `scripts/scanner_hid.py` (focus-free HID capture,
+> `docs/opticon-hardware.md` §3).
 
 ### RS-232C
 
@@ -204,9 +219,26 @@ API summary:
 
 ## 6. Using the bridge (`scripts/scanner_bridge.py`)
 
-Turns scans into catalogue actions on a running HCRM server. **Convention:
-put the product's barcode (EAN/UPC) in the item's `sku` field** — the bridge
-tries an exact SKU match first, then falls back to the first search hit.
+Turns scans into catalogue actions on a running HCRM server.
+
+> ⚠ **Two known defects in this bridge, both recorded in `REVIEW-m10.md` and
+> both fixed in a follow-up commit — read this before pointing it at live
+> stock.**
+>
+> * **P5 (identity)**: the original convention was "put the product's barcode
+>   (EAN/UPC) in the item's `sku` field", and the bridge tries an exact SKU
+>   match first, then **falls back to the first keyword-search hit**. The
+>   catalogue now has a proper home for a retail code — `items.barcode`
+>   (canonical GTIN-14, unique, EAN/UPC normalised on input, `GET
+>   /api/items?barcode=`), so filing a GTIN in `sku` is wrong: the same product
+>   scanned as UPC-E and as EAN-13 would become two SKUs, and a misread becomes
+>   a phantom SKU instead of a 422. Lookups belong on `app.barcodes` +
+>   `?barcode=`, with SKU equality kept only for genuinely opaque
+>   store-internal labels.
+> * **P1 (safety)**: that search fallback also feeds `--stock-in/--stock-out`,
+>   so a partial word or a mis-scan can adjust the stock of an *unrelated*
+>   item. Until the fix lands, never combine stock adjustment with a scan
+>   source you do not fully control.
 
 ```bash
 ./scripts/run.sh &                       # 1. start HCRM
@@ -267,10 +299,11 @@ UPC/EAN/Code 39/Code 128).
 | Symptom | Likely cause / fix |
 |---|---|
 | Nothing appears anywhere when scanning | Scanner is in USB-COM mode and nothing is reading the port (or auto-trigger sleep — move it/present a code). In HID mode scans go to the *focused window*. |
-| No `/dev/ttyACM0` on Linux | Scanner is still in USB-HID mode → scan the *USB COM Port* sheet. Check `dmesg \| grep cdc_acm`. |
-| `Permission denied` opening the port | Add user to `dialout`/`uucp` (§3), or run the bridge with sudo (not recommended). |
+| No `/dev/ttyACM0` on Linux | Scanner is still in USB-HID mode → scan the *USB COM Port* sheet. Check `dmesg \| grep cdc_acm`. On WSL2, also check the usbipd attach (`docs/opticon-hardware.md` §2). |
+| `Permission denied` opening the port | Add user to `dialout`/`uucp` (§3) or install `scripts/udev/99-opticon-scanner.rules` once (`docs/opticon-hardware.md` §4). Running the bridge with sudo is not recommended. |
+| The bridge opened a port but reads garbage | Wrong device: another Opticon personality is attached and the line settings differ (the OPN-2001 is 9600 **8O1**, this one 9600 **8N1**). Select by VID:PID `065A:A002` — `uv run python scripts/opticon_detect.py` (`docs/opticon-hardware.md` §1). |
 | Garbage characters / no frames | RS-232C line settings mismatch → 9600 8N1 no handshake, or `restore_factory_defaults()`. |
-| Scans arrive but "no catalogue match" | Item's `sku` doesn't hold the scanned barcode → set SKU to the EAN/UPC (§6). |
+| Scans arrive but "no catalogue match" | The bridge still matches the scan against `sku` (§6's original convention). The catalogue now has a proper `items.barcode` (canonical GTIN-14) with `GET /api/items?barcode=` and EAN/UPC normalisation, so filing the code in `barcode` is correct and the bridge's lookup is the thing that is behind — tracked as **P5** in `REVIEW-m10.md`. Do not file GTINs in `sku`: one product scanned as UPC-E and as EAN-13 would become two SKUs. |
 | Commands time out | Scanner is in USB-HID mode (no command channel), or the host opened the wrong port. |
 | Driver won't install on Windows | FIPS mode enabled blocks Opticon's USB driver (Opticon's own note on the wiki). |
 | `Z1`/`Z2` rejected (ESC) | Command not executable in current state — e.g. trigger disabled config; restore defaults and retry. |
@@ -318,6 +351,10 @@ the login page has a *QR badge* field under the password form. Click it
 (or tab to it), scan the badge: the scanner types `HCRM1:…` and its CR
 suffix submits the form. The frontend posts it to `POST /api/auth/qr-login`
 and stores the returned session exactly like a password login.
+
+**HID mode without a browser field** (kiosk, or capturing scans without window
+focus): `scripts/scanner_hid.py` reads the raw HID reports — see
+`docs/opticon-hardware.md` §3.
 
 **USB-COM / RS-232C mode:** the bridge handles it (§6a) —
 
