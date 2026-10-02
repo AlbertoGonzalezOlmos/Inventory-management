@@ -177,6 +177,59 @@ def test_repo_hygiene():
     assert _git("check-ignore", "-q", "data/hcrm.db-wal").returncode == 0
 
 
+def test_shipped_artifacts_never_name_a_git_branch():
+    """A shipped file must point at in-tree paths, not at unmerged branches.
+
+    This is the tripwire for the scanner-branch tangle: `scripts/opn2001.py`
+    and `docs/scanner-opn2001.md` shipped four operator-facing strings of the
+    form "see the `feature/…` branch docs". Merged into `main`, those
+    pointers resolve to nothing — a reader of `main` has no such branch, and
+    the file they are told to read does not exist there yet. Same class as a
+    dangling `§3.5` cross-reference, except it also leaks in-flight branch
+    topology into the product.
+
+    Process/history documents are exempt on purpose: `PLAN*.md`, `REVIEW*.md`
+    and `NOTES.md` exist to talk about the work, including its branches. The
+    slug must contain a separator, so ordinary prose ("the backup/run
+    scripts") is not a false positive.
+    """
+    if not _in_git_checkout():
+        pytest.skip("not a git checkout")
+    import re
+
+    pattern = re.compile(
+        r"\b(?:feature|archive|backup|hotfix|release|chore|refactor)"
+        r"/[A-Za-z0-9][A-Za-z0-9._]*[-_.][A-Za-z0-9._-]*")
+    exempt_prefixes = ("PLAN", "REVIEW", "NOTES")
+    # --cached --others --exclude-standard: everything that would be part of
+    # the next commit, including files this branch adds but has not committed
+    # yet. `git ls-files` alone silently skips those — which is exactly when a
+    # new script carrying a branch reference would slip through.
+    tracked = _git("ls-files", "--cached", "--others", "--exclude-standard").stdout.splitlines()
+    assert tracked, "git ls-files returned nothing"
+
+    offenders = []
+    for path in tracked:
+        if not path.startswith(("app/", "scripts/", "docs/", "static/", "tests/")) \
+                and path not in ("README.md",):
+            continue
+        if os.path.basename(path).startswith(exempt_prefixes):
+            continue
+        try:
+            text = open(os.path.join(REPO_ROOT, path), encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue  # binary asset (vendored JS, fonts): not prose
+        for n, line in enumerate(text.splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path}:{n}: {line.strip()[:100]}")
+
+    assert not offenders, (
+        "shipped artifacts reference a git branch instead of an in-tree path "
+        "(if the target is not merged yet, describe it without naming the "
+        "branch, and add the cross-link from the PR that owns the target):\n  "
+        + "\n  ".join(offenders))
+
+
 def test_no_database_artifacts_are_committed_in_history():
     """The rewritten history must stay clean; a re-added blob would be silent."""
     if not _in_git_checkout():

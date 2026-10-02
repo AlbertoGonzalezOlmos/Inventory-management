@@ -137,6 +137,20 @@ def _migrate_schema() -> None:
                 "ON auth_tokens (expires_at)"
             )
 
+        item_columns = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(items)")
+        }
+        if "barcode" not in item_columns:
+            # Canonical GTIN-14 of the retail barcode (nullable, unique).
+            # ADD COLUMN cannot carry the UNIQUE constraint, so it gets its
+            # own index; a duplicate would already be impossible in practice
+            # (the column starts all-NULL) but the index enforces it forever.
+            conn.exec_driver_sql("ALTER TABLE items ADD COLUMN barcode VARCHAR(14)")
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_items_barcode "
+                "ON items (barcode)"
+            )
+            logger.info("Added items.barcode column (migration).")
 
 WEAK_SCAN_KEY = "well_known_password_scan"
 
