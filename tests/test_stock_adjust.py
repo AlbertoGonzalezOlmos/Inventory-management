@@ -163,3 +163,43 @@ def test_concurrent_adjustments_lose_nothing(client, admin_token):
 
     final = client.get(f"/api/items/{item_id}", headers=auth(admin_token))
     assert final.json()["stock"] == 100 + THREADS * PER_THREAD
+
+
+def test_adjust_holds_exactly_one_pooled_connection(client, admin_token):
+    """Regression tripwire: the endpoint used to check out a *second*
+    connection for the guarded write while still holding the auth
+    dependency's, halving the pool's capacity for this route — measured on
+    the default QueuePool (5 + 10 overflow): 16 concurrent adjustments
+    saturated all 15 connections, and a 16th would block on the 30 s pool
+    timeout and 500. One request must hold one connection at a time.
+    """
+    from sqlalchemy import event
+
+    from app.database import engine
+
+    live = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def on_checkout(dbapi_conn, rec, proxy):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+
+    def on_checkin(dbapi_conn, rec):
+        nonlocal live
+        with lock:
+            live -= 1
+
+    item_id = _create_item(client, admin_token, "ADJ-POOL", stock=1)
+    event.listen(engine, "checkout", on_checkout)
+    event.listen(engine, "checkin", on_checkin)
+    try:
+        peak = 0
+        r = _adjust(client, admin_token, item_id, 1)
+        assert r.status_code == 200, r.text
+    finally:
+        event.remove(engine, "checkout", on_checkout)
+        event.remove(engine, "checkin", on_checkin)
+    assert peak == 1, f"stock-adjust held {peak} pooled connections; expected 1"

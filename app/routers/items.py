@@ -269,6 +269,7 @@ def adjust_stock(
     item_id: int,
     payload: StockAdjustIn,
     staff: User = Depends(require_staff),
+    session: Session = Depends(get_session),
 ):
     """Atomically add/remove stock — the scanner bridge's POS/receiving path.
 
@@ -297,6 +298,15 @@ def adjust_stock(
     # busy_timeout=5000, so a racing writer waits rather than fails. The
     # previous isolation level is restored before the connection goes back
     # to the pool, so the ORM is never affected.
+    # Release the connection the auth dependency used for its read *before*
+    # checking out the write connection. Without this the request holds two
+    # pooled connections at once, halving the pool's effective capacity for
+    # this endpoint (measured: QueuePool 5+10 → 16 concurrent adjustments
+    # saturated all 15, and the next one would block on the 30 s pool timeout
+    # and 500). The dependency teardown closes the session again afterwards;
+    # Session.close() is idempotent, and `staff` is not used past this point.
+    session.close()
+
     raw = engine.raw_connection()
     previous_isolation = raw.isolation_level
     try:
