@@ -174,3 +174,116 @@ def test_unreachable_server_raises_apierror_not_a_raw_traceback(monkeypatch):
     assert "cannot reach" in str(exc.value)
     assert not isinstance(exc.value, SystemExit)
     assert not isinstance(exc.value, urllib.error.URLError)
+
+
+# --- P2: the 401-retry (--relogin) --------------------------------------------
+#
+# The retry lived as a closure inside main() and was the one Phase-5 test the
+# M-10 review promised that never landed — it is the path every always-on
+# bridge exercises weekly, when the token outlives its 7-day TTL. It is now a
+# module-level function (call_with_relogin) with both collaborators injected.
+
+from scripts.scanner_bridge import badge_login, call_with_relogin  # noqa: E402
+import scripts.scanner_bridge as bridge  # noqa: E402
+
+
+def _failing_api(status, detail="expired"):
+    def call(path, method="GET", token=None, body=None):
+        raise ApiError(status, f"{method} {path}", detail)
+    return call
+
+
+def test_relogin_retries_once_with_the_fresh_token():
+    """401 + --relogin → one re-authentication, one retry, with the NEW token."""
+    calls = []
+
+    def api_call(path, method="GET", token=None, body=None):
+        calls.append(token)
+        if token == "STALE":
+            raise ApiError(401, f"{method} {path}", "expired")
+        return 200, {"ok": True}
+
+    result, token = call_with_relogin(
+        api_call, lambda: "FRESH", "/api/items", "STALE", relogin=True)
+    assert result == (200, {"ok": True})
+    assert token == "FRESH"
+    assert calls == ["STALE", "FRESH"]
+
+
+def test_without_relogin_a_401_is_just_an_error():
+    """Same 401 without --relogin: ApiError propagates, login is never called."""
+    relogins = []
+    with pytest.raises(ApiError) as exc:
+        call_with_relogin(
+            _failing_api(401), lambda: relogins.append(1) or "FRESH",
+            "/api/items", "STALE", relogin=False)
+    assert exc.value.status == 401
+    assert relogins == []
+
+
+def test_a_second_401_does_not_loop():
+    """If the fresh credentials are also rejected, the second 401 propagates —
+    exactly one retry, never an infinite re-login loop."""
+    calls = []
+
+    def api_call(path, method="GET", token=None, body=None):
+        calls.append(token)
+        raise ApiError(401, f"{method} {path}", "expired")
+
+    with pytest.raises(ApiError):
+        call_with_relogin(api_call, lambda: "FRESH", "/api/items", "STALE",
+                          relogin=True)
+    assert calls == ["STALE", "FRESH"]
+
+
+def test_non_401_errors_never_trigger_relogin():
+    """A 500/409 is a per-scan report, not a re-authentication trigger."""
+    relogins = []
+    with pytest.raises(ApiError) as exc:
+        call_with_relogin(
+            _failing_api(500, "database is locked"),
+            lambda: relogins.append(1) or "FRESH",
+            "/api/items", "STALE", relogin=True)
+    assert exc.value.status == 500
+    assert relogins == []
+
+
+# --- P2/§6a: badge scans are records, never fatal ------------------------------
+
+
+def test_a_badge_scan_is_exchanged_for_a_session(monkeypatch):
+    """badge_login posts the raw payload to /api/auth/qr-login and returns the
+    session token and user in a record — headless/kiosk login (guide §6a)."""
+    seen = {}
+
+    def fake_api(path, method="GET", token=None, body=None):
+        seen.update(path=path, method=method, body=body)
+        return 200, {"token": "S1", "user": {
+            "name": "Alice", "email": "alice@shop.local", "role": "member"}}
+
+    monkeypatch.setattr(bridge, "api", fake_api)
+    record = bridge.badge_login("HCRM1:abc123")
+    assert seen == {"path": "/api/auth/qr-login", "method": "POST",
+                    "body": {"token": "HCRM1:abc123"}}
+    assert record == {"code": "HCRM1:abc123", "badge_login": True,
+                      "user": {"name": "Alice", "email": "alice@shop.local",
+                               "role": "member"},
+                      "token": "S1"}
+
+
+def test_a_rejected_badge_is_a_record_not_an_exception(monkeypatch):
+    """An unknown/revoked badge is a failure record, so the bridge keeps
+    listening instead of dying on the scanner's reader thread."""
+    monkeypatch.setattr(bridge, "api", _failing_api(401, "unknown badge"))
+    record = bridge.badge_login("HCRM1:stale")
+    assert record["badge_login"] is False
+    assert record["code"] == "HCRM1:stale"
+    assert "401" in record["error"]
+
+
+def test_an_unreachable_server_during_badge_login_is_also_a_record(monkeypatch):
+    """Server down mid-shift: same contract — a record with the error."""
+    monkeypatch.setattr(bridge, "api", _failing_api(0, "cannot reach"))
+    record = bridge.badge_login("HCRM1:abc123")
+    assert record["badge_login"] is False
+    assert record["error"]

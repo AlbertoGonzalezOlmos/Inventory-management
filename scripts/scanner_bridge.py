@@ -153,6 +153,47 @@ def find_item(get, code, fuzzy=False, symbology=""):
     return None, None, analysis
 
 
+def call_with_relogin(api_call, login_call, path, token, method="GET",
+                      body=None, relogin=False):
+    """One API call, with the P2 contract: re-authenticate once on a 401.
+
+    Module-level and injected for the same reason ``find_item`` takes a
+    ``get``: the 401-retry path is exactly the one a token that outlives its
+    7-day TTL exercises every week, and it was previously untestable because
+    it lived as a closure inside ``main()``.
+
+    ``api_call`` is :func:`api`; ``login_call()`` performs a fresh login and
+    returns the new token. Returns ``(result, token)`` — ``result`` is
+    ``api_call``'s ``(status, payload)`` and ``token`` is the possibly
+    refreshed token, which the caller **must keep using**. A second 401 (the
+    fresh credentials were rejected too) propagates: one retry, never a loop.
+    """
+    try:
+        return api_call(path, method=method, token=token, body=body), token
+    except ApiError as exc:
+        if exc.status != 401 or not relogin:
+            raise
+        print("session rejected (401) — re-authenticating", file=sys.stderr)
+        new_token = login_call()
+        return (api_call(path, method=method, token=new_token, body=body),
+                new_token)
+
+
+def badge_login(code):
+    """Exchange a scanned QR badge for a session; return the record to emit.
+
+    A rejected badge (or an unreachable server) is a *record*, never an
+    exception: no scan of any kind may be able to kill an always-on bridge
+    (REVIEW-m10.md P2).
+    """
+    try:
+        _, authd = api("/api/auth/qr-login", method="POST", body={"token": code})
+    except ApiError as exc:
+        return {"code": code, "badge_login": False, "error": str(exc)}
+    return {"code": code, "badge_login": True,
+            "user": authd["user"], "token": authd["token"]}
+
+
 def describe_attached_opticon():
     """What the shared hardware map sees — used to explain a refusal to guess.
 
@@ -304,32 +345,17 @@ def main():
             verdict = record.get("verdict") or "no catalogue match"
             print(f"[{record['code']}] {verdict}", flush=True)
 
-    def badge_login(code):
-        """Exchange a scanned QR badge for a session; never kills the bridge."""
-        try:
-            _, authd = api("/api/auth/qr-login", method="POST", body={"token": code})
-        except ApiError as exc:
-            record = {"code": code, "badge_login": False, "error": str(exc)}
-        else:
-            record = {"code": code, "badge_login": True,
-                      "user": authd["user"], "token": authd["token"]}
-        emit(record)
-
     def call(path, method="GET", body=None):
         """api() with the P2 contract: one loud retry on 401 when --relogin."""
         nonlocal token
-        try:
-            return api(path, method=method, token=token, body=body)
-        except ApiError as exc:
-            if exc.status != 401 or not args.relogin:
-                raise
-            print("session rejected (401) — re-authenticating", file=sys.stderr)
-            token, _ = login()
-            return api(path, method=method, token=token, body=body)
+        result, token = call_with_relogin(
+            api, lambda: login()[0], path, token, method=method, body=body,
+            relogin=args.relogin)
+        return result
 
     def on_scan(code):
         if code.startswith(BADGE_PREFIX):
-            badge_login(code)
+            emit(badge_login(code))
             return
         record = {"code": code, "found": False, "match": None, "item": None}
         try:
