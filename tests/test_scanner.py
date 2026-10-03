@@ -430,3 +430,56 @@ def test_discover_raises_rather_than_guessing(monkeypatch):
     # …and the explicit opt-in does open it (the caller owns that risk):
     scanner = OpticonM10.discover(allow_any_port=True)
     assert scanner.port == "/dev/ttyUSB0"
+
+# --- P6: the POSIX transport restores what it found, and refuses to share -----
+
+
+@pytest.mark.skipif(os.name != "posix", reason="termios/flock transport is POSIX-only")
+def test_second_open_of_the_same_port_is_refused():
+    """Two bridges on one port interleave garbage and neither reports an error."""
+    import pty as _pty
+
+    from app.scanner.transport import open_serial_port
+
+    master, slave = _pty.openpty()
+    name = os.ttyname(slave)
+    os.close(slave)
+    try:
+        first = open_serial_port(name)
+        try:
+            with pytest.raises(SerialOpenError, match="already open"):
+                open_serial_port(name)
+        finally:
+            first.close()
+        # …and after a clean close the port is available again (the lock was
+        # released, not leaked with the descriptor):
+        second = open_serial_port(name)
+        second.close()
+    finally:
+        os.close(master)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="termios transport is POSIX-only")
+def test_close_restores_the_line_discipline():
+    """Leaving a port in raw mode outlives the process that set it."""
+    import pty as _pty
+    import termios
+
+    from app.scanner.transport import open_serial_port
+
+    master, slave = _pty.openpty()
+    name = os.ttyname(slave)
+    before = termios.tcgetattr(slave)
+    os.close(slave)
+    try:
+        port = open_serial_port(name)
+        port.close()
+        check = os.open(name, os.O_RDWR | os.O_NOCTTY)
+        try:
+            after = termios.tcgetattr(check)
+        finally:
+            os.close(check)
+        # iflag/oflag/lflag are what the transport zeroes to get raw mode.
+        assert (after[0], after[1], after[3]) == (before[0], before[1], before[3])
+    finally:
+        os.close(master)

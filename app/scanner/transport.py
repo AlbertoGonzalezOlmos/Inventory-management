@@ -102,6 +102,7 @@ class _PosixSerialPort:
     """Minimal stdlib serial port (termios + select), raw 8N1-style I/O."""
 
     def __init__(self, port, baudrate, data_bits, parity, stop_bits):
+        import fcntl
         import termios
 
         try:
@@ -109,8 +110,24 @@ class _PosixSerialPort:
         except OSError as exc:
             raise SerialOpenError(f"cannot open {port}: {exc}") from exc
         self.name = port
+        self._saved_attrs = None
         try:
+            # Exclusive open: two bridges fighting over one port produce
+            # interleaved garbage on the wire and neither reports an error
+            # (REVIEW-m10.md P6). Refuse the second one instead.
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise SerialOpenError(
+                    f"{port} is already open by another process "
+                    f"(flock refused: {exc.strerror})") from exc
+            except (NotImplementedError, AttributeError):  # pragma: no cover
+                pass  # platform without flock: keep the old behaviour
             attrs = termios.tcgetattr(self._fd)
+            # Restored on close(): leaving a port in raw mode outlives the
+            # process and confuses whatever opens it next (P6).
+            self._saved_attrs = [
+                list(a) if isinstance(a, list) else a for a in attrs]
             # Raw mode: no echo, no canonical processing, no CR/NL
             # translation, no signals — the scanner's bytes pass through
             # unchanged (this is what makes CR-suffixed frames parseable).
@@ -173,6 +190,21 @@ class _PosixSerialPort:
         return os.write(self._fd, data)
 
     def close(self) -> None:
+        # Restore the line discipline we found, then release the lock and the
+        # descriptor. Every step is best-effort: close() must not raise during
+        # teardown of a device that may already be gone.
+        if self._saved_attrs is not None:
+            try:
+                import termios
+                termios.tcsetattr(self._fd, termios.TCSANOW, self._saved_attrs)
+            except Exception:
+                pass
+            self._saved_attrs = None
+        try:
+            import fcntl
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
         try:
             os.close(self._fd)
         except OSError:
