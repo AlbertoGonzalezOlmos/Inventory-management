@@ -156,9 +156,13 @@ that adds SIMD-accelerated vector search:
 
 ### Barcode scanner (Opticon M-10)
 - Hardware integration for the Opticon M-10 2D presentation scanner:
-  stdlib-first serial driver (`app/scanner/`, pyserial optional) plus a
-  bridge script that looks scanned barcodes up in the catalogue and can
-  adjust stock (`scripts/scanner_bridge.py`).
+  stdlib-first serial driver (`app/scanner/`, pyserial optional — one reader
+  thread owns the port, so a scan interleaved with a command ACK is delivered,
+  not dropped) plus a bridge that matches scans by **exact identity**
+  (canonical GTIN, or exact SKU for opaque labels) and can adjust stock
+  (`scripts/scanner_bridge.py`). It never guesses: keyword matching is opt-in
+  and refused outright when combined with a stock adjustment, and it will not
+  open a serial port it has not verified as the M-10's `065A:A002`.
 - **QR badge login**: every account can get a printable QR badge
   (`HCRM1:…` payload) that logs in instead of email+password — scan it into
   the badge field on the login page (USB-HID mode) or exchange it via

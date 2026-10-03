@@ -221,24 +221,37 @@ API summary:
 
 Turns scans into catalogue actions on a running HCRM server.
 
-> ⚠ **Two known defects in this bridge, both recorded in `REVIEW-m10.md` and
-> both fixed in a follow-up commit — read this before pointing it at live
-> stock.**
->
-> * **P5 (identity)**: the original convention was "put the product's barcode
->   (EAN/UPC) in the item's `sku` field", and the bridge tries an exact SKU
->   match first, then **falls back to the first keyword-search hit**. The
->   catalogue now has a proper home for a retail code — `items.barcode`
->   (canonical GTIN-14, unique, EAN/UPC normalised on input, `GET
->   /api/items?barcode=`), so filing a GTIN in `sku` is wrong: the same product
->   scanned as UPC-E and as EAN-13 would become two SKUs, and a misread becomes
->   a phantom SKU instead of a 422. Lookups belong on `app.barcodes` +
->   `?barcode=`, with SKU equality kept only for genuinely opaque
->   store-internal labels.
-> * **P1 (safety)**: that search fallback also feeds `--stock-in/--stock-out`,
->   so a partial word or a mis-scan can adjust the stock of an *unrelated*
->   item. Until the fix lands, never combine stock adjustment with a scan
->   source you do not fully control.
+**Identity is exact, never guessed.** A scan is matched on its canonical GTIN
+(`items.barcode`, via `GET /api/items?barcode=`) or, for an opaque
+store-internal label, on exact `sku` equality. There is no silent fallback to
+"the first keyword-search hit": that used to make any partial word or mis-scan
+resolve to an unrelated product — and with `--stock-out` it *demonstrably*
+decremented the wrong item's stock (REVIEW-m10.md P1). Keyword matching is now
+behind `--fuzzy`, which the bridge **refuses to combine** with a stock
+adjustment.
+
+Because identity comes from `app/barcodes`, one product cannot become two
+catalogue entries: scan its UPC-E form and it finds the item filed under its
+EAN-13 GTIN. Do **not** file retail barcodes in the `sku` field (the convention
+this guide used to describe) — `sku` is for opaque internal labels only.
+
+What a non-match reports:
+
+| Verdict | Meaning |
+|---|---|
+| `valid GTIN, not in the catalogue — new-entry candidate (region, usage)` | An unknown product: create it (staff), don't force a match. |
+| `MISREAD — check digit fails; re-scan, do not file` | A damaged/mis-scanned code. Not looked up at all, so it cannot become a phantom identity. |
+| `no catalogue match (opaque payload) — if this is a UPC-E, …` | A short all-digit payload. `app/barcodes` only expands a UPC-E on the scanner's word, because the expansion computes its own check digit — configure the scanner to transmit its symbology ID and pass `--symbology UPC-E`. |
+
+The bridge is built to survive an always-on back office: an API error is
+reported per scan (stderr, and an `error` field in `--json`) and the listener
+keeps running; `--relogin` re-authenticates once on a 401 and retries (a counter
+bridge outlives the 7-day token TTL); a server that is down or restarting gives
+one clear line rather than a traceback. And it refuses to open a port it has not
+verified as `065A:A002` — see §3 and `docs/opticon-hardware.md` §1 for why
+auto-picking "the first serial port" is how a shop ends up reading the OPN-2001's
+binary protocol at the wrong parity and calling it barcodes (`--any-port` is the
+explicit, warned opt-in).
 
 ```bash
 ./scripts/run.sh &                       # 1. start HCRM
@@ -253,8 +266,11 @@ uv run python scripts/scanner_bridge.py --email staff@shop.local \
     --stock-out 1 --json                  # sales counter: -1, JSONL output
 ```
 
-Flags: `--port` (default: auto-detect), `--baudrate` (RS-232C only),
-`--stock-in N` / `--stock-out N` (mutually exclusive; staff/admin only),
+Flags: `--port` (default: auto-detect a **verified** `065A:A002`),
+`--any-port PORT` (skip verification, warned), `--baudrate` (RS-232C only),
+`--stock-in N` / `--stock-out N` (mutually exclusive; staff/admin only; a
+decrement clamped at 0 is reported as clamped, not silently dropped),
+`--symbology SYM`, `--fuzzy` (never with a stock adjustment), `--relogin`,
 `--json`. Env: `HCRM_BASE`, `HCRM_SCANNER_PORT`.
 
 Stock adjustment is read-modify-write (`GET` then `PATCH /api/items/{id}`),
@@ -303,7 +319,8 @@ UPC/EAN/Code 39/Code 128).
 | `Permission denied` opening the port | Add user to `dialout`/`uucp` (§3) or install `scripts/udev/99-opticon-scanner.rules` once (`docs/opticon-hardware.md` §4). Running the bridge with sudo is not recommended. |
 | The bridge opened a port but reads garbage | Wrong device: another Opticon personality is attached and the line settings differ (the OPN-2001 is 9600 **8O1**, this one 9600 **8N1**). Select by VID:PID `065A:A002` — `uv run python scripts/opticon_detect.py` (`docs/opticon-hardware.md` §1). |
 | Garbage characters / no frames | RS-232C line settings mismatch → 9600 8N1 no handshake, or `restore_factory_defaults()`. |
-| Scans arrive but "no catalogue match" | The bridge still matches the scan against `sku` (§6's original convention). The catalogue now has a proper `items.barcode` (canonical GTIN-14) with `GET /api/items?barcode=` and EAN/UPC normalisation, so filing the code in `barcode` is correct and the bridge's lookup is the thing that is behind — tracked as **P5** in `REVIEW-m10.md`. Do not file GTINs in `sku`: one product scanned as UPC-E and as EAN-13 would become two SKUs. |
+| Scans arrive but "no catalogue match" | Read the verdict the bridge prints (§6): a *new-entry candidate* means the GTIN is valid and simply not in the catalogue; a *MISREAD* means the check digit failed (re-scan); an *opaque payload* means it was matched against `sku` only — if it is a UPC-E, pass `--symbology UPC-E`. The item's retail code belongs in `items.barcode`, never in `sku`. |
+| The bridge adjusts the stock of the wrong item | Cannot happen from a guess any more: matches are exact-identity only, and `--fuzzy` is refused together with `--stock-in/--stock-out` (§6, REVIEW-m10.md P1). If it happens, the catalogue has two entries for one product — check for a GTIN filed under `sku`. |
 | Commands time out | Scanner is in USB-HID mode (no command channel), or the host opened the wrong port. |
 | Driver won't install on Windows | FIPS mode enabled blocks Opticon's USB driver (Opticon's own note on the wiki). |
 | `Z1`/`Z2` rejected (ESC) | Command not executable in current state — e.g. trigger disabled config; restore defaults and retry. |

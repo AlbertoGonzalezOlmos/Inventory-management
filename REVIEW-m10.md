@@ -242,12 +242,12 @@ rebuilt branch runs 259 passed / 1 skipped.
 
 | Finding | Status |
 |---|---|
-| **P1** fuzzy match + stock adjust corrupts stock | **open, blocking.** Documented loudly in `docs/opticon-m10.md` §6 so no operator meets it unaware; the fix (exact-identity only, `--fuzzy` opt-in, hard error when combined with `--stock-*`) is the next commit on this branch. |
-| **P2** any HTTP error kills ingestion (zombie bridge) | **open, blocking.** Same treatment: fix next (`api()` returns `(status, detail)`; per-scan error capture; `BaseException` guard in `_loop`). |
-| **P3** two readers race one port; scans dropped while awaiting ACK | **open.** Single-reader demux + flipping `test_interleaved_scan_data_ignored_while_awaiting_ack` to assert *delivery*. Largest of the five; scheduled after P1/P2/P4. |
-| **P4** wrong-device hazard on a machine that owns both scanners | **the shared prerequisite now exists**: `scripts/opticon_detect.py` is the repo's one personality map (`find_linux_usb_devices` is importable with no pyserial present, and `describe()` refuses to guess an unknown PID). The bridge's strict-`A002` filter + `--any-port` opt-in still has to be wired to it. |
-| **P5** "barcode in the SKU field" vs PR #2's `items.barcode` | **sequencing done, code pending.** The GTIN-14 identity layer is underneath this branch now (`app/barcodes.py`, `?barcode=`, normalisation, 409/422), and §6 of the guide warns against the old convention. The bridge still queries `q=`/`sku`; switching it to `analyze_scan` + `?barcode=` is in the same follow-up commit as P1. |
-| **P6** hygiene (`--password` on the command line, silent stock clamp at 0, termios not restored, `pytest.raises(Exception)`, …) | **open**, non-blocking; folded into the follow-up where cheap. |
+| **P1** fuzzy match + stock adjust corrupts stock | **FIXED** (`P1+P2+P4+P5+P6` commit). `find_item()` matches exact identity only — canonical GTIN via `?barcode=`, or exact SKU equality for an opaque label — and a non-match is reported as a non-match. Keyword matching is behind `--fuzzy`, which is **refused at startup** when combined with `--stock-in/--stock-out`. Pinned by 14 offline tests in `tests/test_scanner_bridge.py`, including the original incident (scanning `water` must not resolve to the bottle). |
+| **P2** any HTTP error kills ingestion (zombie bridge) | **FIXED** at both levels. Bridge: `on_scan` reports per-scan errors (stderr + an `error` field in the JSON record) and keeps listening; `--relogin` re-authenticates once on a 401 and retries; `URLError` (server down/restarting — found by *running* it, not by reading it) became a one-line `ApiError` instead of a raw traceback. Driver: `_deliver()` catches `BaseException` around the callback — `SystemExit` explicitly included — and routes it to `on_error`, so no callback can kill the loop; a broken `on_error` is itself caught. Pinned by three pty tests. |
+| **P3** two readers race one port; scans dropped while awaiting ACK | **FIXED** (`P3+P2` commit): one reader thread owns the port for the lifetime of the connection (`open()` starts it, `close()` joins it); `send_command()` registers a waiter under a lock *before* writing and never reads the port itself; `_demux()` resolves ACK/NAK/ESC to the pending waiter and flushes everything else to the parser in arrival order. `test_interleaved_scan_data_ignored_while_awaiting_ack` is **gone**, replaced by `..._is_delivered_...` plus a frame-split-across-the-ACK reassembly test. |
+| **P4** wrong-device hazard on a machine that owns both scanners | **FIXED.** `find_scanner_ports()` returns only ports verified as `065A:A002` (`include_unknown=True` is the opt-in); `discover()` raises a loud error naming the unverified ports it declined; the bridge's `resolve_port()` prints what the shared map *can* see (personality, node, the 8O1-vs-8N1 consequence) and the four ways forward, with `--any-port` as an explicit, warned opt-in. Both are pinned against a fake sysfs tree. The shared map itself is `scripts/opticon_detect.py` — one hardware map for the repo, as this review asked. |
+| **P5** "barcode in the SKU field" vs PR #2's `items.barcode` | **FIXED.** The bridge now resolves identity through `app.barcodes.analyze_scan` + `GET /api/items?barcode=`, so a product's UPC-E and EAN-13 forms hit the same entry (test: `425261` with `--symbology UPC-E` finds the item filed as `00042100005264`). An absent-but-valid GTIN is reported as a **new-entry candidate** with its GS1 region/usage; a failed check digit is reported as **MISREAD** and not looked up at all. The convention is deleted from §6 of the guide. Deliberate non-feature: a bare 6-digit payload is *not* expanded as a UPC-E, because the expansion computes its own check digit — the verdict tells the operator to pass `--symbology UPC-E` instead. |
+| **P6** hygiene | **FIXED** where it was cheap and safe: `--password` warns about the process list / shell history (getpass stays the default); a stock-out clamped at 0 is reported as clamped instead of looking like a no-op; `import time` moved out of the loop; `test_commands_require_open` asserts `SerialOpenError`; the POSIX transport now **restores the termios state on close** and takes an **exclusive `flock`** (a second opener gets a clear error, and the lock is released on close — both tested). Still open: `POST /api/items/{id}/stock-adjust` with SQL-side arithmetic (the read-modify-write race documented in §6), and `ScanParser`'s `.strip()` of frames, which is now documented rather than changed. |
 | **P7** `A001` labelled as documented fact | **applied once, in the canonical home.** `docs/opticon-hardware.md` §1 carries the claim with its provenance, `scripts/opticon_detect.py` carries `confirmed: False`, and `tests/test_opticon_detect.py::test_unconfirmed_personality_keeps_its_hedge` fails if the hedge is removed without the hardware evidence. This guide no longer asserts it either (§5.3's own §2 correction). The experiment that would settle it is written down in both places. |
 
 ### 5.4 Two things this review got wrong, so the next one does not
@@ -264,3 +264,42 @@ rebuilt branch runs 259 passed / 1 skipped.
    When a finding is about a *fact* rather than a file, the fix has to be
    applied everywhere the fact is stated — which is the argument for giving the
    fact one canonical home.
+
+---
+
+## 6. Review of the QR-badge commit (the gap §5.1 flagged)
+
+`eeeeb4e` / `2071668` was written before §1–§4 of this review and was not
+covered by it. Reviewed 2026-09-30: `app/qrbadge.py`, the four badge endpoints
+in `app/routers/auth.py` and `app/routers/members.py`, the `users.qr_badge_hash`
+migration, the SPA changes, and the 907-line vendored Nayuki encoder's use (not
+its internals — it is a vendored upstream file with its own provenance).
+
+**No exploitable defect found.** Four coverage gaps were found and are now
+pinned by tests in `tests/test_qr.py` (12 → 16):
+
+| Gap | Why it mattered | Now |
+|---|---|---|
+| A **session token** is syntactically a valid badge presentation | both are `secrets.token_urlsafe(32)` — 43 chars of the same alphabet — and `/qr-login` accepts a bare 43-char token for scanners that strip the prefix | `test_a_session_token_is_not_a_badge`: the lookup is on `users.qr_badge_hash`, never `auth_tokens.token`; 401 either way |
+| Whether a badge session honours the **`must_change_password` gate** | if it did not, QR login would be a way around W4.1/W4.2 (well-known-password block, staff-issued flagging) | `test_badge_login_does_not_bypass_the_password_change_gate`: the gate is at token *use* (`deps.get_current_user`), so a badge session gets 200 on `/me` and 403 on `/api/items`, and a flagged account cannot mint its own badge |
+| That **only the hash** reaches the database | the payload is a bearer credential shown exactly once; a leaked DB file must not yield printable badges | `test_only_the_hash_is_persisted`: the stored value equals `token_hash(payload)` and does not contain it |
+| That the SVG is inert for the **`v-html` sink** | the SPA injects the badge markup directly; the payload is server-generated *today* | `test_badge_svg_is_safe_for_the_v_html_sink`: no `<script`, no `javascript:`, no `on*=` handler, no secret echoed as text, and the tag set is exactly `{svg, rect, path}` |
+
+**Verified consistent, not a finding:** staff may manage badges for other
+*staff* accounts (only admins are protected). That is exactly `update_member`'s
+pre-existing rule (`_get_manageable_member` mirrors it), so the feature
+introduces no new privilege.
+
+**Accepted by design, recorded so nobody "fixes" them:**
+
+* `qr_login` skips the DB lookup for a malformed payload, so its response time
+  differs from a well-formed-but-unknown one. Password login equalises this with
+  a `DUMMY_HASH` PBKDF2 run because *there* the secret is the email's existence;
+  here the payload format is public and both paths return the same 401.
+* No rate limiting on `/qr-login` — the repo has none anywhere (documented,
+  nginx snippet in the README), and a 256-bit random payload is not
+  brute-forceable at any request rate.
+* A flagged account that is handed a badge *instead* of a password stays gated
+  until it changes that password (`/change-password` is exempt and works). That
+  is the intended W4.2 behaviour; the counter workflow is "issue the card, then
+  have the member change the initial password".
