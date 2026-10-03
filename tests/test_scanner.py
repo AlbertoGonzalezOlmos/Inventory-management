@@ -201,9 +201,21 @@ class TestOpticonM10:
         assert scanner.restore_factory_defaults() is True
         t.join(2.0)
 
-    def test_interleaved_scan_data_ignored_while_awaiting_ack(self, scanner_pair):
-        # In buffered mode a scan can arrive between command and ACK.
+    # --- P3: one loop owns the port; interleaved scans are DELIVERED ----------
+
+    def test_interleaved_scan_data_is_delivered_while_awaiting_ack(self, scanner_pair):
+        """In buffered mode a scan arrives between the command and its ACK.
+
+        This test used to assert the opposite — that the scan is *ignored* —
+        which pinned the loss as expected behaviour (REVIEW-m10.md P3). Buffered
+        mode is the factory default, so interleaving is the normal case, not the
+        corner case: dropping those scans is the bug, and the single-reader
+        demux is the fix.
+        """
         scanner, master = scanner_pair
+        received = []
+        done = threading.Event()
+        scanner.start_reading(lambda code: (received.append(code), done.set()))
 
         def play_scanner():
             self._read_master(master)
@@ -211,11 +223,148 @@ class TestOpticonM10:
 
         t = threading.Thread(target=play_scanner)
         t.start()
+        assert scanner.trigger_on() is True      # the ACK still resolves the command
+        t.join(2.0)
+        assert done.wait(2.0)
+        scanner.stop_reading()
+        assert received == ["EX-003"]            # …and the scan is not lost
+
+    def test_scan_data_split_across_the_ack_is_reassembled_in_order(
+            self, scanner_pair):
+        """A frame interrupted by the response byte still parses, in order."""
+        scanner, master = scanner_pair
+        received = []
+        got_two = threading.Event()
+        scanner.start_reading(
+            lambda code: (received.append(code),
+                          got_two.set() if len(received) == 2 else None))
+
+        def play_scanner():
+            self._read_master(master)
+            os.write(master, b"EX-00")            # half a frame …
+            os.write(master, bytes([ACK]))        # … the ACK for our command …
+            os.write(master, b"4\rEX-005\r")     # … then the rest, plus another
+
+        t = threading.Thread(target=play_scanner)
+        t.start()
         assert scanner.trigger_on() is True
         t.join(2.0)
+        assert got_two.wait(2.0)
+        scanner.stop_reading()
+        assert received == ["EX-004", "EX-005"]
+
+    def test_commands_work_while_a_scan_callback_is_registered(self, scanner_pair):
+        scanner, master = scanner_pair
+        scanner.start_reading(lambda code: None)
+
+        def play_scanner():
+            self._read_master(master)
+            os.write(master, bytes([ACK]))
+
+        t = threading.Thread(target=play_scanner)
+        t.start()
+        assert scanner.trigger_off() is True
+        t.join(2.0)
+        scanner.stop_reading()
+
+    def test_start_reading_twice_is_refused(self, scanner_pair):
+        scanner, _master = scanner_pair
+        scanner.start_reading(lambda code: None)
+        with pytest.raises(RuntimeError, match="already registered"):
+            scanner.start_reading(lambda code: None)
+        scanner.stop_reading()
+        scanner.start_reading(lambda code: None)   # …and re-registering works
+        scanner.stop_reading()
+        assert scanner.is_reading is False
+
+    # --- P2: a callback must never be able to kill the loop -------------------
+
+    def test_callback_raising_systemexit_does_not_kill_the_reader(self, scanner_pair):
+        """The zombie-bridge failure mode, at driver level.
+
+        SystemExit is a BaseException, so the old `except Exception` around the
+        callback let it through and the reader thread died while the process
+        kept printing "Listening". Defence in depth: the bridge no longer raises
+        SystemExit from a callback either.
+        """
+        scanner, master = scanner_pair
+        errors = []
+        seen = []
+        second = threading.Event()
+
+        def on_scan(code):
+            if code == "BOOM":
+                raise SystemExit("api error")
+            seen.append(code)
+            second.set()
+
+        scanner.start_reading(on_scan, on_error=errors.append)
+        os.write(master, b"BOOM\r")
+        os.write(master, b"EX-009\r")
+        assert second.wait(2.0), "the reader thread died on SystemExit"
+        scanner.stop_reading()
+        assert seen == ["EX-009"]
+        assert isinstance(errors[0], SystemExit)
+        assert scanner._reader_thread.is_alive()
+
+    def test_callback_raising_a_plain_exception_is_reported_and_survived(
+            self, scanner_pair):
+        scanner, master = scanner_pair
+        errors = []
+        seen = []
+        second = threading.Event()
+
+        def on_scan(code):
+            if code == "BAD":
+                raise ValueError("callback bug")
+            seen.append(code)
+            second.set()
+
+        scanner.start_reading(on_scan, on_error=errors.append)
+        os.write(master, b"BAD\rEX-010\r")
+        assert second.wait(2.0)
+        scanner.stop_reading()
+        assert seen == ["EX-010"]
+        assert isinstance(errors[0], ValueError)
+
+    def test_a_broken_error_handler_does_not_kill_the_loop_either(self, scanner_pair):
+        scanner, master = scanner_pair
+        seen = []
+        second = threading.Event()
+
+        def on_scan(code):
+            if code == "BAD":
+                raise ValueError("callback bug")
+            seen.append(code)
+            second.set()
+
+        def on_error(exc):
+            raise RuntimeError("error handler is broken too")
+
+        scanner.start_reading(on_scan, on_error=on_error)
+        os.write(master, b"BAD\rEX-011\r")
+        assert second.wait(2.0)
+        scanner.stop_reading()
+        assert seen == ["EX-011"]
+
+    def test_scans_with_no_callback_registered_do_not_crash_the_loop(
+            self, scanner_pair):
+        """Commands-only sessions still have a live reader; scans are logged."""
+        scanner, master = scanner_pair
+        os.write(master, b"EX-012\r")
+        time.sleep(0.3)
+        assert scanner._reader_thread.is_alive()
+
+    def test_close_stops_the_reader_thread(self, scanner_pair):
+        scanner, _master = scanner_pair
+        scanner.start_reading(lambda code: None)
+        thread = scanner._reader_thread
+        scanner.close()
+        assert not thread.is_alive()
 
     def test_commands_require_open(self):
-        with pytest.raises(Exception, match="not open"):
+        # P6: assert the specific error, not "some Exception".
+        with pytest.raises(SerialOpenError, match="not open"):
             OpticonM10("/dev/null-scan").trigger_on()
 
 

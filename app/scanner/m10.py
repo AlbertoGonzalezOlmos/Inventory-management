@@ -17,6 +17,21 @@ Specifications Manual §18.5)::
 The command channel (USB-COM / RS-232C only — not USB-HID) accepts menu
 commands and dedicated commands; the scanner answers with a single byte:
 ACK / NAK / ESC (see ``app.scanner.protocol``).
+
+**One loop owns the port.** :meth:`OpticonM10.open` starts a single reader
+thread that demultiplexes everything the device sends: while a command is
+pending, a lone ACK/NAK/ESC byte resolves that command's waiter and every other
+byte is scan data (flushed to the parser in arrival order, so a scan that lands
+inside the ACK window is *delivered*, not discarded). ``send_command`` never
+reads the port itself — it registers a waiter and waits. That is a deliberate
+design constraint, not an optimisation: the device ships in buffered mode, so
+scans and responses genuinely interleave, and the previous two-reader design
+lost scans while a command was awaiting its ACK.
+
+Scan callbacks are invoked on that thread and may raise anything, including
+``SystemExit``: the exception is routed to ``on_error`` and logged, because a
+callback must never be able to kill the loop and leave a caller that believes
+it is still listening.
 """
 
 from __future__ import annotations
@@ -126,6 +141,20 @@ class CommandRejected(RuntimeError):
     """The scanner answered NAK or ESC to a command."""
 
 
+class _CommandWaiter:
+    """One pending command's response slot, resolved by the reader thread."""
+
+    __slots__ = ("event", "value")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.value: int | None = None
+
+    def resolve(self, value: int) -> None:
+        self.value = value
+        self.event.set()
+
+
 class OpticonM10:
     """Connection to an M-10 over USB-COM or RS-232C."""
 
@@ -147,6 +176,15 @@ class OpticonM10:
         self._serial = None
         self._reader_thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # One loop owns the port (REVIEW-m10.md P3). Everything the device
+        # sends — scan frames and single-byte command responses alike — arrives
+        # on that one thread and is demultiplexed there, so a command can never
+        # eat a barcode and a barcode can never eat an ACK.
+        self._io_lock = threading.Lock()      # serialises writes + waiter handoff
+        self._waiter: "_CommandWaiter | None" = None
+        self._parser = ScanParser()
+        self._on_scan: Callable[[str], None] | None = None
+        self._on_error: Callable[[BaseException], None] | None = None
 
     @classmethod
     def discover(cls, *, allow_any_port: bool = False) -> "OpticonM10":
@@ -187,10 +225,20 @@ class OpticonM10:
                 self.port, self.baudrate, self.data_bits, self.parity, self.stop_bits
             )
             logger.info("M-10 opened on %s", self.port)
+            self._stop.clear()
+            self._reader_thread = threading.Thread(
+                target=self._read_loop, name="m10-port-reader", daemon=True
+            )
+            self._reader_thread.start()
         return self
 
     def close(self) -> None:
         self.stop_reading()
+        self._stop.set()
+        thread = self._reader_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._reader_thread = None
         if self._serial is not None:
             self._serial.close()
             self._serial = None
@@ -215,28 +263,46 @@ class OpticonM10:
         Returns True on ACK. Raises :class:`CommandRejected` on NAK/ESC and
         ``TimeoutError`` when no response arrives in time. With
         ``expect_response=False`` the command is fire-and-forget.
+
+        This method does **not** read the port. It registers a waiter and the
+        single reader thread resolves it, which is what makes buffered mode
+        safe: the device may emit scanned data between the command and its
+        response, and those bytes belong to the scan stream, not to this call.
+        The previous implementation read the port directly and *discarded*
+        every non-response byte it saw, silently losing scans (P3).
         """
         self._require_open()
         data = command.encode("ascii") if isinstance(command, str) else command
-        self._serial.write(data)
-        if not expect_response:
+
+        waiter = _CommandWaiter() if expect_response else None
+        with self._io_lock:
+            if waiter is not None:
+                # Register BEFORE writing: a very fast ACK must not arrive
+                # while nobody is listening for it.
+                self._waiter = waiter
+            try:
+                self._serial.write(data)
+            except BaseException:
+                self._clear_waiter(waiter)
+                raise
+
+        if waiter is None:
             return True
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            byte = self._serial.read(1, timeout=max(0.0, deadline - time.monotonic()))
-            if not byte:
-                break
-            value = byte[0]
-            if value == ACK:
-                return True
-            if value in (NAK, ESC):
-                raise CommandRejected(
-                    f"scanner answered {COMMAND_RESPONSES[value]} to {data!r}"
-                )
-            # Scanned barcode data can interleave with command responses in
-            # buffered mode; ignore bytes that are not command responses.
-            logger.debug("ignoring non-response byte while awaiting ACK: %r", byte)
-        raise TimeoutError(f"no response from scanner within {timeout:.1f}s")
+        if not waiter.event.wait(timeout):
+            self._clear_waiter(waiter)
+            raise TimeoutError(f"no response from scanner within {timeout:.1f}s")
+        self._clear_waiter(waiter)
+        value = waiter.value
+        if value == ACK:
+            return True
+        raise CommandRejected(
+            f"scanner answered {COMMAND_RESPONSES.get(value, value)} to {data!r}"
+        )
+
+    def _clear_waiter(self, waiter: "_CommandWaiter | None") -> None:
+        with self._io_lock:
+            if waiter is not None and self._waiter is waiter:
+                self._waiter = None
 
     def send_menu_commands(self, *commands: str, timeout: float = 2.0) -> bool:
         """Send Universal Menu Book command codes (e.g. ``"ZZ"``) over serial."""
@@ -260,53 +326,118 @@ class OpticonM10:
         self,
         on_scan: Callable[[str], None],
         *,
-        on_error: Callable[[Exception], None] | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
         chunk_size: int = 256,
         poll_timeout: float = 0.2,
     ) -> threading.Thread:
-        """Start a daemon thread invoking ``on_scan(barcode)`` per read.
+        """Register ``on_scan(barcode)`` on the port's reader thread.
 
-        The thread reads chunks from the port and feeds a
-        :class:`ScanParser`; decoding problems never kill the loop.
+        The thread itself is started by :meth:`open` — one loop owns the port
+        for the whole connection, whether or not a scan callback is registered
+        (a command's ACK has to be read by somebody). Returns that thread.
+
+        ``on_scan`` may raise anything, including :exc:`SystemExit`: it is
+        caught, routed to ``on_error`` and logged, because a callback bug must
+        never be able to kill the loop and leave a process that still prints
+        "Listening" (P2).
         """
         self._require_open()
-        if self._reader_thread is not None and self._reader_thread.is_alive():
-            raise RuntimeError("reader thread already running")
-        self._stop.clear()
-
-        def _loop() -> None:
-            parser = ScanParser()
-            while not self._stop.is_set():
-                try:
-                    chunk = self._serial.read(chunk_size, timeout=poll_timeout)
-                except Exception as exc:  # unplugged device, etc.
-                    if on_error is not None:
-                        on_error(exc)
-                    else:
-                        logger.warning("scanner read failed: %s", exc)
-                    return
-                if not chunk:
-                    continue
-                try:
-                    for frame in parser.feed(chunk):
-                        on_scan(frame)
-                except Exception as exc:  # a callback bug must not kill the loop
-                    logger.warning("scan callback failed: %s", exc)
-
-        self._reader_thread = threading.Thread(
-            target=_loop, name="m10-reader", daemon=True
-        )
-        self._reader_thread.start()
+        if self._on_scan is not None:
+            raise RuntimeError("a scan callback is already registered — "
+                               "call stop_reading() first")
+        self.chunk_size = chunk_size
+        self.poll_timeout = poll_timeout
+        self._on_error = on_error
+        self._on_scan = on_scan
         return self._reader_thread
 
     def stop_reading(self, timeout: float = 2.0) -> None:
-        self._stop.set()
-        thread = self._reader_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
+        """Unregister the scan callback. The reader thread stays with the port."""
+        self._on_scan = None
+        self._on_error = None
+
+    @property
+    def is_reading(self) -> bool:
+        return self._on_scan is not None
+
+    # -- the one loop that owns the port ---------------------------------------
+
+    def _read_loop(self) -> None:
+        while not self._stop.is_set():
+            serial = self._serial
+            if serial is None:
+                return
+            try:
+                chunk = serial.read(getattr(self, "chunk_size", 256),
+                                    timeout=getattr(self, "poll_timeout", 0.2))
+            except Exception as exc:  # unplugged device, etc.
+                self._dispatch_error(exc)
+                return
+            if not chunk:
+                continue
+            try:
+                self._demux(chunk)
+            except Exception as exc:
+                self._dispatch_error(exc)
+
+    def _demux(self, chunk: bytes) -> None:
+        """Split one read into command responses and scan frames, in order.
+
+        While a command is pending, a single ACK/NAK/ESC byte resolves it;
+        every other byte is scan data. Bytes accumulated *before* the response
+        are flushed to the parser first, so a scan that arrived during the ACK
+        window is delivered in the right order rather than dropped.
+        """
+        pending = bytearray()
+        for byte in chunk:
+            waiter = self._waiter
+            if waiter is not None and byte in COMMAND_RESPONSES and not waiter.event.is_set():
+                self._flush_scans(pending)
+                pending = bytearray()
+                waiter.resolve(byte)
+                continue
+            pending.append(byte)
+        self._flush_scans(pending)
+
+    def _flush_scans(self, data: bytearray) -> None:
+        if not data:
+            return
+        for frame in self._parser.feed(bytes(data)):
+            self._deliver(frame)
+
+    def _deliver(self, frame: str) -> None:
+        callback = self._on_scan
+        if callback is None:
+            logger.debug("scan with no callback registered: %r", frame)
+            return
+        try:
+            callback(frame)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:
+            # SystemExit included, on purpose: it is a BaseException, and the
+            # old loop's `except Exception` let it through — which is how a
+            # bridge became a zombie (P2).
+            self._dispatch_error(exc)
+
+    def _dispatch_error(self, exc: BaseException) -> None:
+        handler = self._on_error
+        if handler is not None:
+            try:
+                handler(exc)
+                return
+            except Exception:  # a broken error handler must not kill the loop
+                logger.exception("on_error handler itself failed")
+        logger.warning("scanner error: %s", exc)
 
     # -- internals --------------------------------------------------------------
 
     def _require_open(self) -> None:
         if self._serial is None:
             raise SerialOpenError("scanner is not open — use open() or a with-block")
+        thread = self._reader_thread
+        if thread is not None and not thread.is_alive():
+            raise SerialOpenError(
+                "the port reader thread has stopped (device unplugged or a read "
+                "error) — reopen the scanner; see the on_error sink / logs for "
+                "the cause")
