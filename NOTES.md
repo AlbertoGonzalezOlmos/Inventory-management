@@ -144,8 +144,18 @@ Inventory-management/
 1. `warm_up()` — load/validate the embedding model (aborts boot iff
    `HCRM_EMBED_STRICT=1`).
 2. `create_all()` — tables + last-admin triggers.
-3. `_migrate_schema()` — hand-rolled column migration (SQLModel's `create_all`
-   never ALTERs; currently adds `users.must_change_password`).
+3. `_migrate_schema()` — brings an existing DB up to the current model
+   (SQLModel's `create_all` never ALTERs a table it finds). The migrations
+   are **data, not code**: `COLUMN_MIGRATIONS` is an append-only tuple of
+   `(table, column, column DDL, post-ADD statements)` and `INDEX_MIGRATIONS`
+   is idempotent `IF NOT EXISTS` statements run on every boot. **Adding a
+   migration is appending a tuple — never insert an `if` block** into the
+   function (three branches once did exactly that at the same anchor and
+   collided textually every single time; the append-only shape is the fix,
+   and a tuple append merges cleanly against any other append). Table/column
+   identifiers are validated before interpolation, so a typo in the table is
+   a loud startup error, not arbitrary SQL. Covered by
+   `tests/test_migrations.py` against legacy SQLite files.
 4. Seed default admin (only if **no users at all** exist) — flagged
    `must_change_password=True`.
 5. Seed 12 example items (only if no items) + backfill missing embeddings.
