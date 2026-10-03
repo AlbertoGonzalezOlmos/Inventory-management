@@ -11,7 +11,7 @@ from app.qrbadge import (
     new_badge_payload,
     parse_badge_payload,
 )
-from tests.conftest import auth, create_user
+from tests.conftest import auth, create_user, unique_email
 
 
 # --- payload unit tests ----------------------------------------------------
@@ -159,3 +159,87 @@ def test_deleted_members_badge_dies_with_account(client, admin_token):
     assert client.post("/api/auth/qr-login", json={"token": badge}).status_code == 200
     client.delete(f"/api/members/{member['id']}", headers=auth(admin_token))
     assert client.post("/api/auth/qr-login", json={"token": badge}).status_code == 401
+
+# --- review pass over the QR commit itself ---------------------------------
+#
+# REVIEW-m10.md reviewed the driver commit (1e03f93) only; the QR-badge commit
+# was written before that review and was never covered by it. These are the
+# gaps that review pass found, each pinned so it cannot regress silently.
+
+
+def test_a_session_token_is_not_a_badge(client, admin_token):
+    """The two credential namespaces must stay separate.
+
+    A session token and a badge token are both `secrets.token_urlsafe(32)` —
+    43 characters of the same alphabet — and `/api/auth/qr-login` accepts a
+    bare 43-char token for scanners that strip the prefix. So a stolen *session*
+    token is syntactically a valid badge presentation. It must not authenticate:
+    the lookup is on `users.qr_badge_hash`, never on `auth_tokens.token`.
+    """
+    _user, token = create_user(client, admin_token)
+    assert len(token) == 43, "precondition: same shape as a badge token"
+    assert client.post("/api/auth/qr-login", json={"token": token}).status_code == 401
+    assert client.post("/api/auth/qr-login",
+                       json={"token": BADGE_PREFIX + token}).status_code == 401
+
+
+def test_badge_login_does_not_bypass_the_password_change_gate(client, admin_token):
+    """W4.1/W4.2 gate a flagged account at token *use*, so a badge session must
+    be gated exactly like a password session — otherwise QR login would be a way
+    around the well-known-password block."""
+    email = unique_email()
+    r = client.post("/api/members",
+                    json={"name": "Flagged Member", "email": email,
+                          "password": "initial-password-1", "role": "member"},
+                    headers=auth(admin_token))
+    assert r.status_code == 201, r.text
+    assert r.json()["must_change_password"] is True          # W4.2
+    member_id = r.json()["id"]
+
+    badge = client.post(f"/api/members/{member_id}/qr-badge",
+                        headers=auth(admin_token)).json()["payload"]
+    login = client.post("/api/auth/qr-login", json={"token": badge})
+    assert login.status_code == 200, "the badge itself is valid"
+    sess = auth(login.json()["token"])
+
+    assert client.get("/api/auth/me", headers=sess).status_code == 200   # exempt
+    assert client.get("/api/items", headers=sess).status_code == 403     # gated
+    # …and a flagged account cannot mint its own badge either:
+    assert client.post("/api/auth/qr-badge", headers=sess).status_code == 403
+
+
+def test_only_the_hash_is_persisted(client, admin_token):
+    """A leaked database file must not yield printable badges."""
+    import sqlite3
+
+    from app.security import token_hash
+    from tests.conftest import get_db_path
+
+    user, token = create_user(client, admin_token)
+    badge = client.post("/api/auth/qr-badge", headers=auth(token)).json()["payload"]
+
+    rows = sqlite3.connect(get_db_path()).execute(
+        "SELECT qr_badge_hash FROM users WHERE email = ?", (user["email"],)
+    ).fetchall()
+    stored = rows[0][0]
+    assert stored == token_hash(badge)
+    assert stored != badge and badge[len(BADGE_PREFIX):] not in stored
+
+
+def test_badge_svg_is_safe_for_the_v_html_sink():
+    """The SPA renders the badge with `v-html`, so the SVG must be inert markup.
+
+    The payload is always server-generated today; this pins that the renderer
+    cannot become an injection sink if that ever changes.
+    """
+    import re
+
+    payload = new_badge_payload()
+    svg = badge_svg(payload)
+    low = svg.lower()
+    assert "<script" not in low
+    assert "javascript:" not in low
+    assert not re.search(r"\son[a-z]+\s*=", low), "no inline event handlers"
+    assert payload not in svg, "the secret is encoded, never echoed as text"
+    tags = set(re.findall(r"<(/?[a-zA-Z]+)", svg))
+    assert tags <= {"svg", "rect", "path", "/svg", "/rect", "/path"}, tags
