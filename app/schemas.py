@@ -156,6 +156,40 @@ class ItemPatch(_PatchIn):
         return _normalized_gtin_or_none(v)
 
 
+class StockAdjustIn(_Stripped):
+    """A relative stock delta (scanner/POS/receiving traffic).
+
+    Zero is rejected: a no-op adjustment is a client bug (an unparsed flag,
+    a dropped sign), never a meaningful request, and it must not return 200
+    looking like something happened.
+    """
+
+    delta: int = Field(ge=-100_000, le=100_000)
+
+    @field_validator("delta")
+    @classmethod
+    def _non_zero(cls, v):
+        if v == 0:
+            raise ValueError("delta must be non-zero")
+        return v
+
+
+class StockAdjustOut(BaseModel):
+    """The result of one atomic stock adjustment.
+
+    ``applied_delta`` differs from ``requested_delta`` exactly when the
+    adjustment was clamped at 0 — a sale beyond available stock is reported,
+    never silently dropped (REVIEW-m10.md P6).
+    """
+
+    id: int
+    sku: str
+    stock: int
+    requested_delta: int
+    applied_delta: int
+    clamped: bool
+
+
 class ItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

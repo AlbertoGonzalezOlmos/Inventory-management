@@ -5,12 +5,13 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, or_, select
 
-from app.database import VECTOR_OPTIONS, get_session
+from app.database import VECTOR_OPTIONS, engine, get_session
 from app.deps import get_current_user, require_staff
 from app.embeddings import embed_text, embed_text_blob, item_embedding_text, vec_to_blob
 from app.barcodes import normalize_gtin
 from app.models import Item, User, utcnow
-from app.schemas import ItemIn, ItemOut, ItemPatch, VectorSearchOut
+from app.schemas import (ItemIn, ItemOut, ItemPatch, StockAdjustIn,
+                         StockAdjustOut, VectorSearchOut)
 
 router = APIRouter(prefix="/api/items", tags=["items"])
 
@@ -261,6 +262,73 @@ def update_item(
     session.commit()
     session.refresh(item)
     return ItemOut.model_validate(item)
+
+
+@router.post("/{item_id}/stock-adjust", response_model=StockAdjustOut)
+def adjust_stock(
+    item_id: int,
+    payload: StockAdjustIn,
+    staff: User = Depends(require_staff),
+):
+    """Atomically add/remove stock — the scanner bridge's POS/receiving path.
+
+    The bridge used to do this as GET + PATCH: read-modify-write across two
+    requests, so two bridges scanning the same item concurrently could lose
+    an increment (REVIEW-m10.md P6). Here the read and the write run inside
+    ONE targeted BEGIN IMMEDIATE on its own connection: the write lock is
+    taken *before* the read, so concurrent adjusters serialise (SQLite's
+    single-writer guarantee; busy_timeout makes the waiter wait, not fail)
+    and the second one always reads the first one's committed value. This is
+    a per-operation lock around a guarded operation — NOT the global begin
+    hook app/database.py documents as an incident: that held a write lock on
+    every request, reads included; WAL readers are unaffected by this one.
+
+    Deliberately separate from PATCH /api/items/{id}: PATCH sets an absolute
+    value (staff correcting the record), this applies a relative delta
+    (stock events), and clamping is reported, not computed client-side.
+    """
+    # The guarded read-modify-write runs on a pooled DBAPI connection driven
+    # directly, because SQLAlchemy 2.x's SQLite dialect has no supported
+    # per-connection BEGIN IMMEDIATE (isolation_level accepts only
+    # READ UNCOMMITTED/SERIALIZABLE/AUTOCOMMIT, and a dialect-level begin
+    # *event hook* is exactly the banned pattern from app/database.py).
+    # Switching this one connection to driver-autocommit lets this operation
+    # issue its own BEGIN IMMEDIATE; the pool's connect event already set
+    # busy_timeout=5000, so a racing writer waits rather than fails. The
+    # previous isolation level is restored before the connection goes back
+    # to the pool, so the ORM is never affected.
+    raw = engine.raw_connection()
+    previous_isolation = raw.isolation_level
+    try:
+        raw.isolation_level = None  # driver autocommit: we issue BEGIN ourselves
+        cur = raw.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            row = cur.execute(
+                "SELECT sku, stock FROM items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+            sku, old_stock = row
+            new_stock = max(0, old_stock + payload.delta)
+            cur.execute(
+                "UPDATE items SET stock = ?, updated_at = ? WHERE id = ?",
+                (new_stock, utcnow().strftime("%Y-%m-%d %H:%M:%S.%f"), item_id),
+            )
+            cur.execute("COMMIT")
+        except BaseException:
+            if raw.in_transaction:
+                cur.execute("ROLLBACK")
+            raise
+    finally:
+        raw.isolation_level = previous_isolation
+        raw.close()
+    applied = new_stock - old_stock
+    return StockAdjustOut(
+        id=item_id, sku=sku, stock=new_stock,
+        requested_delta=payload.delta, applied_delta=applied,
+        clamped=applied != payload.delta,
+    )
 
 
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)

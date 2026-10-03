@@ -391,17 +391,16 @@ def main():
             return
         if adjust:
             try:
-                old = item["stock"]
-                new = max(0, old + adjust)
-                if new != old:
-                    _, updated = call(f"/api/items/{item['id']}", method="PATCH",
-                                      body={"stock": new})
-                    record.update(old_stock=old, new_stock=updated["stock"],
-                                  item=updated)
-                else:
-                    # P6: a sale beyond available stock used to look like a
-                    # no-op. Say so — the alternative is silently losing it.
-                    record.update(old_stock=old, new_stock=old, clamped=True)
+                # Atomic, SQL-side: no read-modify-write window for a second
+                # bridge to lose an increment in, and the server reports the
+                # applied delta and any clamp precisely (REVIEW-m10.md P6).
+                _, result = call(f"/api/items/{item['id']}/stock-adjust",
+                                 method="POST", body={"delta": adjust})
+                record.update(
+                    old_stock=result["stock"] - result["applied_delta"],
+                    new_stock=result["stock"],
+                    item={**item, "stock": result["stock"]},
+                    clamped=result["clamped"])
             except ApiError as exc:
                 record["error"] = f"matched, but the stock update failed: {exc}"
         emit(record)

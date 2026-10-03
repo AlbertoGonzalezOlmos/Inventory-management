@@ -245,6 +245,12 @@ that adds SIMD-accelerated vector search:
   **503** (nothing is persisted, and the existing embedding is never nulled
   out); price/stock updates still work. Unknown/typo'd fields are rejected
   with 422, as are explicit `null`s in PATCH bodies
+- `POST /api/items/{id}/stock-adjust` — staff only; **atomic** stock delta
+  for scanner/POS traffic (`scripts/scanner_bridge.py`). The read and the
+  write run inside one targeted `BEGIN IMMEDIATE` — a per-operation write
+  lock, not the global hook warned about above — so concurrent adjustments
+  serialise and lose nothing. The response reports the applied delta and
+  whether the adjustment clamped at 0
 - `GET /api/members` / `POST /api/members` / `PATCH /api/members/{id}` — staff
   only; **admin accounts can only be modified by admins**, the admin role can
   only be granted by admins, and only admins can reset passwords

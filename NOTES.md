@@ -287,6 +287,7 @@ All under `/api`; auth = `Authorization: Bearer <token>`.
 | `GET /api/items/categories` | auth | distinct sorted categories |
 | `GET /api/items/{id}` | auth | |
 | `POST /api/items` · `PATCH /{id}` · `DELETE /{id}` | staff/admin | auto (re-)embed; 503 on model outage for text changes; SKU unique (409) |
+| `POST /api/items/{id}/stock-adjust` | staff/admin | atomic delta (one targeted `BEGIN IMMEDIATE`); reports applied + clamped |
 | `GET /api/members` · `POST /api/members` | staff/admin | staff cannot create admins |
 | `PATCH /api/members/{id}` | staff/admin | staff can't touch admins/roles-admin/passwords; admin reset flags + revokes |
 | `DELETE /api/members/{id}` | admin | not self; not the last admin |
@@ -447,6 +448,11 @@ CI-2 is enabled; W1-style hygiene PRs go first and alone.
 - **Env before import**: `HCRM_DATA_DIR`/`DATABASE_URL` are read at `app.database`
   import time. Set them before importing anything from `app`.
 - **Never re-add a global `BEGIN IMMEDIATE`/`begin` hook** — documented incident.
+  A *targeted* `BEGIN IMMEDIATE` around one guarded operation is the
+  sanctioned exception: `POST /api/items/{id}/stock-adjust` takes the write
+  lock on its own connection for a single read-modify-write. Do not "remove"
+  it back into a GET+PATCH (that re-opens the lost-update race it fixes),
+  and do not generalise it into a hook (that re-creates the DoS).
 - **Don't remove `'unsafe-eval'`** from the CSP without the W7.2 migration
   (precompiled render functions) — it blanks the SPA; `test_headers.py` will fail.
 - **Don't "fix" NULL-embedding vector scans** — verified safe (B12 in PLAN-v2).
