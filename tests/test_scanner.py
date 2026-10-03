@@ -24,6 +24,7 @@ from app.scanner import (
     find_scanner_ports,
 )
 from app.scanner.m10 import CommandRejected
+from app.scanner.transport import SerialOpenError
 from app.scanner.protocol import FACTORY_DEFAULT_LABEL
 
 
@@ -224,3 +225,59 @@ class TestOpticonM10:
 def test_find_scanner_ports_returns_list():
     # On a CI machine the result is usually empty; it must never raise.
     assert isinstance(find_scanner_ports(), list)
+
+
+# --- P4: discovery must not hand back a device it has not verified ------------
+
+
+def _fake_tty(tmp_path, name: str, vid: str, pid: str) -> tuple[str, str]:
+    """Build a fake /dev entry + sysfs USB identity; returns (dev_root, sysfs)."""
+    dev_root = tmp_path / "dev"
+    dev_root.mkdir(exist_ok=True)
+    (dev_root / name).write_text("")
+    sysfs = tmp_path / "sysfs"
+    usbdev = sysfs / name / "device" / "usb1"
+    usbdev.mkdir(parents=True, exist_ok=True)
+    (usbdev / "idVendor").write_text(vid + "\n")
+    (usbdev / "idProduct").write_text(pid + "\n")
+    return str(dev_root), str(sysfs)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake sysfs layout is POSIX-shaped")
+def test_discovery_refuses_an_unverified_opticon_personality(tmp_path, monkeypatch):
+    """P4: an attached OPN-2001 (065a:0009, 9600 8O1, binary RBBV) must never
+    be auto-picked by a driver that speaks M-10 ASCII at 9600 8N1 — the wrong
+    pick does not fail loudly, it produces garbage that looks like barcodes."""
+    monkeypatch.setattr("app.scanner.m10.os.path.realpath",
+                        lambda p: str(tmp_path / "sysfs" / "ttyUSB0" / "device" / "usb1")
+                        if p.endswith("ttyUSB0/device") else os.path.realpath(p))
+    dev_root, sysfs = _fake_tty(tmp_path, "ttyUSB0", "065a", "0009")
+
+    assert find_scanner_ports(dev_root=dev_root, sysfs_root=sysfs) == []
+    # …but the opt-in still surfaces it, and says which ports are only candidates:
+    loose = find_scanner_ports(include_unknown=True, dev_root=dev_root,
+                               sysfs_root=sysfs)
+    assert loose == [os.path.join(dev_root, "ttyUSB0")]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake sysfs layout is POSIX-shaped")
+def test_discovery_accepts_the_verified_usb_com_personality(tmp_path, monkeypatch):
+    """The documented M-10 USB-COM identity (065A:A002, SS13063 §18.5)."""
+    monkeypatch.setattr("app.scanner.m10.os.path.realpath",
+                        lambda p: str(tmp_path / "sysfs" / "ttyACM0" / "device" / "usb1")
+                        if p.endswith("ttyACM0/device") else os.path.realpath(p))
+    dev_root, sysfs = _fake_tty(tmp_path, "ttyACM0", "065a", "a002")
+    assert find_scanner_ports(dev_root=dev_root, sysfs_root=sysfs) == [
+        os.path.join(dev_root, "ttyACM0")]
+
+
+def test_discover_raises_rather_than_guessing(monkeypatch):
+    """No verified M-10 → a loud, actionable error, never a guessed port."""
+    monkeypatch.setattr("app.scanner.m10.find_scanner_ports",
+                        lambda include_unknown=False: ["/dev/ttyUSB0"] if include_unknown else [])
+    with pytest.raises(SerialOpenError) as exc:
+        OpticonM10.discover()
+    assert "A002" in str(exc.value) and "/dev/ttyUSB0" in str(exc.value)
+    # …and the explicit opt-in does open it (the caller owns that risk):
+    scanner = OpticonM10.discover(allow_any_port=True)
+    assert scanner.port == "/dev/ttyUSB0"

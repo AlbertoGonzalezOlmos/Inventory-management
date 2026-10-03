@@ -51,13 +51,24 @@ USB_VENDOR_ID = "065a"
 USB_PRODUCT_ID = "a002"
 
 
-def find_scanner_ports() -> list[str]:
-    """Best-effort list of serial ports that could be an M-10.
+def find_scanner_ports(include_unknown: bool = False, *,
+                       dev_root: str = "/dev",
+                       sysfs_root: str = "/sys/class/tty") -> list[str]:
+    """Serial ports that are *verified* to be an M-10 in USB-COM mode.
 
-    Linux: ``/dev/ttyACM*`` (USB-COM enumerates as CDC-ACM; the wiki's
-    MDI3100 page confirms it appears as ``ttyACM0``), with ports whose
-    sysfs USB IDs match the M-10 sorted first. If pyserial is installed,
-    its cross-platform port list is used instead (Windows ``COMx``).
+    Only ``065A:A002`` matches (Specifications Manual §18.5). Linux:
+    ``/dev/ttyACM*`` (USB-COM enumerates as CDC-ACM; the wiki's MDI3100 page
+    confirms it appears as ``ttyACM0``), verified through sysfs. If pyserial is
+    installed, its cross-platform port list is used instead (Windows ``COMx``),
+    verified through the reported VID/PID.
+
+    ``include_unknown=True`` appends any other serial port (``ttyACM*``,
+    ``ttyUSB*``, ``COM*``) — but those are *candidates*, not matches, and
+    auto-picking one is how a shop ends up talking to the wrong device: this
+    scanner is 9600 **8N1** ASCII, the OPN-2001 that may well be plugged in
+    next to it is 9600 **8O1** and speaks a binary protocol, so the wrong pick
+    does not fail loudly — it produces garbage that looks like barcodes. Callers
+    must opt in explicitly (the bridge's ``--any-port``) and say so out loud.
     """
     try:
         from serial.tools import list_ports  # type: ignore
@@ -77,21 +88,23 @@ def find_scanner_ports() -> list[str]:
                 matches.append(entry)
             elif "ttyACM" in entry or "ttyUSB" in entry or entry.startswith("COM"):
                 others.append(entry)
-        return matches + others
+        return matches + others if include_unknown else matches
 
-    # Stdlib fallback: scan /dev for CDC-ACM devices (Linux).
+    # Stdlib fallback: scan the tty devices (Linux). ``dev_root``/``sysfs_root``
+    # are injectable so the filter is unit-testable against a fake sysfs tree
+    # with no hardware attached.
     ports = []
-    if os.path.isdir("/dev"):
+    if os.path.isdir(dev_root):
         ports = sorted(
-            os.path.join("/dev", name)
-            for name in os.listdir("/dev")
+            os.path.join(dev_root, name)
+            for name in os.listdir(dev_root)
             if name.startswith(("ttyACM", "ttyUSB"))
         )
 
     def _is_opticon(port: str) -> bool:
-        # /sys/class/tty/ttyACM0/device is the USB interface; the parent
+        # <sysfs_root>/ttyACM0/device is the USB interface; the parent
         # USB device directory holds idVendor/idProduct.
-        dev = os.path.realpath(f"/sys/class/tty/{os.path.basename(port)}/device")
+        dev = os.path.realpath(f"{sysfs_root}/{os.path.basename(port)}/device")
         for candidate in (dev, os.path.dirname(dev)):
             try:
                 with open(os.path.join(candidate, "idVendor")) as f:
@@ -103,7 +116,10 @@ def find_scanner_ports() -> list[str]:
                 continue
         return False
 
-    return sorted(ports, key=lambda p: (not _is_opticon(p), p))
+    matches = [p for p in ports if _is_opticon(p)]
+    if not include_unknown:
+        return matches
+    return matches + [p for p in ports if p not in matches]
 
 
 class CommandRejected(RuntimeError):
@@ -133,15 +149,35 @@ class OpticonM10:
         self._stop = threading.Event()
 
     @classmethod
-    def discover(cls) -> "OpticonM10":
-        """Open the first port that looks like an M-10 (see find_scanner_ports)."""
+    def discover(cls, *, allow_any_port: bool = False) -> "OpticonM10":
+        """Open a port verified to be an M-10 in USB-COM mode (``065A:A002``).
+
+        ``allow_any_port=True`` falls back to any serial port when no verified
+        M-10 is attached. That is an explicit opt-in, not a default: see
+        :func:`find_scanner_ports` for what goes wrong silently otherwise.
+        """
         ports = find_scanner_ports()
-        if not ports:
-            raise SerialOpenError(
-                "no candidate scanner ports found — is the M-10 plugged in "
-                "and in USB-COM mode? (see docs/opticon-m10.md)"
-            )
-        return cls(ports[0])
+        if ports:
+            return cls(ports[0])
+        candidates = find_scanner_ports(include_unknown=True)
+        if candidates and allow_any_port:
+            logger.warning(
+                "no verified M-10 (065A:A002); opening unverified port %s "
+                "because allow_any_port was requested", candidates[0])
+            return cls(candidates[0])
+        raise SerialOpenError(
+            "no M-10 in USB-COM mode (065A:A002) found. "
+            + (f"Unverified serial ports exist ({', '.join(candidates)}) but "
+               "were not auto-picked: another Opticon personality uses "
+               "different line settings and a binary protocol, so opening it "
+               "here yields garbage rather than an error. Pass an explicit "
+               "port (allow_any_port / the bridge's --any-port) if you are "
+               "sure. " if candidates else "")
+            + "Is the scanner plugged in, and in USB-COM mode? Survey the host "
+              "with `uv run python scripts/opticon_detect.py`; switch "
+              "personality by scanning the *USB COM Port* configuration sheet "
+              "(docs/opticon-m10.md)."
+        )
 
     # -- lifecycle ------------------------------------------------------------
 
