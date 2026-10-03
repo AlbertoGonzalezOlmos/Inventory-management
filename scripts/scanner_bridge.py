@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Bridge between an Opticon M-10 scanner and a running HCRM server.
 
-Every scanned barcode is looked up in the catalogue (exact SKU match
-first — so put the product's barcode/EAN in the item's SKU field), and
-can optionally adjust stock (goods receiving / point of sale style).
+Every scan is looked up by **exact identity** — the canonical GTIN in
+`items.barcode` for a retail barcode, the exact `sku` for an opaque
+store-internal label — and can optionally adjust stock (goods receiving /
+point of sale style). A scan that matches nothing is *reported*, never
+guessed at: `--fuzzy` opts into keyword-search matching, and is refused
+outright when combined with stock adjustment.
 
 Usage (server must be running; scanner in USB-COM or RS-232C mode):
 
@@ -22,7 +25,13 @@ catalogue: they are exchanged for a login session via /api/auth/qr-login
 and the resulting session token is printed (useful for headless/kiosk
 setups and for testing badges from the command line). For interactive
 browser login, put the scanner in USB-HID mode and scan into the badge
-field on the login page instead (docs/opticon-m10.md §10).
+field on the login page instead (docs/opticon-m10.md §9.3).
+
+This is an always-on back-office process, so it is built to survive its own
+environment: an API error is reported per scan and the listener keeps going
+(a 401 after the 7-day token TTL, a transient 500, a 409 — for a counter
+bridge those are *when*, not *if*); `--relogin` re-authenticates once on a
+401 and retries. Nothing here exits silently.
 
 Environment overrides: HCRM_BASE, HCRM_SCANNER_PORT.
 Run from the repo root, like the other scripts. Stdlib only, except the
@@ -34,14 +43,16 @@ import getpass
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 # Allow `python scripts/scanner_bridge.py` from the repo root: put the
-# repo root on sys.path so `app.*` imports resolve.
+# repo root on sys.path so `app.*` and `scripts.*` imports resolve.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.barcodes import analyze_scan  # noqa: E402
 from app.scanner import OpticonM10, find_scanner_ports  # noqa: E402
 from app.scanner.transport import SerialOpenError  # noqa: E402
 
@@ -56,6 +67,13 @@ class ApiError(Exception):
 
 
 def api(path, method="GET", token=None, body=None):
+    """One HTTP call. Raises ApiError; never SystemExit.
+
+    The distinction is load-bearing: this runs inside the scanner's reader
+    thread, and a SystemExit there is a BaseException — it kills the callback
+    and the thread while the main loop keeps sleeping, i.e. a bridge that still
+    prints "Listening" but no longer listens (REVIEW-m10.md P2).
+    """
     req = urllib.request.Request(
         BASE + path,
         method=method,
@@ -75,25 +93,150 @@ def api(path, method="GET", token=None, body=None):
         except ValueError:
             pass
         raise ApiError(exc.code, f"{method} {path}", detail) from exc
+    except urllib.error.URLError as exc:
+        # Server down / restarting / wrong HCRM_BASE. Still an ApiError, not a
+        # raw traceback and not a SystemExit: at the login prompt it becomes one
+        # clear message, and mid-session it is a per-scan report that leaves the
+        # listener alive so the bridge survives a server restart.
+        raise ApiError(0, f"{method} {path}",
+                       f"cannot reach {BASE}: {exc.reason}") from exc
 
 
-def find_item(token, code):
-    """Exact SKU match first, then fall back to the first search hit."""
-    status, items = api(f"/api/items?q={urllib.parse.quote(code)}&limit=100", token=token)
+def find_item(get, code, fuzzy=False, symbology=""):
+    """Exact-identity catalogue lookup. Returns (item, how, analysis).
+
+    ``get(path)`` performs the authenticated call and returns
+    ``(status, payload)``; injecting it keeps this decision table testable
+    without a server.
+
+    ``how`` is one of ``"barcode"`` (canonical GTIN match), ``"sku"`` (exact
+    SKU equality for an opaque label), ``"search"`` (keyword hit — only with
+    ``fuzzy=True``) or ``None``.
+
+    There is deliberately **no** silent fallback to "the first search hit"
+    (REVIEW-m10.md P1): that made any partial word, mis-scan or label fragment
+    resolve to an unrelated item, and with `--stock-out` it *demonstrably*
+    decremented the wrong product's stock. A code that identifies nothing is
+    reported as identifying nothing.
+
+    Identity comes from `app.barcodes.analyze_scan` (P5), so a product scanned
+    as UPC-E finds the item filed under its EAN-13 GTIN — which the old
+    "put the barcode in the SKU field" convention could never do, since the two
+    forms are different strings.
+    """
+    analysis = analyze_scan(code, symbology)
+
+    if analysis.kind in ("gtin", "restricted"):
+        _, items = get(f"/api/items?barcode={urllib.parse.quote(analysis.key)}")
+        if items:
+            return items[0], "barcode", analysis
+        return None, None, analysis
+
+    if analysis.kind == "invalid-gtin":
+        # Right shape, bad check digit: a misread. Looking it up would turn a
+        # scanning error into either a phantom identity or a wrong match.
+        return None, None, analysis
+
+    # Opaque payload (Code 128 SKU label, internal code): exact SKU equality
+    # only. A short all-digit payload *might* be a zero-suppressed UPC-E, but
+    # app.barcodes deliberately refuses to expand one without the scanner's
+    # word — the expansion computes its own check digit, so any 6 digits would
+    # "validate" and internal numeric codes would turn into fake GTINs. The
+    # bridge does not undermine that by trying both number systems; the verdict
+    # it emits says what is missing instead (--symbology UPC-E).
+    _, items = get(f"/api/items?q={urllib.parse.quote(code)}&limit=100")
     for item in items:
         if item["sku"].lower() == code.lower():
-            return item, "sku"
-    return (items[0], "search") if items else (None, None)
+            return item, "sku", analysis
+    if fuzzy and items:
+        return items[0], "search", analysis
+    return None, None, analysis
+
+
+def describe_attached_opticon():
+    """What the shared hardware map sees — used to explain a refusal to guess.
+
+    One hardware map for the repo (`scripts/opticon_detect.py`) instead of a
+    private one per tool: this is the same knowledge `opn2001.py detect` and
+    `scanner_hid.py` use.
+    """
+    try:
+        from scripts.opticon_detect import (describe, find_linux_usb_devices,
+                                            find_windows_ports)
+    except Exception:  # pragma: no cover - the map is optional context
+        return []
+    lines = []
+    try:
+        if sys.platform.startswith("linux"):
+            for d in find_linux_usb_devices():
+                info = describe(d["pid"])
+                nodes = ", ".join(d["ttys"] + d["hidraws"]) or "no node bound"
+                lines.append(f"  065A:{d['pid']:04X}  {info['name']} [{nodes}]")
+        elif sys.platform == "win32":
+            for p in find_windows_ports():
+                info = describe(p["pid"])
+                lines.append(f"  065A:{p['pid']:04X}  {info['name']} [{p['port']}]")
+    except Exception:  # pragma: no cover
+        return []
+    return lines
+
+
+def resolve_port(explicit, any_port):
+    """Pick the port to open, or fail loudly explaining what is attached."""
+    if explicit:
+        return explicit
+    verified = find_scanner_ports()
+    if verified:
+        print(f"M-10 (065A:A002) verified on {verified[0]}", file=sys.stderr)
+        return verified[0]
+    if any_port:
+        print(f"WARNING: opening {any_port} WITHOUT verifying it is an M-10 "
+              f"(--any-port). A different Opticon personality uses different "
+              f"line settings and a binary protocol; the result is garbage "
+              f"that looks like barcodes, not an error.", file=sys.stderr)
+        return any_port
+    attached = describe_attached_opticon()
+    raise SystemExit(
+        "no M-10 in USB-COM mode (065A:A002) found.\n"
+        + ("Opticon devices this host can see:\n" + "\n".join(attached) + "\n"
+           if attached else "")
+        + "Refusing to auto-pick a serial port: the OPN-2001 is 9600 8O1 and "
+          "speaks a binary protocol, the M-10 is 9600 8N1 ASCII, and opening "
+          "the wrong one yields garbage rather than an error.\n"
+          "  · survey the host:  uv run python scripts/opticon_detect.py\n"
+          "  · in USB-HID mode?  scan the *USB COM Port* configuration sheet "
+          "so it re-enumerates as 065A:A002, or receive with "
+          "scripts/scanner_hid.py\n"
+          "  · sure about a port? pass --port PORT, or --any-port PORT to skip "
+          "verification\n"
+          "  · see docs/opticon-m10.md §3 and docs/opticon-hardware.md §1"
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", default=os.environ.get("HCRM_SCANNER_PORT"),
-                        help="serial port (default: auto-detect)")
+                        help="serial port of a VERIFIED M-10 (default: auto-detect 065A:A002)")
+    parser.add_argument("--any-port", metavar="PORT",
+                        help="open PORT without verifying it is an M-10 (explicit opt-in)")
     parser.add_argument("--baudrate", type=int, default=9600,
                         help="RS-232C model only (default 9600, the factory setting)")
     parser.add_argument("--email", required=True, help="HCRM account email")
-    parser.add_argument("--password", help="omit to be prompted")
+    parser.add_argument("--password",
+                        help="omit to be prompted (recommended: the flag is visible "
+                             "in the process list and in shell history)")
+    parser.add_argument("--relogin", action="store_true",
+                        help="re-authenticate once and retry on a 401 (an always-on "
+                             "bridge outlives the 7-day token TTL)")
+    parser.add_argument("--symbology", default="", metavar="SYM",
+                        help="symbology the scanner reports for every scan (e.g. UPC-E). "
+                             "Only needed if the device is configured to transmit a "
+                             "symbology ID; without it a zero-suppressed UPC-E payload "
+                             "is treated as an opaque code (app.barcodes refuses to "
+                             "expand one on a guess)")
+    parser.add_argument("--fuzzy", action="store_true",
+                        help="fall back to the first keyword-search hit when no exact "
+                             "identity matches (NOT allowed with --stock-in/--stock-out)")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--stock-in", type=int, metavar="N",
                        help="add N to stock on every scan")
@@ -103,41 +246,63 @@ def main():
                         help="emit one JSON object per scan instead of text")
     args = parser.parse_args()
 
-    password = args.password or getpass.getpass("HCRM password: ")
-    try:
-        status, auth = api("/api/auth/login", method="POST",
-                           body={"email": args.email, "password": password})
-    except ApiError as exc:
-        raise SystemExit(str(exc))
-    token = auth["token"]
-    user = auth["user"]
     adjust = args.stock_in if args.stock_in else (-args.stock_out if args.stock_out else 0)
+    if args.fuzzy and adjust:
+        raise SystemExit(
+            "--fuzzy cannot be combined with --stock-in/--stock-out: a keyword "
+            "match is not an identity, and adjusting stock on a guess corrupts "
+            "an unrelated product (REVIEW-m10.md P1). Drop --fuzzy, or drop the "
+            "stock adjustment.")
+
+    if args.password:
+        print("warning: --password was given on the command line; it is visible "
+              "in the process list and in shell history. Omit it to be prompted.",
+              file=sys.stderr)
+
+    credentials = {"email": args.email,
+                   "password": args.password or getpass.getpass("HCRM password: ")}
+
+    def login():
+        try:
+            _, auth = api("/api/auth/login", method="POST", body=credentials)
+        except ApiError as exc:
+            raise SystemExit(str(exc))
+        return auth["token"], auth["user"]
+
+    token, user = login()
     if adjust and user["role"] not in ("staff", "admin"):
         raise SystemExit("stock adjustment requires a staff or admin account")
 
-    port = args.port
-    if not port:
-        candidates = find_scanner_ports()
-        if not candidates:
-            raise SystemExit(
-                "no scanner port found — plug in the M-10 (USB-COM mode) or "
-                "pass --port (see docs/opticon-m10.md)"
-            )
-        port = candidates[0]
-        print(f"Auto-detected scanner port: {port}", file=sys.stderr)
+    port = resolve_port(args.port, args.any_port)
 
     def emit(record):
         if args.json:
             print(json.dumps(record), flush=True)
+            return
+        if record.get("error"):
+            print(f"[{record['code']}] ERROR {record['error']}", file=sys.stderr,
+                  flush=True)
+        elif record.get("badge_login") is not None:
+            if record["badge_login"]:
+                u = record["user"]
+                print(f"[badge] logged in: {u['name']} <{u['email']}> ({u['role']})\n"
+                      f"        session token: {record['token']}", flush=True)
+            else:
+                print(f"[badge] login failed: {record['error']}", flush=True)
         elif record["found"]:
             item = record["item"]
-            print(f"[{record['code']}] {item['name']} "
-                  f"(SKU {item['sku']}, stock {item['stock']}, "
-                  f"{item['price_cents'] / 100:.2f})"
-                  + (f"  → stock {record['old_stock']} → {record['new_stock']}"
-                     if record.get("new_stock") is not None else ""))
+            line = (f"[{record['code']}] {item['name']} "
+                    f"(SKU {item['sku']}, stock {item['stock']}, "
+                    f"{item['price_cents'] / 100:.2f})"
+                    f"  [match: {record['match']}]")
+            if record.get("new_stock") is not None:
+                line += f"  → stock {record['old_stock']} → {record['new_stock']}"
+            if record.get("clamped"):
+                line += "  (clamped at 0 — a sale beyond available stock)"
+            print(line, flush=True)
         else:
-            print(f"[{record['code']}] no catalogue match", flush=True)
+            verdict = record.get("verdict") or "no catalogue match"
+            print(f"[{record['code']}] {verdict}", flush=True)
 
     def badge_login(code):
         """Exchange a scanned QR badge for a session; never kills the bridge."""
@@ -146,51 +311,85 @@ def main():
         except ApiError as exc:
             record = {"code": code, "badge_login": False, "error": str(exc)}
         else:
-            record = {
-                "code": code,
-                "badge_login": True,
-                "user": authd["user"],
-                "token": authd["token"],
-            }
-        if args.json:
-            print(json.dumps(record), flush=True)
-        elif record["badge_login"]:
-            u = record["user"]
-            print(f"[badge] logged in: {u['name']} <{u['email']}> ({u['role']})\n"
-                  f"        session token: {record['token']}", flush=True)
-        else:
-            print(f"[badge] login failed: {record['error']}", flush=True)
+            record = {"code": code, "badge_login": True,
+                      "user": authd["user"], "token": authd["token"]}
+        emit(record)
+
+    def call(path, method="GET", body=None):
+        """api() with the P2 contract: one loud retry on 401 when --relogin."""
+        nonlocal token
+        try:
+            return api(path, method=method, token=token, body=body)
+        except ApiError as exc:
+            if exc.status != 401 or not args.relogin:
+                raise
+            print("session rejected (401) — re-authenticating", file=sys.stderr)
+            token, _ = login()
+            return api(path, method=method, token=token, body=body)
 
     def on_scan(code):
         if code.startswith(BADGE_PREFIX):
             badge_login(code)
             return
+        record = {"code": code, "found": False, "match": None, "item": None}
         try:
-            item, how = find_item(token, code)
-            record = {"code": code, "found": item is not None, "match": how,
-                      "item": item}
-            if item is not None and adjust:
+            item, how, analysis = find_item(
+                lambda path: call(path), code, fuzzy=args.fuzzy,
+                symbology=args.symbology)
+        except ApiError as exc:
+            # Report and keep listening: a transient 500 or an expired token
+            # must not turn an always-on counter bridge into a zombie.
+            record["error"] = str(exc)
+            emit(record)
+            return
+        record["found"] = item is not None
+        record["match"] = how
+        record["item"] = item
+        record["analysis"] = {"kind": analysis.kind, "key": analysis.key,
+                              "addon": analysis.addon}
+        if item is None:
+            record["verdict"] = {
+                "invalid-gtin": "MISREAD — check digit fails; re-scan, do not file",
+                "opaque": ("no catalogue match (opaque payload)"
+                           + (" — if this is a UPC-E, the scanner must transmit "
+                              "its symbology ID: re-run with --symbology UPC-E"
+                              if code.isdigit() and len(code) in (6, 7, 8) else "")),
+                "gtin": "valid GTIN, not in the catalogue — new-entry candidate",
+                "restricted": "valid in-store GTIN, not in the catalogue — "
+                              "new-entry candidate (restricted circulation)",
+            }.get(analysis.kind, "no catalogue match")
+            if analysis.kind in ("gtin", "restricted") and analysis.info:
+                where = analysis.info.region or "unknown GS1 region"
+                record["verdict"] += f" ({where}, {analysis.info.usage})"
+            emit(record)
+            return
+        if adjust:
+            try:
                 old = item["stock"]
                 new = max(0, old + adjust)
                 if new != old:
-                    _, updated = api(f"/api/items/{item['id']}", method="PATCH",
-                                     token=token, body={"stock": new})
+                    _, updated = call(f"/api/items/{item['id']}", method="PATCH",
+                                      body={"stock": new})
                     record.update(old_stock=old, new_stock=updated["stock"],
                                   item=updated)
                 else:
-                    record.update(old_stock=old, new_stock=old)
-        except ApiError as exc:
-            raise SystemExit(str(exc))
+                    # P6: a sale beyond available stock used to look like a
+                    # no-op. Say so — the alternative is silently losing it.
+                    record.update(old_stock=old, new_stock=old, clamped=True)
+            except ApiError as exc:
+                record["error"] = f"matched, but the stock update failed: {exc}"
         emit(record)
+
+    def on_error(exc):
+        print(f"scanner error: {exc}", file=sys.stderr, flush=True)
 
     try:
         with OpticonM10(port, baudrate=args.baudrate) as scanner:
             print(f"Listening on {port} — scan a barcode (Ctrl-C to quit).",
                   file=sys.stderr)
-            scanner.start_reading(on_scan)
+            scanner.start_reading(on_scan, on_error=on_error)
             try:
                 while True:
-                    import time
                     time.sleep(3600)
             except KeyboardInterrupt:
                 pass
