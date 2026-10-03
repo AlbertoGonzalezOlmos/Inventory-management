@@ -144,8 +144,18 @@ Inventory-management/
 1. `warm_up()` — load/validate the embedding model (aborts boot iff
    `HCRM_EMBED_STRICT=1`).
 2. `create_all()` — tables + last-admin triggers.
-3. `_migrate_schema()` — hand-rolled column migration (SQLModel's `create_all`
-   never ALTERs; currently adds `users.must_change_password`).
+3. `_migrate_schema()` — brings an existing DB up to the current model
+   (SQLModel's `create_all` never ALTERs a table it finds). The migrations
+   are **data, not code**: `COLUMN_MIGRATIONS` is an append-only tuple of
+   `(table, column, column DDL, post-ADD statements)` and `INDEX_MIGRATIONS`
+   is idempotent `IF NOT EXISTS` statements run on every boot. **Adding a
+   migration is appending a tuple — never insert an `if` block** into the
+   function (three branches once did exactly that at the same anchor and
+   collided textually every single time; the append-only shape is the fix,
+   and a tuple append merges cleanly against any other append). Table/column
+   identifiers are validated before interpolation, so a typo in the table is
+   a loud startup error, not arbitrary SQL. Covered by
+   `tests/test_migrations.py` against legacy SQLite files.
 4. Seed default admin (only if **no users at all** exist) — flagged
    `must_change_password=True`.
 5. Seed 12 example items (only if no items) + backfill missing embeddings.
@@ -277,6 +287,7 @@ All under `/api`; auth = `Authorization: Bearer <token>`.
 | `GET /api/items/categories` | auth | distinct sorted categories |
 | `GET /api/items/{id}` | auth | |
 | `POST /api/items` · `PATCH /{id}` · `DELETE /{id}` | staff/admin | auto (re-)embed; 503 on model outage for text changes; SKU unique (409) |
+| `POST /api/items/{id}/stock-adjust` | staff/admin | atomic delta (one targeted `BEGIN IMMEDIATE`); reports applied + clamped |
 | `GET /api/members` · `POST /api/members` | staff/admin | staff cannot create admins |
 | `PATCH /api/members/{id}` | staff/admin | staff can't touch admins/roles-admin/passwords; admin reset flags + revokes |
 | `DELETE /api/members/{id}` | admin | not self; not the last admin |
@@ -437,6 +448,11 @@ CI-2 is enabled; W1-style hygiene PRs go first and alone.
 - **Env before import**: `HCRM_DATA_DIR`/`DATABASE_URL` are read at `app.database`
   import time. Set them before importing anything from `app`.
 - **Never re-add a global `BEGIN IMMEDIATE`/`begin` hook** — documented incident.
+  A *targeted* `BEGIN IMMEDIATE` around one guarded operation is the
+  sanctioned exception: `POST /api/items/{id}/stock-adjust` takes the write
+  lock on its own connection for a single read-modify-write. Do not "remove"
+  it back into a GET+PATCH (that re-opens the lost-update race it fixes),
+  and do not generalise it into a hook (that re-creates the DoS).
 - **Don't remove `'unsafe-eval'`** from the CSP without the W7.2 migration
   (precompiled render functions) — it blanks the SPA; `test_headers.py` will fail.
 - **Don't "fix" NULL-embedding vector scans** — verified safe (B12 in PLAN-v2).
