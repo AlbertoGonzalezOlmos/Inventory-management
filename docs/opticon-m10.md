@@ -271,7 +271,9 @@ Flags: `--port` (default: auto-detect a **verified** `065A:A002`),
 `--stock-in N` / `--stock-out N` (mutually exclusive; staff/admin only; a
 decrement clamped at 0 is reported as clamped, not silently dropped),
 `--symbology SYM`, `--fuzzy` (never with a stock adjustment), `--relogin`,
-`--json`. Env: `HCRM_BASE`, `HCRM_SCANNER_PORT`.
+`--json`. Env: `HCRM_BASE`, `HCRM_SCANNER_PORT`, `HCRM_HTTP_TIMEOUT`
+(seconds, default 10 — HTTP calls run on the scanner's reader thread, so a
+stalled server must fail fast instead of blocking the port).
 
 Stock adjustment is read-modify-write (`GET` then `PATCH /api/items/{id}`),
 so it is fine at counter speed but not atomic — two bridges scanning the

@@ -33,7 +33,7 @@ environment: an API error is reported per scan and the listener keeps going
 bridge those are *when*, not *if*); `--relogin` re-authenticates once on a
 401 and retries. Nothing here exits silently.
 
-Environment overrides: HCRM_BASE, HCRM_SCANNER_PORT.
+Environment overrides: HCRM_BASE, HCRM_SCANNER_PORT, HCRM_HTTP_TIMEOUT.
 Run from the repo root, like the other scripts. Stdlib only, except the
 optional pyserial (see app/scanner/transport.py).
 """
@@ -59,6 +59,12 @@ from app.scanner.transport import SerialOpenError  # noqa: E402
 BASE = os.environ.get("HCRM_BASE", "http://localhost:8000")
 BADGE_PREFIX = "HCRM1:"  # keep in sync with app.qrbadge.BADGE_PREFIX
 
+# urllib's default is no timeout at all: a server that accepts the connection
+# and then stalls would block the scanner's reader thread forever (scans stop
+# being read, so the OS buffer overflows and they are lost). Bounded so a
+# stalled server becomes an ordinary per-scan ApiError instead of a hang.
+HTTP_TIMEOUT = float(os.environ.get("HCRM_HTTP_TIMEOUT", "10"))
+
 
 class ApiError(Exception):
     def __init__(self, status, path, detail):
@@ -83,7 +89,7 @@ def api(path, method="GET", token=None, body=None):
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req) as res:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as res:
             raw = res.read()
             return res.status, (json.loads(raw) if raw else None)
     except urllib.error.HTTPError as exc:

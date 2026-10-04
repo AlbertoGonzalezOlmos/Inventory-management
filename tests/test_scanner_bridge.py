@@ -49,6 +49,53 @@ def fake_api(table):
     return get
 
 
+# --- P2 follow-up: a stalled server must not wedge the reader thread ---------
+#
+# urllib's default is no timeout; the bridge runs its HTTP calls on the
+# scanner's reader thread, so a hung connection stopped the port being read
+# (and scans being lost) with no error at all. Bounded now.
+
+
+def test_api_passes_a_bounded_timeout(monkeypatch):
+    import scripts.scanner_bridge as bridge
+
+    captured = {}
+
+    class _FakeResponse:
+        status = 200
+
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["timeout"] = timeout
+        return _FakeResponse()
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", fake_urlopen)
+    assert bridge.api("/api/healthz") == (200, None)
+    assert captured["timeout"] == bridge.HTTP_TIMEOUT
+    assert bridge.HTTP_TIMEOUT and bridge.HTTP_TIMEOUT > 0
+
+
+def test_api_timeout_is_reported_as_an_apierror(monkeypatch):
+    import scripts.scanner_bridge as bridge
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(ApiError) as exc:
+        bridge.api("/api/healthz")
+    assert exc.value.status == 0
+    assert "cannot reach" in str(exc.value)
+
+
 # --- P5: identity, not strings ------------------------------------------------
 
 
