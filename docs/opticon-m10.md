@@ -279,7 +279,10 @@ targeted `BEGIN IMMEDIATE` (a per-operation write lock around the
 read-modify-write — *not* the global connection hook `app/database.py`
 documents as an incident). Two bridges scanning the same item concurrently
 serialise and lose nothing; the response reports the applied delta and
-whether the adjustment clamped at 0, and the bridge surfaces both.
+whether the adjustment clamped at 0, and the bridge surfaces both. The
+endpoint bounds `delta` to ±100 000 and rejects 0; the bridge *requires* it,
+so a stock scan against an older server is reported as a per-scan `ApiError`
+(not a crash).
 
 ## 6a. Bridge behaviour with QR badges
 

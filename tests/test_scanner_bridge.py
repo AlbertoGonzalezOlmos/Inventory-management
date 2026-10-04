@@ -287,3 +287,26 @@ def test_an_unreachable_server_during_badge_login_is_also_a_record(monkeypatch):
     record = bridge.badge_login("HCRM1:abc123")
     assert record["badge_login"] is False
     assert record["error"]
+
+
+def test_a_failed_relogin_propagates_apierror_not_systemexit():
+    """Sourcery review of PR #3: the injected login callback must surface a
+    failed re-authentication as `ApiError`.
+
+    `call()` is invoked inside `on_scan`'s `except ApiError`, so a `SystemExit`
+    from the old login closure skipped the per-scan failure record (the driver's
+    `BaseException` net kept the reader alive, but `--json` consumers saw the
+    scan vanish and no retry happened). The real `login()` now raises ApiError
+    and only `main()`'s startup call converts it to SystemExit.
+    """
+    def api_call(path, method="GET", token=None, body=None):
+        raise ApiError(401, f"{method} {path}", "expired")
+
+    def login_call():
+        raise ApiError(0, "POST /api/auth/login", "cannot reach")
+
+    with pytest.raises(ApiError) as exc:
+        call_with_relogin(api_call, login_call, "/api/items", "STALE",
+                          relogin=True)
+    assert exc.value.status == 0
+    assert not isinstance(exc.value, SystemExit)

@@ -304,13 +304,19 @@ def main():
                    "password": args.password or getpass.getpass("HCRM password: ")}
 
     def login():
-        try:
-            _, auth = api("/api/auth/login", method="POST", body=credentials)
-        except ApiError as exc:
-            raise SystemExit(str(exc))
+        # Raises ApiError, never SystemExit: login() is also the --relogin
+        # callback, and that runs inside on_scan's `except ApiError`. Wrapping
+        # it in SystemExit skipped the per-scan error record (only the driver's
+        # BaseException net kept the thread alive) — a failed re-authentication
+        # must be a reported scan failure like any other.
+        _, auth = api("/api/auth/login", method="POST", body=credentials)
         return auth["token"], auth["user"]
 
-    token, user = login()
+    try:
+        token, user = login()
+    except ApiError as exc:
+        # Startup: one clean line, as before (the ApiError carries the detail).
+        raise SystemExit(str(exc))
     if adjust and user["role"] not in ("staff", "admin"):
         raise SystemExit("stock adjustment requires a staff or admin account")
 

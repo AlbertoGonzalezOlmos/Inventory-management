@@ -245,7 +245,7 @@ that adds SIMD-accelerated vector search:
   **503** (nothing is persisted, and the existing embedding is never nulled
   out); price/stock updates still work. Unknown/typo'd fields are rejected
   with 422, as are explicit `null`s in PATCH bodies
-- `POST /api/items/{id}/stock-adjust` — staff only; **atomic** stock delta
+- `POST /api/items/{id}/stock-adjust` — staff/admin; **atomic** stock delta
   for scanner/POS traffic (`scripts/scanner_bridge.py`). The read and the
   write run inside one targeted `BEGIN IMMEDIATE` — a per-operation write
   lock, not the global hook warned about above — so concurrent adjustments
