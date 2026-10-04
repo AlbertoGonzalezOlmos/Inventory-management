@@ -2,6 +2,7 @@
 and the schema migration that adds the column to pre-existing databases."""
 
 import sqlite3
+import threading
 
 import pytest
 
@@ -68,6 +69,19 @@ def test_duplicate_detection_survives_format_changes(client, admin_token):
     assert r.status_code == 409
 
 
+def test_create_and_lookup_upce_preamble(client, admin_token):
+    # The API has no scanner symbology, but the self-validating 8-digit UPC-E
+    # transmission form must be accepted (docs/barcodes.md §5/§8).
+    r = _create(client, admin_token, "BC-UPCE", barcode="04252614")
+    assert r.status_code == 201, r.text
+    assert r.json()["barcode"] == "00042100005264"
+    for form in ("04252614", "042100005264", "00042100005264"):
+        got = client.get("/api/items", params={"barcode": form},
+                         headers=auth(admin_token))
+        assert got.status_code == 200, form
+        assert [i["sku"] for i in got.json()] == ["BC-UPCE"], form
+
+
 def test_lookup_by_barcode_any_form(client, admin_token):
     _create(client, admin_token, "BC-LOOK", barcode=EAN13)
     for form in (EAN13, GTIN14, f" {EAN13} "):
@@ -114,6 +128,52 @@ def test_patch_barcode_conflict(client, admin_token):
     r = client.patch(f"/api/items/{other}", json={"barcode": EAN13},
                      headers=auth(admin_token))
     assert r.status_code == 409 and "BC-OWN" in r.json()["detail"]
+
+
+def test_patch_barcode_race_never_500(client, admin_token):
+    """F1: two concurrent PATCHes of different items to the same GTIN.
+
+    The app-level pre-check is not race-free (under WAL the earlier auth read
+    can hold a snapshot before the other item's barcode is visible), so the
+    unique index is the real authority. The loser must get a clean 409, never
+    a 500 traceback.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    a_id = _create(client, admin_token, "BC-RACE-A").json()["id"]
+    b_id = _create(client, admin_token, "BC-RACE-B").json()["id"]
+
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def patch(key, item_id):
+        c = TestClient(app)  # own client/session; lifespan already ran
+        try:
+            barrier.wait(timeout=60)
+            r = c.patch(f"/api/items/{item_id}", json={"barcode": EAN13},
+                        headers=auth(admin_token))
+            results[key] = (r.status_code, r.text)
+        except Exception as exc:  # pragma: no cover - surfaced as a failure
+            results[key] = ("EXC", repr(exc))
+        finally:
+            barrier.abort()  # never leave a peer waiting forever
+
+    threads = [threading.Thread(target=patch, args=("a", a_id)),
+               threading.Thread(target=patch, args=("b", b_id))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    assert not any(t.is_alive() for t in threads), results
+    assert all(isinstance(r[0], int) for r in results.values()), results
+    statuses = sorted(r[0] for r in results.values())
+    assert statuses == [200, 409], results
+    # Exactly one item ends up owning the GTIN.
+    got = client.get("/api/items", params={"barcode": EAN13},
+                     headers=auth(admin_token))
+    assert got.status_code == 200 and len(got.json()) == 1, got.text
 
 
 def test_staff_role_can_set_barcodes(client, admin_token):

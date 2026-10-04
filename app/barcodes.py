@@ -371,6 +371,28 @@ def normalize_gtin(code: str, symbology: str = "") -> str | None:
     return base.rjust(14, "0")
 
 
+def normalize_input_gtin(code: str) -> str | None:
+    """Normalise a symbol-context-free input (API / typed) to canonical GTIN-14.
+
+    This is ``normalize_gtin`` with no symbology, plus the 8-digit UPC-E
+    transmission form: that form carries its own check digit, so an 8-digit
+    payload that is *not* a valid EAN-8 can only be it and is expanded rather
+    than rejected. The 6-digit form stays refused here — it has no check
+    digit, so only the scanner's symbology can justify expanding it (see
+    ``normalize_gtin``).
+    """
+    gtin = normalize_gtin(code)
+    if gtin is not None:
+        return gtin
+    base = (code or "").strip()
+    if base.isdigit() and len(base) == 8:
+        try:
+            return upce_to_upca(base).rjust(14, "0")
+        except ValueError:
+            return None
+    return None
+
+
 # --------------------------------------------------------------------------
 # Classification
 # --------------------------------------------------------------------------
@@ -525,8 +547,22 @@ def analyze_scan(barcode: str, symbology: str = "") -> ScanAnalysis:
     # Unknown/empty symbology falls through to content-based detection.
     if symb not in OPAQUE_SYMBOLOGIES:
         gtin14 = normalize_gtin(raw, symbology)
+        if gtin14 is None and symb not in GTIN_SYMBOLOGIES:
+            # No scanner symbology context (an HID capture reports
+            # "HID-Keyboard", not "UPC-E"): an 8-digit payload that is not a
+            # valid EAN-8 may be the UPC-E transmission form, which carries
+            # its own check digit.
+            gtin14 = normalize_input_gtin(raw)
         if gtin14 is not None:
-            info = classify_gtin(gtin14, orig_len=len(base) if base.isdigit() else None)
+            # UPC-E (6- or 8-digit payload) is a GTIN-12 on expansion.
+            # Passing the raw 8 would make classify_gtin label a preamble
+            # scan "GTIN-8" and — because the padded GTIN-14's last-8 view
+            # starts with "0" — wrongly flag it as restricted RCN-8.
+            upce = symb in ("UPC-E", "UPC-E1") or (
+                base.isdigit() and len(base) == 8 and not is_valid_gtin(base)
+            )
+            orig_len = 12 if upce else (len(base) if base.isdigit() else None)
+            info = classify_gtin(gtin14, orig_len=orig_len)
             kind = "gtin" if info.globally_unique else "restricted"
             return ScanAnalysis(raw=raw, symbology=symbology, kind=kind,
                                 key=gtin14, addon=addon, info=info)

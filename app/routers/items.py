@@ -8,7 +8,7 @@ from sqlmodel import Session, or_, select
 from app.database import VECTOR_OPTIONS, get_session
 from app.deps import get_current_user, require_staff
 from app.embeddings import embed_text, embed_text_blob, item_embedding_text, vec_to_blob
-from app.barcodes import normalize_gtin
+from app.barcodes import normalize_input_gtin
 from app.models import Item, User, utcnow
 from app.schemas import ItemIn, ItemOut, ItemPatch, VectorSearchOut
 
@@ -37,7 +37,7 @@ def list_items(
     """
     statement = select(Item)
     if barcode:
-        gtin = normalize_gtin(barcode)
+        gtin = normalize_input_gtin(barcode)
         if gtin is None:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -258,7 +258,18 @@ def update_item(
 
     item.updated_at = utcnow()
     session.add(item)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        # F1: the barcode pre-check above is not race-free (under WAL the
+        # earlier auth read can hold a snapshot where the other item's
+        # barcode is not yet visible). The unique index is the only
+        # race-free authority; mirror create_item and answer 409, never 500.
+        session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Barcode already assigned to another item (concurrent update)",
+        )
     session.refresh(item)
     return ItemOut.model_validate(item)
 

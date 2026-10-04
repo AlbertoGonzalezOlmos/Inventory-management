@@ -21,6 +21,7 @@ from app.barcodes import (
     classify_gtin,
     is_valid_gtin,
     normalize_gtin,
+    normalize_input_gtin,
     split_addon,
     upce_to_upca,
 )
@@ -124,6 +125,16 @@ def test_normalize_upce_needs_symbology():
     # Without the scanner's word a bare 6-digit payload is NOT expanded
     # (expansion always self-validates, so guessing would invent GTINs).
     assert normalize_gtin("425261") is None
+
+
+def test_normalize_input_gtin_accepts_only_the_8_digit_upce_form():
+    # The API/typed path has no symbology; the 8-digit UPC-E transmission form
+    # carries its own check digit, so it can be expanded rather than rejected.
+    assert normalize_input_gtin("04252614") == "00042100005264"
+    assert normalize_input_gtin("04252615") is None     # bad check digit
+    assert normalize_input_gtin("425261") is None       # 6-digit: no check
+    # A valid EAN-8 wins over the UPC-E reading (same length, check passes).
+    assert normalize_input_gtin("96385074") == "00000096385074"
 
 
 def test_normalize_addons_and_ai_prefix():
@@ -241,3 +252,20 @@ def test_analyze_scan_kinds():
 def test_analyze_scan_strips_addon_but_keeps_identity():
     a = analyze_scan("4006381333931 51", "EAN-13+2")
     assert a.kind == "gtin" and a.key == "04006381333931" and a.addon == "51"
+
+
+def test_analyze_upce_preamble_is_global_gtin12_not_restricted_gtin8():
+    """Regression: the 8-digit UPC-E preamble expands to a UPC-A (GTIN-12).
+
+    It used to be classified GTIN-8; the padded GTIN-14's last-8 view starts
+    with "0", so it was then wrongly flagged as a restricted RCN-8 code.
+    """
+    a = analyze_scan("04252614", "UPC-E")
+    assert a.kind == "gtin" and a.key == "00042100005264"
+    assert a.info.format == "GTIN-12" and a.info.globally_unique is True
+    # The same payload from an HID capture (no symbology) is recognised too.
+    b = analyze_scan("04252614", "HID-Keyboard")
+    assert b.kind == "gtin" and b.info.format == "GTIN-12"
+    # A genuine EAN-8 is still a GTIN-8.
+    c = analyze_scan("96385074", "")
+    assert c.kind == "gtin" and c.info.format == "GTIN-8"

@@ -216,9 +216,10 @@ def analyze_intake(scans: list[ScanRecord], by_gtin, by_sku) -> list[Group]:
 def _suggest_sku(analysis) -> str | None:
     """SKU placeholder for a new entry: keep it derived from the identity.
 
-    GTINs get BC-<last 8 digits of the GTIN-13 view> (short, stable, unique
-    because the GTIN is); opaque payloads get their own text (that IS the
-    identity the label carries).
+    GTINs get BC-<last 8 digits of the GTIN-13 view> (short, stable, derived
+    from the identity; not guaranteed collision-free — the API's SKU
+    uniqueness check is the authority), opaque payloads get their own text
+    (that IS the identity the label carries).
     """
     if analysis.kind in ("gtin", "restricted") and analysis.info is not None:
         return f"BC-{analysis.key[6:]}"

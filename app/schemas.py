@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.barcodes import normalize_gtin
+from app.barcodes import normalize_input_gtin
 
 # Pragmatic email check (dependency-free alternative to EmailStr).
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
@@ -26,7 +26,7 @@ def _normalized_gtin_or_none(value):
     value = value.strip()
     if not value:
         return None
-    gtin = normalize_gtin(value)
+    gtin = normalize_input_gtin(value)
     if gtin is None:
         raise ValueError(
             "barcode must be a valid GTIN (EAN-13/EAN-8/UPC-A/UPC-E/GTIN-14 "

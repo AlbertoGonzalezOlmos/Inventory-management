@@ -35,7 +35,9 @@ Serial settings: 9600 baud, 8 data bits, ODD parity, 1 stop bit.
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
+import io
 import json
 import os
 import re
@@ -779,6 +781,18 @@ def cmd_set_time(dev: OPN2001, args) -> int:
     return 0
 
 
+def csv_line(timestamp: str, symbology: str, barcode: str) -> str:
+    """One CSV record ``timestamp,symbology,barcode``, quoted as needed.
+
+    Uses ``csv.writer`` so a barcode containing a comma (legal in Code 128,
+    Data Matrix, …) stays one field — ``scan_intake.py`` reads these lines
+    with ``csv.reader`` and would otherwise split it into extra columns.
+    """
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerow([timestamp, symbology, barcode])
+    return buf.getvalue().rstrip("\n")
+
+
 def cmd_read(dev: OPN2001, args) -> int:
     device_id, scans = dev.get_data()
     if args.json:
@@ -802,7 +816,7 @@ def cmd_read(dev: OPN2001, args) -> int:
         )
     else:
         for s in scans:
-            print(f"{s.timestamp.isoformat(sep=' ')},{s.symbology},{s.barcode}")
+            print(csv_line(s.timestamp.isoformat(sep=" "), s.symbology, s.barcode))
         print(f"# {len(scans)} scan(s) from device {device_id}", file=sys.stderr)
     if args.clear_after:
         dev.clear()

@@ -25,6 +25,7 @@ from scripts.opn2001 import (
     Scan,
     build_frame,
     crc16,
+    csv_line,
     pack_timestamp,
     parse_time_payload,
     read_frame,
@@ -75,6 +76,15 @@ def test_build_frame_with_payload_includes_pad_and_crc():
 def test_build_frame_rejects_oversized_payload():
     with pytest.raises(ValueError):
         build_frame(0x03, b"x" * 32)
+
+
+def test_csv_line_quotes_comma_barcode():
+    # scan_intake.py reads these lines with csv.reader; a Code 128/Data Matrix
+    # payload may contain a comma, which must stay one field.
+    assert csv_line("2026-09-29 10:00:00", "Code 128", "BOX, LARGE") == \
+        '2026-09-29 10:00:00,Code 128,"BOX, LARGE"'
+    assert csv_line("2026-09-29 10:00:00", "EAN-13", "8412345678905") == \
+        "2026-09-29 10:00:00,EAN-13,8412345678905"
 
 
 # --- Frame round-trip --------------------------------------------------------
