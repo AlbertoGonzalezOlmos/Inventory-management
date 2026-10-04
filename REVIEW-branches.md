@@ -9,7 +9,7 @@
 ## 0. Topology (measured)
 
 `main` = `fbecbe9` (merge of PR #1, `round5-remediation`); it has not moved
-since all scanner branches split from it. The four live feature branches form
+since all scanner branches split from it. The five live feature branches form
 one **linear, cumulative stack**:
 
 ```
@@ -18,10 +18,15 @@ main fbecbe9
         └── feature/opn2001-scanner-connection  b37269f   +3 commits
               └── feature/opticon-m10-scanner    cbfad87   +10 commits
                     └── refactor/table-driven-migrations  788e7be   +1 commit
+                          └── round6/scanner-completion   72cdddf   +4 commits
 ```
 
-Because each branch contains its predecessor as an ancestor, **the only
-conflict-free merge order is the stack order**. The `app/main.py` migration
+Because each branch contains its predecessor as an ancestor, the whole stack
+can in fact be merged in **one shot** — merging the top tip into `main` is
+conflict-free and already contains every lower branch. The stack order below
+is the *intended* order, not a Git constraint: it is what keeps each PR's
+"Files changed" to one workstream and preserves the per-layer review history.
+The `app/main.py` migration
 anchor (three branches each appending an `if` block) was the reason the
 `refactor/table-driven-migrations` branch exists; that branch now removes the
 conflict by construction (see §5). `origin/archive/m10-qr-eeeeb4e` and the
@@ -36,6 +41,7 @@ pre-round-5 iterations (see §6).
 | `feature/opn2001-scanner-connection` | 226 | 225 passed, 1 skipped |
 | `feature/opticon-m10-scanner` | 291 | 290 passed, 1 skipped |
 | `refactor/table-driven-migrations` | 298 | 297 passed, 1 skipped |
+| `round6/scanner-completion` | 317 | 316 passed, 1 skipped pre-F5 (317 after the F5 tripwire — §8a/§10) |
 
 The one skip is `tests/test_scripts_contract.py:214` — "no ./data/hcrm.db in
 this checkout" (it only runs where a live database file exists); no failures
@@ -233,17 +239,21 @@ the tree is "done" without listing them:
 4. `refactor/table-driven-migrations` → rebase → merge (plus the NOTES.md §4.1
    update from §5). Merging 1–4 in order reproduces the refactor tip's tree
    exactly.
-5. Follow-ups: bridge tests for `--relogin` and the badge path (§4, item 5), the
-   `stock-adjust`/`stock-count` endpoints (P6), hardware verification
-   addenda, W6.2/W1.3/W7.2.
+5. `round6/scanner-completion` → PR → merge (the round-6 completion items in
+   §8a: NOTES drift, bridge relogin/badge tests, atomic `stock-adjust`).
+6. Follow-ups: the `stock-count` companion endpoint (P6), hardware
+   verification addenda, W6.2/W1.3/W7.2. (The bridge `--relogin`/badge tests
+   and the `stock-adjust` endpoint are done — §8a.)
 
 ---
 
 ## 8a. Round-6 update (2026-10-03) — items completed on `round6/scanner-completion`
 
 Three of this plan's code items are now done in **PR #3**
-(`round6/scanner-completion` → `refactor/table-driven-migrations`), 316
-passed / 1 skipped forward and reverse:
+(`round6/scanner-completion` → `refactor/table-driven-migrations`): 316
+passed / 1 skipped forward and reverse as first measured — that snapshot
+predates the F5 pool fix; **317 / 1** once
+`test_adjust_holds_exactly_one_pooled_connection` was added with it (§10):
 
 - §5, item 1 (NOTES.md §4.1 drift) — fixed; the doc now describes
   `COLUMN_MIGRATIONS`/`INDEX_MIGRATIONS` and the append-only rule.
@@ -259,6 +269,29 @@ passed / 1 skipped forward and reverse:
 Still open and unchanged: hardware verification (§2/§3/§4, item 4), the
 `stock-count` companion endpoint, `ScanParser`'s documented `.strip()`, and
 the repo-level W1.3/W6.2/W7.2 items.
+
+---
+
+## 9. Addendum — what the first pass of this review got wrong
+
+Re-checked 2026-10-03 (trial merges executed, skip identity identified, test
+coverage grepped). Two claims were corrected above; recorded here so the next
+review does not re-make them:
+
+1. **"Expect that one hunk" when merging the M-10 branch** — wrong for the
+   in-order case. The branches are a linear stack on an unmoved `main`, so
+   stack-order merges are clean and the final tree equals the refactor tip
+   (measured, §0). The conflict is real only for out-of-order merges or
+   rebases — the scenario the migration refactor removes. Mechanics belong in
+   an executed command, not a prediction (the same lesson `REVIEW-m10.md` §5.4
+   recorded for its own stale branch-mechanics section).
+2. **"`--relogin` is covered by unit tests"** — false; there is no relogin
+   test on any branch, and the bridge's badge dispatch is likewise untested
+   at bridge level. Both were §4, item 5 action items; both landed in PR #3
+   (§8a). The driver-level P2 fixes
+   (callback raising `SystemExit`, broken `on_error`, interleaved delivery,
+   exclusive open, termios restore) *are* pinned by pty tests in
+   `tests/test_scanner.py` — that part of the original claim was correct.
 
 ---
 
@@ -371,27 +404,6 @@ a stock scan yields a per-scan `ApiError` report, not a crash), and
 | 5 | **F4**: none — fixed by the stack; just merge in order | — | — |
 | 6 | After merges: delete `archive/m10-qr-eeeeb4e` + the three archive tags and the merged branches | GitHub | ~5 min |
 
----
-
-## 9. Addendum — what the first pass of this review got wrong
-
-Re-checked 2026-10-03 (trial merges executed, skip identity identified, test
-coverage grepped). Two claims were corrected above; recorded here so the next
-review does not re-make them:
-
-1. **"Expect that one hunk" when merging the M-10 branch** — wrong for the
-   in-order case. The branches are a linear stack on an unmoved `main`, so
-   stack-order merges are clean and the final tree equals the refactor tip
-   (measured, §0). The conflict is real only for out-of-order merges or
-   rebases — the scenario the migration refactor removes. Mechanics belong in
-   an executed command, not a prediction (the same lesson `REVIEW-m10.md` §5.4
-   recorded for its own stale branch-mechanics section).
-2. **"`--relogin` is covered by unit tests"** — false; there is no relogin
-   test on any branch, and the bridge's badge dispatch is likewise untested
-   at bridge level. Both are now §4, item 5 action items. The driver-level P2 fixes
-   (callback raising `SystemExit`, broken `on_error`, interleaved delivery,
-   exclusive open, termios restore) *are* pinned by pty tests in
-   `tests/test_scanner.py` — that part of the original claim was correct.
 ---
 
 ## 11. The stacked-PR structure (created 2026-10-03)
