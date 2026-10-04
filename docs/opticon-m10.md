@@ -275,11 +275,16 @@ decrement clamped at 0 is reported as clamped, not silently dropped),
 (seconds, default 10 — HTTP calls run on the scanner's reader thread, so a
 stalled server must fail fast instead of blocking the port).
 
-Stock adjustment is read-modify-write (`GET` then `PATCH /api/items/{id}`),
-so it is fine at counter speed but not atomic — two bridges scanning the
-same item concurrently can lose an increment. If that becomes a real
-deployment mode, add a dedicated `POST /api/items/{id}/stock-adjust`
-endpoint with SQL-side arithmetic.
+Stock adjustment is **atomic**: the bridge calls
+`POST /api/items/{id}/stock-adjust`, which applies the delta inside one
+targeted `BEGIN IMMEDIATE` (a per-operation write lock around the
+read-modify-write — *not* the global connection hook `app/database.py`
+documents as an incident). Two bridges scanning the same item concurrently
+serialise and lose nothing; the response reports the applied delta and
+whether the adjustment clamped at 0, and the bridge surfaces both. The
+endpoint bounds `delta` to ±100 000 and rejects 0; the bridge *requires* it,
+so a stock scan against an older server is reported as a per-scan `ApiError`
+(not a crash).
 
 ## 6a. Bridge behaviour with QR badges
 
