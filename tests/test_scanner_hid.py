@@ -7,7 +7,12 @@ reports shaped exactly like the ones a keyboard-mode barcode scanner emits
 
 import pytest
 
-from scripts.scanner_hid import group_scans_from_reports, parse_keyboard_report
+from scripts.scanner_hid import (
+    ScanAssembler,
+    format_csv_row,
+    group_scans_from_reports,
+    parse_keyboard_report,
+)
 
 
 def report(*usages, modifier=0x00):
@@ -47,6 +52,29 @@ def test_digit_usages_are_hid_standard():
 def test_enter_terminates():
     text, enter = parse_keyboard_report(report(40))
     assert (text, enter) == ("", True)
+
+
+def test_comma_usage_is_supported():
+    # Usage 54 is ','; barcodes are not restricted to GTIN characters.
+    assert parse_keyboard_report(report(54)) == (",", False)
+
+
+def test_report_with_text_and_enter_keeps_the_text():
+    # A scanner may pack the final character and its CR suffix into one report;
+    # the character must not be dropped (previously it was).
+    assert parse_keyboard_report(report(USAGE["5"], 40)) == ("5", True)
+    assert group_scans_from_reports(
+        [report(USAGE["4"]), report(USAGE["5"], 40)]
+    ) == ["45"]
+
+
+def test_scan_assembler_is_the_shared_runtime_path():
+    # The live hidraw/hidapi loops feed this same object, so this test covers
+    # the code that actually runs (not just a parallel copy of it).
+    assembler = ScanAssembler()
+    assert assembler.feed(report(USAGE["a"])) is None
+    assert assembler.feed(report(40)) == "a"
+    assert assembler.feed(report(40)) is None  # empty Enter emits nothing
 
 
 def test_rollover_and_padding_ignored():
@@ -104,3 +132,12 @@ def test_uppercase_uses_shift_modifier():
     reports = _spell("EX1") + [report(40)]
     assert group_scans_from_reports(reports) == ["EX1"]
     assert reports[0][0] == 0x02  # shift modifier set for the uppercase key
+
+
+def test_csv_row_quotes_separators_and_quotes():
+    # A barcode with a comma must stay one CSV field, not split into columns.
+    assert format_csv_row("2026-09-29 10:12:03", "A,B") == \
+        '2026-09-29 10:12:03,HID-Keyboard,"A,B"'
+    assert format_csv_row("t", 'a"b') == 't,HID-Keyboard,"a""b"'
+    # Ordinary GTINs are emitted unchanged (no gratuitous quoting).
+    assert format_csv_row("t", "8412345678905") == "t,HID-Keyboard,8412345678905"

@@ -38,13 +38,14 @@ punctuation, plus shift handling and rollover tolerance.
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
+import io
 import json
 import os
 import re
 import sys
 import time
-from dataclasses import dataclass
 
 DEFAULT_VID_PID = (0x065A, 0xA001)  # Opticon USB Barcode Reader (HID mode)
 
@@ -88,20 +89,57 @@ def parse_keyboard_report(report: bytes) -> tuple[str, bool]:
     return text, _USAGE_ENTER in keys
 
 
+class ScanAssembler:
+    """Accumulate boot-keyboard reports into Enter-terminated barcodes.
+
+    This is the single implementation behind both the pure test helper
+    (``group_scans_from_reports``) and the two live backends, so the logic the
+    tests exercise is the logic that actually runs. It used to be written out
+    three times — once per loop and once in the helper — which is how the
+    combined report bug below survived the tests.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+
+    def feed(self, report: bytes) -> str | None:
+        """Add one report; return a completed barcode, or None.
+
+        Text is appended *before* the terminator is handled: a scanner can
+        pack the final character and its CR suffix into the same boot-keyboard
+        report, and dropping it loses the last character of the barcode. An
+        Enter-only report with an empty buffer emits nothing.
+        """
+        text, enter = parse_keyboard_report(report)
+        self._buffer += text
+        if not enter:
+            return None
+        scan, self._buffer = self._buffer, ""
+        return scan or None
+
+
 def group_scans_from_reports(reports: list[bytes]) -> list[str]:
     """Feed a sequence of reports; return the complete (Enter-terminated)
     payloads. Kept as a pure function so tests need no device."""
-    buffer = ""
+    assembler = ScanAssembler()
     out: list[str] = []
     for report in reports:
-        text, enter = parse_keyboard_report(report)
-        if enter:
-            if buffer:
-                out.append(buffer)
-            buffer = ""
-        else:
-            buffer += text
+        scan = assembler.feed(report)
+        if scan is not None:
+            out.append(scan)
     return out
+
+
+def format_csv_row(when: str, text: str) -> str:
+    """One CSV record ``timestamp,symbology,barcode``, quoted only as needed.
+
+    Uses ``csv.writer`` rather than f-string interpolation so a barcode
+    containing a comma, quote or newline stays one field: the HID usage map
+    includes ',' (usage 54) and Code 128 can carry the printable ASCII set.
+    """
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerow([when, "HID-Keyboard", text])
+    return buf.getvalue().rstrip("\n")
 
 
 # --------------------------------------------------------------------------
@@ -150,19 +188,15 @@ def run_hidraw(node: str, on_scan) -> None:
     the boot-keyboard payload starts at byte 1.
     """
     fd = os.open(node, os.O_RDONLY)
-    buffer = ""
+    assembler = ScanAssembler()
     try:
         while True:
             report = os.read(fd, 64)
             if not report:
                 continue
-            text, enter = parse_keyboard_report(report[1:])
-            if enter:
-                if buffer and on_scan(buffer) is False:
-                    return
-                buffer = ""
-            else:
-                buffer += text
+            scan = assembler.feed(report[1:])
+            if scan is not None and on_scan(scan) is False:
+                return
     finally:
         os.close(fd)
 
@@ -187,7 +221,7 @@ def run_hidapi(vid_pid, on_scan) -> None:
     dev = hid.device()
     dev.open_path(matches[0]["path"])
     dev.setnonblocking(False)
-    buffer = ""
+    assembler = ScanAssembler()
     try:
         while True:
             report = dev.read(64)
@@ -196,13 +230,9 @@ def run_hidapi(vid_pid, on_scan) -> None:
                 continue
             # Like hidraw, hidapi's first byte is the report ID (0x00 for
             # unnumbered boot-keyboard reports).
-            text, enter = parse_keyboard_report(bytes(report)[1:])
-            if enter:
-                if buffer and on_scan(buffer) is False:
-                    return
-                buffer = ""
-            else:
-                buffer += text
+            scan = assembler.feed(bytes(report)[1:])
+            if scan is not None and on_scan(scan) is False:
+                return
     finally:
         dev.close()
 
@@ -261,7 +291,7 @@ def main(argv=None) -> int:
             records.append({"barcode": text, "symbology": "HID-Keyboard",
                             "symbology_id": None, "timestamp": when})
         else:
-            print(f"{when},HID-Keyboard,{text}", flush=True)
+            print(format_csv_row(when, text), flush=True)
         if args.count and count[0] >= args.count:
             return False
         return None
