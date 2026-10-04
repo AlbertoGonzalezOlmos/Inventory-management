@@ -14,8 +14,9 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.deps import require_admin, require_staff
 from app.models import AuthToken, User
-from app.schemas import MemberIn, MemberPatch, UserOut
-from app.security import hash_password, is_well_known_password
+from app.qrbadge import badge_svg, new_badge_payload
+from app.schemas import MemberIn, MemberPatch, QrBadgeOut, UserOut
+from app.security import hash_password, is_well_known_password, token_hash
 
 router = APIRouter(prefix="/api/members", tags=["members"])
 
@@ -169,6 +170,52 @@ def update_member(
         raise
     session.refresh(user)
     return UserOut.model_validate(user)
+
+
+def _get_manageable_member(session: Session, user_id: int, actor: User) -> User:
+    """Fetch a member for badge management, applying the same privilege rule
+    as account edits: staff can never touch an admin account."""
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+    if user.role == "admin" and actor.role != "admin":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Admin accounts can only be managed by admins"
+        )
+    return user
+
+
+@router.post(
+    "/{user_id}/qr-badge",
+    response_model=QrBadgeOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_member_badge(
+    user_id: int,
+    staff: User = Depends(require_staff),
+    session: Session = Depends(get_session),
+):
+    """Generate (or replace) a member's QR login badge — e.g. to print a
+    membership card at the counter. Replacing revokes the previous badge."""
+    user = _get_manageable_member(session, user_id, staff)
+    payload = new_badge_payload()
+    user.qr_badge_hash = token_hash(payload)
+    session.add(user)
+    session.commit()
+    return QrBadgeOut(payload=payload, svg=badge_svg(payload))
+
+
+@router.delete("/{user_id}/qr-badge", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_member_badge(
+    user_id: int,
+    staff: User = Depends(require_staff),
+    session: Session = Depends(get_session),
+):
+    """Revoke a member's QR badge (lost/stolen card)."""
+    user = _get_manageable_member(session, user_id, staff)
+    user.qr_badge_hash = None
+    session.add(user)
+    session.commit()
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)

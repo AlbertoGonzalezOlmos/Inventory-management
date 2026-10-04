@@ -24,7 +24,15 @@ class User(SQLModel, table=True):
     # True while the account uses a password it must change (seeded default
     # password or an admin-issued reset). Enforced in get_current_user.
     must_change_password: bool = Field(default=False)
+    # SHA-256 hash of the QR badge credential (app.qrbadge), None when the
+    # account has no badge. Like session tokens, the raw badge secret is
+    # never persisted — a leaked database must not yield printable badges.
+    qr_badge_hash: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+
+    @property
+    def has_qr_badge(self) -> bool:
+        return self.qr_badge_hash is not None
 
 
 class Item(SQLModel, table=True):

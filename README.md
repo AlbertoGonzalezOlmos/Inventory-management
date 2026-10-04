@@ -154,6 +154,23 @@ that adds SIMD-accelerated vector search:
 - Connection, WSL2/`usbipd` passthrough, permissions and troubleshooting:
   **`docs/opticon-hardware.md`**.
 
+### Barcode scanner (Opticon M-10)
+- Hardware integration for the Opticon M-10 2D presentation scanner:
+  stdlib-first serial driver (`app/scanner/`, pyserial optional — one reader
+  thread owns the port, so a scan interleaved with a command ACK is delivered,
+  not dropped) plus a bridge that matches scans by **exact identity**
+  (canonical GTIN, or exact SKU for opaque labels) and can adjust stock
+  (`scripts/scanner_bridge.py`). It never guesses: keyword matching is opt-in
+  and refused outright when combined with a stock adjustment, and it will not
+  open a serial port it has not verified as the M-10's `065A:A002`.
+- **QR badge login**: every account can get a printable QR badge
+  (`HCRM1:…` payload) that logs in instead of email+password — scan it into
+  the badge field on the login page (USB-HID mode) or exchange it via
+  `POST /api/auth/qr-login` (bridge/kiosk). Badges are bearer credentials:
+  only the SHA-256 hash is stored, regenerating revokes the previous one.
+- Full setup, protocol, QR-badge and troubleshooting guide:
+  **`docs/opticon-m10.md`**.
+
 ## Project layout
 
 ```
@@ -166,14 +183,18 @@ that adds SIMD-accelerated vector search:
 │   ├── deps.py           # get_current_user / require_staff / require_admin
 │   ├── embeddings.py     # fastembed wrapper + float32 BLOB serialization
 │   ├── seed.py           # 12 example items + embedding backfill
+│   ├── scanner/          # Opticon M-10 driver (protocol, transport, m10)
+│   ├── qrbadge.py        # QR badge payloads + inline-SVG rendering
+│   ├── vendor/           # vendored pure-Python deps (Nayuki QR encoder, MIT)
 │   └── routers/
-│       ├── auth.py       # /api/auth/*      register, login, logout, me
+│       ├── auth.py       # /api/auth/*      register, login, QR badge, logout, me
 │       ├── items.py      # /api/items/*     browse, vector-search, input
 │       └── members.py    # /api/members/*   account management
 ├── static/               # Vue 3 SPA (index.html, app.js, style.css, vendored libs)
 ├── data/                 # SQLite database (runtime only — git-ignored)
 ├── docs/
-│   └── opticon-hardware.md # which Opticon scanner is attached, and how to reach it
+│   ├── opticon-hardware.md # which Opticon scanner is attached, and how to reach it
+│   └── opticon-m10.md    # Opticon M-10: connection, command protocol, guide
 ├── scripts/
 │   ├── run.sh            # one-command startup (prints the DB it will open;
 │   │                     # HCRM_SCRATCH=1 for a throwaway one)
@@ -186,7 +207,8 @@ that adds SIMD-accelerated vector search:
 │   ├── ui_check.py       # browser gate: renders the SPA + /docs in headless
 │   │                     # Chrome and fails on console errors / missing DOM
 │   ├── smoke_test.py     # end-to-end API test (self-hosts by default)
-│   └── load_test.py      # availability check: concurrent logins must not lock the DB
+│   ├── load_test.py      # availability check: concurrent logins must not lock the DB
+│   └── scanner_bridge.py # Opticon M-10 → catalogue lookup / stock bridge
 ├── tests/                # pytest suite (per-test fresh DB, fake embeddings)
 └── pyproject.toml        # uv-managed dependencies
 ```
@@ -199,6 +221,11 @@ that adds SIMD-accelerated vector search:
 - `POST /api/auth/change-password` — self-service password change (verifies
   the current password, revokes all other sessions, clears
   `must_change_password`)
+- `POST /api/auth/qr-login` — log in with a QR badge (`HCRM1:…` payload or
+  raw token) → token; `POST`/`DELETE /api/auth/qr-badge` — generate/replace
+  (returns payload + printable SVG, exactly once) or revoke your own badge;
+  `POST`/`DELETE /api/members/{id}/qr-badge` — staff issue/revoke badges for
+  members (admin accounts: admins only)
 - `GET /api/healthz` — liveness probe:
   `{ok, vector, embeddings, insecure_dev_admin, pbkdf2_iterations}`. The
   extension check is cached at startup (never re-probed under load), the model
