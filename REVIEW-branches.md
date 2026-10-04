@@ -392,3 +392,46 @@ review does not re-make them:
    (callback raising `SystemExit`, broken `on_error`, interleaved delivery,
    exclusive open, termios restore) *are* pinned by pty tests in
    `tests/test_scanner.py` — that part of the original claim was correct.
+---
+
+## 11. The stacked-PR structure (created 2026-10-03)
+
+The stack is now represented as **six PRs with chained bases**, so each PR's
+"Files changed" is exactly one workstream and no PR's diff contains another's
+work. The GitHub-reported counts were verified against `git diff --shortstat`
+per layer: all six match the local measurement.
+
+| Layer | PR | Head → base | Delta | Content |
+|---|---|---|---|---|
+| 0 | #4 | `docs/branch-review-record` → `main` | 1 file, +394 | this document |
+| 1 | #5 | `feature/opticon-hardware-layer` → `main` | 8 files, +1 332 | shared Opticon hardware layer |
+| 2 | #2 | `feature/opn2001-scanner-connection` → layer 1 | 14 files, +4 260/−5 | OPN-2001 + GTIN-14 identity + intake |
+| 3 | #6 | `feature/opticon-m10-scanner` → layer 2 | 22 files, +4 190/−9 | M-10 driver, bridge, QR-badge login |
+| 4 | #7 | `refactor/table-driven-migrations` → layer 3 | 2 files, +251/−43 | table-driven migrations |
+| 5 | #3 | `round6/scanner-completion` → layer 4 | 9 files, +520/−41 | round-6 completion |
+
+**Why chained bases rather than five PRs all targeting `main`.** With a common
+base every PR's diff is cumulative — layer 5 would show ~10 000 changed lines —
+so a reviewer cannot see what a layer actually did, and the review record that
+belongs to a layer (`REVIEW-m10.md`, this file) cannot be matched against the
+diff it describes. Chaining preserves the repo's "one workstream = one PR"
+rule and makes the merge order explicit in the PR graph itself.
+
+**Merge procedure** (repeated in every PR body):
+
+1. Merge in layer order 1 → 5. Layer 0 is docs-only and independent.
+2. After a parent merges, **retarget the child PR's base to `main`** (the
+   *base* dropdown, or `PATCH /pulls/N` with `{"base":"main"}`). The child's
+   diff does not change, because its parent is now in `main`.
+3. **Do not delete a parent branch before its child has been retargeted** —
+   deleting the base branch of an open PR closes that PR.
+4. Delete branches (and the `archive/*` branch and tags, §6) only once the
+   whole stack has merged.
+
+**Also corrected while building the stack (finding F2):** PR #2's description
+cited three commits that are not ancestors of its head (`033b556`, `b2ed226`,
+`f79ae74` — the archived pre-round-5 attempts) and a test count (161) that
+cannot have come from it. It is rewritten from the real head `b37269f` with
+measured numbers (225 passed + 1 skipped), its base moved from `main` to
+layer 1, and it now carries the F1 finding with its reproduction so the
+defect is visible where the fix belongs.
