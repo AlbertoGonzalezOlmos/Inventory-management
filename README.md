@@ -139,6 +139,21 @@ that adds SIMD-accelerated vector search:
   (an `AI ✓` column shows which items have embeddings)
 - Member account creation (member or staff role), account management
 
+### Barcode scanner hardware (back office)
+- `scripts/opticon_detect.py` — one shared map of the Opticon USB
+  personalities (`0009` OPN-2001 serial, `A001` USB-HID keyboard, `A002`
+  USB-COM/CDC-ACM): what is attached, which kernel node it got, and which tool
+  receives from it. Identities carry their provenance, and an
+  observed-but-undocumented PID is reported as such rather than guessed.
+- `scripts/scanner_hid.py` — live capture from a USB-HID (keyboard-mode)
+  scanner without window focus: `hidraw` (stdlib) on Linux/WSL2, `hidapi` on
+  Windows/macOS; emits `timestamp,symbology,barcode` CSV or JSON.
+- `scripts/udev/99-opticon-scanner.rules` — one-time sudo install granting
+  `plugdev` access to the tty/hidraw/usbfs nodes (WSL sessions have no seat,
+  so the automatic `uaccess` ACL never fires).
+- Connection, WSL2/`usbipd` passthrough, permissions and troubleshooting:
+  **`docs/opticon-hardware.md`**.
+
 ## Project layout
 
 ```
@@ -157,12 +172,17 @@ that adds SIMD-accelerated vector search:
 │       └── members.py    # /api/members/*   account management
 ├── static/               # Vue 3 SPA (index.html, app.js, style.css, vendored libs)
 ├── data/                 # SQLite database (runtime only — git-ignored)
+├── docs/
+│   └── opticon-hardware.md # which Opticon scanner is attached, and how to reach it
 ├── scripts/
 │   ├── run.sh            # one-command startup (prints the DB it will open;
 │   │                     # HCRM_SCRATCH=1 for a throwaway one)
 │   ├── backup_db.sh      # WAL-checkpoint-then-verify backup (never copy .db alone)
 │   ├── _hcrm.py          # shared script contract: self-hosting, credentials,
 │   │                     # reporting, no password restore
+│   ├── opticon_detect.py # the repo's one map of Opticon USB personalities
+│   ├── scanner_hid.py    # receive scans from a USB-HID (keyboard-mode) scanner
+│   ├── udev/             # one-time sudo install: device-node permissions
 │   ├── ui_check.py       # browser gate: renders the SPA + /docs in headless
 │   │                     # Chrome and fails on console errors / missing DOM
 │   ├── smoke_test.py     # end-to-end API test (self-hosts by default)
