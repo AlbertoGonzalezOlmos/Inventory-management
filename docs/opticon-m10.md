@@ -284,7 +284,9 @@ serialise and lose nothing; the response reports the applied delta and
 whether the adjustment clamped at 0, and the bridge surfaces both. The
 endpoint bounds `delta` to ±100 000 and rejects 0; the bridge *requires* it,
 so a stock scan against an older server is reported as a per-scan `ApiError`
-(not a crash).
+(not a crash). If the write lock cannot be taken within the busy timeout
+(sustained write contention), the endpoint answers **503** with `Retry-After`
+rather than a 500 — a retry-later condition.
 
 ## 6a. Bridge behaviour with QR badges
 

@@ -1,5 +1,7 @@
 """Catalogue endpoints: browse (members), semantic search, and item input (staff)."""
 
+import sqlite3
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -323,7 +325,19 @@ def adjust_stock(
     try:
         raw.isolation_level = None  # driver autocommit: we issue BEGIN ourselves
         cur = raw.cursor()
-        cur.execute("BEGIN IMMEDIATE")
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            # F7: sustained write contention outlasted busy_timeout (5 s).
+            # That is a retry-later condition, not a server fault, so answer
+            # 503 rather than a 500 "database is locked" traceback.
+            if "locked" in str(exc).lower():
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "database is locked by another writer; retry the adjustment",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            raise
         try:
             row = cur.execute(
                 "SELECT sku, stock FROM items WHERE id = ?", (item_id,)

@@ -396,7 +396,6 @@ touching `./data`).
 | **Tokens in `localStorage`** | Exfiltratable by any script that runs — which `'unsafe-eval'` makes easier. HttpOnly cookies + CSRF tokens would fix it and change the API contract. |
 | **Refresh tokens / session expiry UX** | Sessions simply expire after 7 days. |
 | **Server-side checkout** | The purchase list is client-side only (`requestPurchase()` is a placeholder). |
-| **Admin password reset uses `prompt()`** | The temporary password is typed and shown in plaintext; it should use the existing modal with `type=password`. |
 | **`PRAGMA foreign_keys` is OFF** | `auth_tokens.user_id` is declarative only; enforcing it needs a table rebuild. The only user-deleting path removes tokens first. |
 | **Quantized ANN scans** (`vector_quantize`) | Exact `vector_full_scan` is comfortable to ~100k items; see the measurements above. |
 
