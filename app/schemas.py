@@ -2,10 +2,37 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.barcodes import normalize_input_gtin
 
 # Pragmatic email check (dependency-free alternative to EmailStr).
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+def _normalized_gtin_or_none(value):
+    """Canonicalise a user-supplied barcode to GTIN-14 (or None when empty).
+
+    Accepts any EAN/UPC representation (EAN-13, EAN-8, UPC-A, 8-digit UPC-E
+    with preamble, GTIN-14) and stores the zero-padded 14-digit form, so the
+    same product scanned/typed in different formats can never create two
+    catalogue entries. Raises ValueError (→ 422) on a bad check digit or
+    implausible length — a typo must not silently become an identity.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("barcode must be a string of digits")
+    value = value.strip()
+    if not value:
+        return None
+    gtin = normalize_input_gtin(value)
+    if gtin is None:
+        raise ValueError(
+            "barcode must be a valid GTIN (EAN-13/EAN-8/UPC-A/UPC-E/GTIN-14 "
+            "with a correct check digit); got " + repr(value)
+        )
+    return gtin
 
 
 class _Stripped(BaseModel):
@@ -83,6 +110,13 @@ class ItemIn(_Stripped):
     price_cents: int = Field(default=0, ge=0)
     stock: int = Field(default=0, ge=0)
     image_url: str = ""
+    # Canonical GTIN-14 of the retail barcode, or null for SKU-only stock.
+    barcode: str | None = None
+
+    @field_validator("barcode", mode="before")
+    @classmethod
+    def _canonical_barcode(cls, v):
+        return _normalized_gtin_or_none(v)
 
 
 class ItemPatch(_PatchIn):
@@ -92,6 +126,14 @@ class ItemPatch(_PatchIn):
     price_cents: int | None = Field(default=None, ge=0)
     stock: int | None = Field(default=None, ge=0)
     image_url: str | None = None
+    # "" clears the barcode (explicit null is rejected by _PatchIn like every
+    # other field here); any valid GTIN representation replaces it.
+    barcode: str | None = None
+
+    @field_validator("barcode", mode="before")
+    @classmethod
+    def _canonical_barcode(cls, v):
+        return _normalized_gtin_or_none(v)
 
 
 class ItemOut(BaseModel):
@@ -105,6 +147,7 @@ class ItemOut(BaseModel):
     price_cents: int
     stock: int
     image_url: str
+    barcode: str | None = None
     has_embedding: bool = False
     created_at: datetime
     updated_at: datetime
