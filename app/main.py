@@ -6,6 +6,7 @@ Run with:  uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -117,54 +118,92 @@ def _startup() -> None:
     _vector_status = vector_extension_available()
 
 
+#: Column migrations, for databases created before a column existed.
+#:
+#: ``create_all()`` adds tables it does not find but never ALTERs one it does,
+#: so every new column on an existing table needs an entry here. **Append-only,
+#: one entry per column** — that shape is the point: three branches each added
+#: an ``if`` block at the same anchor in this function (round-5's
+#: ``auth_tokens`` index, ``items.barcode``, ``users.qr_badge_hash``) and
+#: collided textually every single time. Appending to a tuple merges cleanly;
+#: editing a shared block does not.
+#:
+#: Each entry is ``(table, column, column DDL, statements run after the ADD)``.
+#: The post-ADD statements are idempotent (``IF NOT EXISTS``) and run whenever
+#: the table exists — not only when the column was just added — so a database
+#: left half-migrated (the column exists but its index does not, e.g. a crash
+#: between the two statements) is repaired on the next boot instead of staying
+#: without the constraint forever. Identifiers are validated before they reach
+#: SQL, so a typo in this table is a startup error rather than arbitrary SQL.
+COLUMN_MIGRATIONS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("users", "must_change_password", "BOOLEAN NOT NULL DEFAULT 0", ()),
+    # Canonical GTIN-14 of the retail barcode (nullable, unique). ADD COLUMN
+    # cannot carry the UNIQUE constraint, so it gets its own index; a duplicate
+    # would already be impossible in practice (the column starts all-NULL) but
+    # the index enforces it forever.
+    ("items", "barcode", "VARCHAR(14)",
+     ("CREATE UNIQUE INDEX IF NOT EXISTS ix_items_barcode ON items (barcode)",)),
+    # Only the SHA-256 hash of a QR badge is stored (exactly like session
+    # tokens); the index makes the login-by-badge lookup a seek, not a scan.
+    ("users", "qr_badge_hash", "TEXT",
+     ("CREATE INDEX IF NOT EXISTS ix_users_qr_badge_hash "
+      "ON users (qr_badge_hash)",)),
+)
+
+#: Index migrations: an index added to a model never reaches an existing
+#: database either, for the same reason. Idempotent by construction
+#: (IF NOT EXISTS), so these run on every boot.
+INDEX_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    # _issue_token() purges expired rows on every login, so an unindexed
+    # expires_at made that a full table scan per login (PLAN-v2 §8.2 N8).
+    ("auth_tokens",
+     "CREATE INDEX IF NOT EXISTS ix_auth_tokens_expires_at "
+     "ON auth_tokens (expires_at)"),
+)
+
+_SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _check_identifier(value: str, what: str) -> str:
+    if not _SQL_IDENTIFIER.fullmatch(value):
+        raise ValueError(f"invalid {what} in COLUMN_MIGRATIONS: {value!r}")
+    return value
+
+
 def _migrate_schema() -> None:
-    """SQLModel's create_all never ALTERs existing tables — add columns here."""
+    """Bring an existing database up to the current model, idempotently."""
     with engine.begin() as conn:
         tables = {row[0] for row in conn.exec_driver_sql(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)")}
-        if "must_change_password" not in columns:
-            conn.exec_driver_sql(
-                "ALTER TABLE users ADD COLUMN must_change_password "
-                "BOOLEAN NOT NULL DEFAULT 0"
-            )
-            logger.info("Added users.must_change_password column (migration).")
-        # Same reason as the column above: create_all() skips a table it finds,
-        # so an index added to the model never reaches an existing database.
-        if "auth_tokens" in tables:
-            conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_auth_tokens_expires_at "
-                "ON auth_tokens (expires_at)"
-            )
+        seen: dict[str, set[str]] = {}
 
-        item_columns = {
-            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(items)")
-        }
-        if "barcode" not in item_columns:
-            # Canonical GTIN-14 of the retail barcode (nullable, unique).
-            # ADD COLUMN cannot carry the UNIQUE constraint, so it gets its
-            # own index; a duplicate would already be impossible in practice
-            # (the column starts all-NULL) but the index enforces it forever.
-            conn.exec_driver_sql("ALTER TABLE items ADD COLUMN barcode VARCHAR(14)")
-            conn.exec_driver_sql(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ix_items_barcode "
-                "ON items (barcode)"
-            )
-            logger.info("Added items.barcode column (migration).")
+        def columns_of(table: str) -> set[str]:
+            if table not in seen:
+                seen[table] = set() if table not in tables else {
+                    row[1] for row in conn.exec_driver_sql(
+                        f"PRAGMA table_info({_check_identifier(table, 'table')})")
+                }
+            return seen[table]
 
-        # Same shape as the two above, and the same reason: create_all() never
-        # ALTERs a table it finds, so a column added to the model does not
-        # reach an existing database. Only the SHA-256 hash of a badge is
-        # stored (users.qr_badge_hash), exactly like session tokens.
-        if "qr_badge_hash" not in columns:
-            conn.exec_driver_sql(
-                "ALTER TABLE users ADD COLUMN qr_badge_hash TEXT"
-            )
-            conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_users_qr_badge_hash "
-                "ON users (qr_badge_hash)"
-            )
-            logger.info("Added users.qr_badge_hash column (migration).")
+        for table, column, ddl, extra in COLUMN_MIGRATIONS:
+            _check_identifier(table, "table")
+            _check_identifier(column, "column")
+            if table not in tables:
+                continue
+            if column not in columns_of(table):
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                seen[table].add(column)
+                logger.info("Added %s.%s column (migration).", table, column)
+            # Idempotent by construction, so these run on every boot: a
+            # database that has the column but lost its index must be repaired
+            # rather than left half-migrated (Sourcery review of PR #7).
+            for statement in extra:
+                conn.exec_driver_sql(statement)
+
+        for table, statement in INDEX_MIGRATIONS:
+            if table in tables:
+                conn.exec_driver_sql(statement)
 
 
 WEAK_SCAN_KEY = "well_known_password_scan"
