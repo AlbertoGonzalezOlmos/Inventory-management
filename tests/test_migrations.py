@@ -97,6 +97,9 @@ def test_migration_table_is_well_formed():
         seen.add((table, column))
         for statement in extra:
             assert statement.strip().upper().startswith(("CREATE ", "ALTER ")), statement
+            # They now run on every boot (to repair a half-migrated database),
+            # so they must be idempotent.
+            assert "IF NOT EXISTS" in statement.upper(), statement
     for table, statement in INDEX_MIGRATIONS:
         assert identifier.fullmatch(table), table
         assert "IF NOT EXISTS" in statement.upper(), (
@@ -156,6 +159,29 @@ def test_migration_is_idempotent(tmp_path, monkeypatch):
     assert "barcode" in _columns(db, "items")
     assert "qr_badge_hash" in _columns(db, "users")
     assert "ix_items_barcode" in _indexes(db, "items")
+
+
+def test_a_half_migrated_database_is_repaired(tmp_path, monkeypatch):
+    """Column present but its index missing (a crash between the ALTER and the
+    CREATE, or a manual edit): the migration must restore the index.
+
+    The post-ADD statements used to run only when the column was *added*, so a
+    database in this state stayed without the unique barcode constraint (or
+    the badge lookup index) forever.
+    """
+    db = tmp_path / "half.db"
+    _legacy_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE items ADD COLUMN barcode VARCHAR(14)")
+    conn.commit()
+    assert "ix_items_barcode" not in _indexes(db, "items")
+    conn.close()
+
+    _run(db, monkeypatch)
+    assert "ix_items_barcode" in _indexes(db, "items")
+    assert "ix_users_qr_badge_hash" in _indexes(db, "users")
+    # ...and a second boot stays a no-op.
+    _run(db, monkeypatch)
 
 
 def test_a_database_from_before_w40_also_upgrades(tmp_path, monkeypatch):

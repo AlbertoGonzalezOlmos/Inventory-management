@@ -129,8 +129,12 @@ def _startup() -> None:
 #: editing a shared block does not.
 #:
 #: Each entry is ``(table, column, column DDL, statements run after the ADD)``.
-#: Identifiers are validated before they reach SQL, so a typo in this table is
-#: a startup error rather than arbitrary SQL.
+#: The post-ADD statements are idempotent (``IF NOT EXISTS``) and run whenever
+#: the table exists — not only when the column was just added — so a database
+#: left half-migrated (the column exists but its index does not, e.g. a crash
+#: between the two statements) is repaired on the next boot instead of staying
+#: without the constraint forever. Identifiers are validated before they reach
+#: SQL, so a typo in this table is a startup error rather than arbitrary SQL.
 COLUMN_MIGRATIONS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("users", "must_change_password", "BOOLEAN NOT NULL DEFAULT 0", ()),
     # Canonical GTIN-14 of the retail barcode (nullable, unique). ADD COLUMN
@@ -184,14 +188,18 @@ def _migrate_schema() -> None:
         for table, column, ddl, extra in COLUMN_MIGRATIONS:
             _check_identifier(table, "table")
             _check_identifier(column, "column")
-            if table not in tables or column in columns_of(table):
+            if table not in tables:
                 continue
-            conn.exec_driver_sql(
-                f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            if column not in columns_of(table):
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                seen[table].add(column)
+                logger.info("Added %s.%s column (migration).", table, column)
+            # Idempotent by construction, so these run on every boot: a
+            # database that has the column but lost its index must be repaired
+            # rather than left half-migrated (Sourcery review of PR #7).
             for statement in extra:
                 conn.exec_driver_sql(statement)
-            seen[table].add(column)
-            logger.info("Added %s.%s column (migration).", table, column)
 
         for table, statement in INDEX_MIGRATIONS:
             if table in tables:
