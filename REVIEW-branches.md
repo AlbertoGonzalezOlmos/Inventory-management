@@ -218,7 +218,7 @@ the tree is "done" without listing them:
    `git fetch origin 07d879e…` failing.
 2. **W6.2 — `resetMemberPassword()` uses `prompt()`**, so an admin-issued
    temporary password is typed/displayed in plaintext. Replace with the
-   existing modal + `type=password`.
+   existing modal + `type=password`. **Done 2026-10-04 — §12.**
 3. **W7.2 — CSP endgame / vendor swagger-ui** (deferred): precompiled Vue
    render functions to drop `'unsafe-eval'`, and vendored swagger-ui so
    `/docs` works offline and can carry a CSP.
@@ -242,8 +242,9 @@ the tree is "done" without listing them:
 5. `round6/scanner-completion` → PR → merge (the round-6 completion items in
    §8a: NOTES drift, bridge relogin/badge tests, atomic `stock-adjust`).
 6. Follow-ups: the `stock-count` companion endpoint (P6), hardware
-   verification addenda, W6.2/W1.3/W7.2. (The bridge `--relogin`/badge tests
-   and the `stock-adjust` endpoint are done — §8a.)
+   verification addenda, and the repo-level W1.3/W7.2. (The bridge
+   `--relogin`/badge tests and the `stock-adjust` endpoint are done — §8a;
+   W6.2 and F7 are done — §12.)
 
 ---
 
@@ -447,3 +448,45 @@ cannot have come from it. It is rewritten from the real head `b37269f` with
 measured numbers (225 passed + 1 skipped), its base moved from `main` to
 layer 1, and it now carries the F1 finding with its reproduction so the
 defect is visible where the fix belongs.
+
+---
+
+## 12. Round-7 follow-up (2026-10-04) — all layers merged, two items closed
+
+All six PRs (layers 0–5) are merged and `main` is green (330 passed, 1
+skipped forward and reverse). This section records the follow-up work done
+after the merge and what remains.
+
+**Closed**
+
+- **Branch/tag cleanup (§6/§8, item 4).** Every merged branch (`round5-remediation`,
+  `feature/opticon-hardware-layer`, `feature/opn2001-scanner-connection`,
+  `feature/opticon-m10-scanner`, `refactor/table-driven-migrations`,
+  `round6/scanner-completion`, `docs/branch-review-record`) plus the superseded
+  `archive/m10-qr-eeeeb4e` branch and the three `archive/*` tags are deleted;
+  `main` is the only remote ref and there are no tags.
+- **F7 — stock-adjust lock timeout (§10, fix plan item 4).** If
+  `BEGIN IMMEDIATE` cannot take the write lock within `busy_timeout`, the
+  endpoint now answers **503** with `Retry-After: 1` (a retry-later
+  condition), not a 500 `database is locked` traceback. Pinned by
+  `test_lock_timeout_maps_to_503_not_500`, demonstrated failing before the
+  fix.
+- **W6.2 — plaintext password reset (§7, item 2).** `prompt()` is gone;
+  the member password reset is a modal with a `type=password` field
+  (`static/index.html`), `autocomplete="new-password"`, inline error
+  reporting, and the API PATCH behind `submitPwReset()`. The README
+  tracked-issue row is removed; `ui_check` still passes.
+
+**Still open (unchanged)**
+
+- **W1.3** — the GitHub Support blobs purge is an *owner* action (a support
+  request); no code or API can do it.
+- **W7.2** — the CSP endgame (precompiled Vue render functions, vendored
+  swagger-ui) is deferred by design: it needs a Node build step and conflicts
+  with the no-build philosophy; `ui_check` is the thing that makes the
+  hash-based docs CSP safe to adopt later.
+- **Hardware Phase 4** — `Z1`/`Z2` ACK/NAK/ESC, the CR suffix, the
+  `A001→A002` experiment: all need the physical unit and printed sheets.
+- **`stock-count` companion endpoint** — the counted-quantity variant of
+  `stock-adjust`; the bridge only needs relative deltas today, so this stays
+  future work (docs/scanner-opn2001.md §6).

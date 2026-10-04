@@ -203,3 +203,43 @@ def test_adjust_holds_exactly_one_pooled_connection(client, admin_token):
         event.remove(engine, "checkout", on_checkout)
         event.remove(engine, "checkin", on_checkin)
     assert peak == 1, f"stock-adjust held {peak} pooled connections; expected 1"
+
+
+def test_lock_timeout_maps_to_503_not_500(client, admin_token, monkeypatch):
+    """F7: if `BEGIN IMMEDIATE` cannot take the write lock within
+    `busy_timeout`, the route answers 503 (retry-later with `Retry-After`),
+    not a 500 "database is locked" traceback.
+
+    A separate engine onto the same file with a 1 ms busy timeout keeps the
+    test fast (production is 5 s); a second connection holds an uncommitted
+    `BEGIN IMMEDIATE` so the endpoint's own begin genuinely cannot proceed.
+    """
+    import sqlite3
+
+    import sqlalchemy
+
+    import app.routers.items as items_router
+    from tests.conftest import get_db_path
+
+    item_id = _create_item(client, admin_token, "ADJ-LOCK", stock=1)
+    db = get_db_path()
+
+    lock_engine = sqlalchemy.create_engine(f"sqlite:///{db}")
+    sqlalchemy.event.listen(
+        lock_engine, "connect",
+        lambda dbapi_conn, _rec: dbapi_conn.execute("PRAGMA busy_timeout=1"),
+    )
+    monkeypatch.setattr(items_router, "engine", lock_engine)
+
+    holder = sqlite3.connect(db, isolation_level=None)
+    holder.execute("PRAGMA busy_timeout=1")
+    holder.execute("BEGIN IMMEDIATE")  # hold the write lock, uncommitted
+    try:
+        r = _adjust(client, admin_token, item_id, 1)
+        assert r.status_code == 503, r.text
+        assert "locked" in r.json()["detail"].lower()
+        assert r.headers.get("retry-after") == "1"
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+        lock_engine.dispose()

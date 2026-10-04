@@ -453,7 +453,7 @@
                   <button
                     v-if="user && user.role === 'admin' && m.id !== user.id"
                     class="btn tiny"
-                    @click="resetMemberPassword(m)"
+                    @click="openPwReset(m)"
                   >Reset PW</button>
                   <button
                     v-if="user && user.role === 'admin' && m.id !== user.id"
@@ -516,6 +516,25 @@
         <button class="btn ghost" @click="memberBadge = null">Close</button>
         <button class="btn" @click="() => window.print()">Print</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ================= Member password reset modal ================= -->
+  <div class="modal-backdrop" v-if="pwResetMember" @click.self="closePwReset">
+    <div class="modal">
+      <button class="modal-close" @click="closePwReset">✕</button>
+      <h2>Reset password — {{ pwResetMember.name }}</h2>
+      <p class="muted">
+        {{ pwResetMember.email }} · their sessions will be signed out.
+      </p>
+      <form @submit.prevent="submitPwReset">
+        <label>Temporary password (min. 8 characters)
+          <input type="password" autocomplete="new-password"
+                 v-model="pwResetValue" minlength="8" required />
+        </label>
+        <p v-if="pwResetError" class="error">{{ pwResetError }}</p>
+        <button class="btn block" :disabled="!pwResetValue">Set password</button>
+      </form>
     </div>
   </div>
 

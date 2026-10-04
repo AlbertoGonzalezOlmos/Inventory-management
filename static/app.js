@@ -129,6 +129,12 @@ Vue.createApp({
       // members: badge being displayed for printing
       memberBadge: null,  // { id, name, email, svg }
 
+      // members: password reset is a modal (never window.prompt() — the
+      // temporary password must not be typed/echoed in plaintext)
+      pwResetMember: null,  // the member whose password is being reset
+      pwResetValue: "",
+      pwResetError: "",
+
       toast: "",
     };
   },
@@ -783,18 +789,36 @@ Vue.createApp({
       }
     },
 
-    async resetMemberPassword(member) {
-      const pw = prompt(`New password for ${member.name} (min. 8 characters):`);
-      if (pw === null) return;
-      if (pw.length < 8) {
-        this.showToast("Password must be at least 8 characters");
+    openPwReset(member) {
+      this.pwResetMember = member;
+      this.pwResetValue = "";
+      this.pwResetError = "";
+    },
+
+    closePwReset() {
+      this.pwResetMember = null;
+      this.pwResetValue = "";
+      this.pwResetError = "";
+    },
+
+    async submitPwReset() {
+      const member = this.pwResetMember;
+      if (!member) return;
+      if (this.pwResetValue.length < 8) {
+        this.pwResetError = "Password must be at least 8 characters";
         return;
       }
+      this.pwResetError = "";
       try {
-        await api("/members/" + member.id, { method: "PATCH", body: { password: pw } });
-        this.showToast("Password reset for " + member.name + " (their sessions were signed out)");
+        await api("/members/" + member.id, {
+          method: "PATCH", body: { password: this.pwResetValue },
+        });
+        this.showToast(
+          "Password reset for " + member.name + " (their sessions were signed out)"
+        );
+        this.closePwReset();
       } catch (e) {
-        this.showToast(e.message);
+        this.pwResetError = e.message;
       }
     },
   },

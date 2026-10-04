@@ -106,7 +106,7 @@ the workstreams below.
 | N6 | 🟡 | **Embedding retry has no single-flight guard**: `_model_failed = False` is cleared *before* the load attempt, so when the cooldown lapses every concurrent request starts its own ~80 MB download in a request thread. PLAN item 8 fixes the blocking but not the herd | `app/embeddings.py:61-79` | W4.3 |
 | N7 | 🟡 | `PRAGMA foreign_keys` is never enabled → `auth_tokens.user_id` is decorative; orphan tokens survive any delete path that forgets explicit cleanup | `app/database.py:47-56` | W4.5 |
 | N8 | 🔵 | `_issue_token()` does an **unindexed full scan + write** over `auth_tokens` on every login (purge of expired rows) | `app/routers/auth.py:18-23` | W4.5 |
-| N9 | 🔵 | `resetMemberPassword()` uses `prompt()` — admin-issued "temporary" passwords are typed and displayed in plaintext | `static/app.js:696` | W6.2 |
+| N9 | ✅ | `resetMemberPassword()` used `prompt()` — admin-issued "temporary" passwords were typed and displayed in plaintext; now a modal with a `type=password` field | `static/app.js:792` | W6.2 (done) |
 | N10 | 🔵 | `load_test.py`'s docstring claims "full-cost PBKDF2, 600k iterations" but never asserts the target's `HCRM_PBKDF2_ITERATIONS`; the 1 s p50 budget is trivially met by a misconfigured server (mine ran at 1000) | `scripts/load_test.py:1-12` | W3.2 |
 | N11 | 🔵 | `/docs` depends on jsdelivr → the "fully offline" claim is false for docs. Vendoring costs ~1.77 MB (B17), comparable to the already-vendored jsPDF (366 KB) + Vue (158 KB) | B3, B17 | W7.2 (deferred) |
 | — | ✅ | `vector_full_scan` over NULL embeddings is **safe** (B12). Recorded so nobody "fixes" a non-bug | B12 | none |
@@ -971,10 +971,10 @@ Recorded because they are the argument for the gates, not against them:
   (`git fetch origin 07d879e…` must fail). Exposure is low (tokens inert under
   hash lookup, hash is of `changeme`) but the claim "gone from all history" is
   not yet true.
-- **W6.2** — `resetMemberPassword()` still uses `prompt()`, so an admin-issued
-  temporary password is typed and displayed in plaintext. Tracked in the README.
-  (The `autocomplete` half of W6.2 landed with W4.0, and ui_check's benign
-  allowlist entry was deleted as promised.)
+- **W6.2 — done (2026-10-04).** `resetMemberPassword()` no longer uses
+  `prompt()`: it is the member password-reset modal with a `type=password`
+  field (`static/index.html`), and the README tracked-issue row is removed.
+  (The `autocomplete` half of W6.2 landed with W4.0.)
 - **W7.2** — remove `'unsafe-eval'` via precompiled render functions, and vendor
   swagger-ui so `/docs` works offline and can carry a CSP. Deferred by design.
 - **D6** (`HCRM_EMBED_DISABLED=1`) — still deferred; CI uses
