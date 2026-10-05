@@ -1,4 +1,4 @@
-# HCRM — Shop Catalogue & Members
+# Inventory Management — Shop Catalogue & Members
 
 Barebones infrastructure for a shop: staff input items into a catalogue, members
 create accounts, browse the catalogue (keyword **and AI semantic search**), build
