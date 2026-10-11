@@ -577,3 +577,65 @@ def analyze_scan(barcode: str, symbology: str = "") -> ScanAnalysis:
     # Not a GTIN: the payload is its own identity (e.g. a Code 128 SKU label).
     return ScanAnalysis(raw=raw, symbology=symbology, kind="opaque",
                         key=base, addon=addon)
+
+
+# --------------------------------------------------------------------------
+# Prefix-sibling ranking ("closest items via the barcode system")
+# --------------------------------------------------------------------------
+
+def _significant_view(gtin14: str) -> str:
+    """The comparison view of a canonical GTIN-14: indicator digit stripped
+    (GTIN-13 view) and leading zeros removed.
+
+    Two normalisations, each closing a specific false-sibling hole:
+    - stripping the indicator makes a case/pallet GTIN-14 (indicator 1-8)
+      compare equal-prefix with the retail GTIN-13 of the same product
+      family — exactly the substitute a suggestion wants;
+    - stripping the padding zeros means two EAN-8s (six shared leading
+      zeros of pure padding) are NOT siblings on padding alone: at least
+      ``min_shared`` *significant* digits must agree.
+    """
+    return gtin14[1:].lstrip("0")
+
+
+def _shared_prefix_len(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def rank_prefix_siblings(
+    gtin14: str,
+    items: list[tuple[str, str]],
+    *,
+    min_shared: int = 6,
+    limit: int = 5,
+) -> list[tuple[str, str]]:
+    """Rank ``(gtin14, name)`` pairs by shared GS1 company prefix.
+
+    Same leading significant digits ⇒ (with high GS1 probability) the same
+    company — the shop's usual substitute. This is the barcode system's own
+    notion of "closest", not a text guess: a misread is never suggested
+    around (callers only reach here for *valid* GTINs), and an unrelated
+    prefix never matches.
+
+    Ranking: longest shared significant prefix first; ties broken by name
+    (stable, deterministic). Entries whose stored barcode is not a
+    14-digit digit string are skipped. The true company-prefix length is
+    not derivable offline (GEPIR is a lookup service), so observed shared
+    length IS the heuristic; ``min_shared`` (default 6) is the floor below
+    which a pair is not considered related.
+    """
+    target = _significant_view(gtin14)
+    ranked: list[tuple[int, str, str]] = []
+    for stored, name in items:
+        if not stored or len(stored) != 14 or not stored.isdigit():
+            continue
+        shared = _shared_prefix_len(target, _significant_view(stored))
+        if shared >= min_shared:
+            ranked.append((shared, name, stored))
+    ranked.sort(key=lambda t: (-t[0], t[1]))
+    return [(stored, name) for _, name, stored in ranked[:limit]]
