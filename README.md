@@ -92,6 +92,7 @@ On first run the app seeds:
 | `HCRM_ALLOW_INSECURE_BIND` | unset | let `scripts/run.sh` bind a non-loopback `HCRM_HOST` while `HCRM_DEV_ADMIN` is on (trusted networks only) |
 | `HCRM_SCRATCH` | unset | `1` makes `run.sh` boot on a throwaway database instead of `./data` |
 | `HCRM_LOGOFF_GRACE_SECONDS` | `30` | the kiosk logoff countdown (own-badge scan → “log off?”): the server-enforced deadline on the session token; clamped ≥ 1, read at import time |
+| `HCRM_BADGE_SECRET` | unset | the QR-badge derivation master secret (32+ chars). Unset ⇒ a 32-byte key is auto-generated to `data/badge.key` (0600, announced at boot). **Back the key file up with the database** (`scripts/backup_db.sh` copies it) — losing it disables badge re-viewing (logins unaffected). A set-but-too-short value refuses to boot |
 | `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` for production |
 | `FASTEMBED_CACHE_PATH` | `$TMPDIR/fastembed_cache` | where the embedding model is cached — note this is `/tmp` by default, so a tmp-cleaner wipes it and the next boot re-downloads ~80 MB |
 | `HCRM_BROWSER` | auto | browser binary for `scripts/ui_check.py` (it probes each candidate and refuses to run with one that cannot log console messages) |
@@ -173,13 +174,32 @@ that adds SIMD-accelerated vector search:
   (`scripts/scanner_bridge.py`). It never guesses: keyword matching is opt-in
   and refused outright when combined with a stock adjustment, and it will not
   open a serial port it has not verified as the M-10's `065A:A002`.
-- **QR badge login**: every account gets a printable QR badge
-  automatically at creation (returned once, in the register / staff-create
-  response, for immediate printing) and can rotate/revoke it anytime — a
-  `HCRM1:…` payload that logs in instead of email+password — scan it into
-  the badge field on the login page (USB-HID mode) or exchange it via
-  `POST /api/auth/qr-login` (bridge/kiosk). Badges are bearer credentials:
-  only the SHA-256 hash is stored, regenerating revokes the previous one.
+- **QR badge login + auto-detect**: every account gets a printable QR badge
+  automatically at creation — a `HCRM1:…` payload that logs in instead of
+  email+password. Scan it **anywhere on the login page** (the global capture
+  auto-detects it — no click, no field), or exchange it via
+  `POST /api/auth/qr-login` (bridge/kiosk). Badges are **HMAC-derived from
+  a server-side secret** (`HCRM_BADGE_SECRET` / `data/badge.key`), so they
+  are re-viewable forever from the profile tab and by staff — rotating the
+  badge revokes the previous one, and only the SHA-256 hash is stored in
+  the database.
+- **Member profile**: each member has a tabbed profile (`#/account`) —
+  email change (password-gated, signs out other devices), phone, password,
+  their re-viewable QR badge, **purchase history** (immutable receipts with
+  per-line applied/clamped), and their scan requests.
+- **Checkout**: "Complete purchase" turns the cart into an immutable order
+  (`POST /api/orders`): line snapshots at checkout-time prices, stock
+  decremented with clamp-and-report (a sale beyond stock sells what is
+  available and the receipt says so), the cart cleared atomically.
+- **Badge-security trade-off, stated plainly**: badge payloads are derived
+  from a server-side secret, so a **leaked database alone still yields no
+  printable badges** — but a **full server compromise (database *and* key
+  together)** can now derive every member's badge, where previously even
+  that yielded nothing. Protect `data/badge.key` like a password list;
+  `scripts/backup_db.sh` copies it and warns that backups are
+  credential-bearing. Losing or rotating the key disables **re-viewing**
+  (a structured 409) — logins keep working (they verify by hash) and are
+  healed by regenerating the badge.
 - Full setup, protocol, QR-badge and troubleshooting guide:
   **`docs/opticon-m10.md`**.
 
@@ -407,13 +427,13 @@ touching `./data`).
 | **`POST /api/auth/register` enumeration oracle** | Reveals whether an email is taken (409). Accepted trade-off for a shop signup page. |
 | **Tokens in `localStorage`** | Exfiltratable by any script that runs — which `'unsafe-eval'` makes easier. HttpOnly cookies + CSRF tokens would fix it and change the API contract. |
 | **Refresh tokens / session expiry UX** | Sessions simply expire after 7 days. |
-| **Server-side checkout** | The purchase list itself **is** server-side and per-account (durable, switch-safe); only checkout remains open (`requestPurchase()` is a placeholder toast). |
+| **Refunds / voids / receipt re-issue** | Checkout exists (`POST /api/orders`: snapshots, clamp-and-report stock, immutable receipts); what remains open is the after-sale: refunds, voiding an order, re-sending a receipt. |
 | **`PRAGMA foreign_keys` is OFF** | `auth_tokens.user_id` is declarative only; enforcing it needs a table rebuild. The only user-deleting path removes tokens first. |
 | **Quantized ANN scans** (`vector_quantize`) | Exact `vector_full_scan` is comfortable to ~100k items; see the measurements above. |
 
 ## Next steps (barebones placeholders)
 
-- Real checkout/order endpoint for the purchase list (the list is server-side; checkout is the placeholder)
+- Refunds / voids for completed purchases (checkout itself shipped: snapshots, clamp-and-report, history)
 - Refresh tokens / proper session expiry handling
 - Image uploads (only URLs are supported now)
 - Server-side streaming exports for very large tables

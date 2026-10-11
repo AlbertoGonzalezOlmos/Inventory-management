@@ -20,6 +20,15 @@
   name+price intake screen, and log in / switch accounts / log off with a
   30-second countdown by scanning their QR badge (see
   `docs/opticon-m10.md` §10).
+- **Profiles & checkout (2026-10 round)**: each member has a tabbed profile
+  (`#/account`): email change (password-gated, signs out other devices),
+  phone, password, a **re-viewable** QR badge (HMAC-derived from a server
+  secret — see the README security notes), **purchase history** with
+  immutable receipts, and their scan requests. "Complete purchase"
+  checks the cart out atomically (`POST /api/orders`): checkout-time price
+  snapshots, clamp-and-report stock (a sale beyond stock sells what is
+  available — the receipt records both amounts), the cart cleared. The
+  login page auto-detects badge scans anywhere (no click).
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.
