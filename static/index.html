@@ -63,7 +63,20 @@
         <button class="btn block" :disabled="busy">Log in</button>
       </form>
       <hr class="divider" />
-      <form @submit.prevent="doBadgeLogin">
+      <!-- Auto-detect is the PRIMARY path (Task E): the global scan capture
+           logs a badge scan in from anywhere — no click, no field. -->
+      <p class="muted scan-anywhere">
+        Scan anywhere — your QR badge logs you in automatically.
+      </p>
+      <button class="btn ghost block" @click="showBadgeField = !showBadgeField">
+        {{ showBadgeField ? "Hide the badge code field" : "Use a badge code instead" }}
+      </button>
+      <!-- The manual fallback (typing/pasting a code; slow emulators,
+           accessibility). Collapsed by default; v-show keeps it in the DOM
+           (the ui_check regression pin targets it) — data-scan-sink is
+           unchanged: its own Enter flow never double-fires with the global
+           capture. -->
+      <form v-show="showBadgeField" @submit.prevent="doBadgeLogin">
         <label>QR badge
           <input
             type="text"
@@ -74,12 +87,10 @@
           />
         </label>
         <p class="muted">
-          Point the scanner at your badge — the code is typed in and submitted
-          automatically.
+          Type or paste a badge code — or just scan it anywhere on this page.
         </p>
         <button class="btn block" :disabled="busy || !badgeCode">Log in with badge</button>
       </form>
-      <p class="muted">Scanner ready — barcodes and badges are captured anywhere on the page.</p>
       <!-- Attribution banner: anonymous scans staged while logged out -->
       <div class="staged-banner" v-if="stagedScans.length">
         <strong>{{ stagedScans.length }} scanned item(s) waiting</strong> —
@@ -124,6 +135,10 @@
           data-scan-sink
           @keydown.enter.prevent="scanFieldSubmit"
         />
+        <p class="muted scan-hint">
+          Scanning your own badge logs you off (30&nbsp;s countdown); another
+          member's badge switches accounts.
+        </p>
         <div class="toolbar">
           <input
             class="search"
