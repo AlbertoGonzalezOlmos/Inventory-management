@@ -12,6 +12,11 @@ def test_register_login_me(client):
     assert r.status_code == 201
     token = r.json()["token"]
     assert r.json()["user"]["role"] == "member"
+    # Task 2: registration auto-issues the account's first badge, returned
+    # exactly once in this response (logins never carry it).
+    assert r.json()["user"]["has_qr_badge"] is True
+    assert r.json()["qr_badge"]["payload"].startswith("HCRM1:")
+    assert r.json()["qr_badge"]["svg"].startswith("<svg")
 
     me = client.get("/api/auth/me", headers=auth(token))
     assert me.status_code == 200

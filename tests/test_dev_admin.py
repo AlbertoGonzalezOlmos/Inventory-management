@@ -41,7 +41,7 @@ with TestClient(app) as c:                      # runs the lifespan (seeding)
         out["items"] = c.get("/api/items", headers=h).status_code
         out["members"] = c.get("/api/members", headers=h).status_code
         out["accounts"] = [
-            (u["email"], u["role"], u["must_change_password"])
+            (u["email"], u["role"], u["must_change_password"], u["has_qr_badge"])
             for u in c.get("/api/members", headers=h).json()
         ]
     r2 = c.post("/api/auth/login",
@@ -86,6 +86,10 @@ def test_dev_admin_mode_on():
     assert report["healthz"]["insecure_dev_admin"] is True
     emails = [a[0] for a in report["accounts"]]
     assert emails.count("admin") == 1, report["accounts"]
+    # Task 2: no seeded account carries a badge (neither dev nor legacy
+    # admin) — badges are issued at account creation or by rotation, never
+    # by seeding (a payload can be shown only once; seeds have no viewer).
+    assert not any(a[3] for a in report["accounts"]), report["accounts"]
     # The secure default still exists alongside it, still flagged.
     assert report["legacy_login"] == 200
     assert report["legacy_flagged"] is True

@@ -120,6 +120,29 @@ class AuthOut(BaseModel):
     user: UserOut
 
 
+class RegisterOut(AuthOut):
+    """Registration result: the session PLUS the account's one-time badge.
+
+    The field is required (not optional-on-AuthOut): registration always
+    issues a badge, and a forgotten assignment must fail schema validation
+    rather than serialise as null. AuthOut itself is untouched — it is also
+    the *login* (password and qr-login) response, and login responses must
+    never carry badge material: a badge is shown exactly once, at creation
+    or rotation.
+    """
+
+    qr_badge: QrBadgeOut
+
+
+class MemberCreatedOut(UserOut):
+    """Staff-side account creation: UserOut plus the one-time badge, so the
+    counter can print the membership card immediately. The members list,
+    /me and PATCH responses keep the plain UserOut shape — no badge
+    material outside creation and rotation."""
+
+    qr_badge: QrBadgeOut
+
+
 # --- Items ---------------------------------------------------------------
 
 class ItemIn(_Stripped):

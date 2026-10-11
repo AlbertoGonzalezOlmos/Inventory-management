@@ -14,9 +14,9 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.deps import require_admin, require_staff
 from app.models import AuthToken, CartItem, User
-from app.qrbadge import badge_svg, new_badge_payload
-from app.schemas import MemberIn, MemberPatch, QrBadgeOut, UserOut
-from app.security import hash_password, is_well_known_password, token_hash
+from app.qrbadge import badge_svg, new_badge_for
+from app.schemas import MemberCreatedOut, MemberIn, MemberPatch, QrBadgeOut, UserOut
+from app.security import hash_password, is_well_known_password
 
 router = APIRouter(prefix="/api/members", tags=["members"])
 
@@ -41,13 +41,22 @@ def list_members(
     return [UserOut.model_validate(u) for u in users]
 
 
-@router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=MemberCreatedOut, status_code=status.HTTP_201_CREATED)
 def create_member(
     payload: MemberIn,
     staff: User = Depends(require_staff),
     session: Session = Depends(get_session),
 ):
-    """Staff creates accounts for shop members (optionally other staff)."""
+    """Staff creates accounts for shop members (optionally other staff).
+
+    Every created account is issued its first QR badge automatically: the
+    raw payload is returned exactly once, in this response, so the counter
+    can print the membership card immediately. Note for flagged accounts
+    (must_change_password, below): the badge logs in fine, but the holder
+    cannot self-rotate while flagged (/api/auth/qr-badge is not an exempt
+    path) — a lost pre-first-login card must be re-issued by staff via
+    POST /api/members/{id}/qr-badge.
+    """
     if payload.role not in VALID_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid role")
     if is_well_known_password(payload.password):
@@ -73,6 +82,10 @@ def create_member(
         # holder changes it, exactly like an admin-issued reset.
         must_change_password=True,
     )
+    # Auto-badge, before the add: the hash rides in the same INSERT as the
+    # account (generate-before-commit, show-after-commit) — a raced
+    # duplicate-email insert rolls back row and never-shown payload together.
+    badge_payload = new_badge_for(user)
     session.add(user)
     try:
         session.commit()
@@ -80,7 +93,10 @@ def create_member(
         session.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
     session.refresh(user)
-    return UserOut.model_validate(user)
+    return MemberCreatedOut(
+        **UserOut.model_validate(user).model_dump(),
+        qr_badge=QrBadgeOut(payload=badge_payload, svg=badge_svg(badge_payload)),
+    )
 
 
 @router.patch("/{user_id}", response_model=UserOut)
@@ -198,8 +214,7 @@ def create_member_badge(
     """Generate (or replace) a member's QR login badge — e.g. to print a
     membership card at the counter. Replacing revokes the previous badge."""
     user = _get_manageable_member(session, user_id, staff)
-    payload = new_badge_payload()
-    user.qr_badge_hash = token_hash(payload)
+    payload = new_badge_for(user)
     session.add(user)
     session.commit()
     return QrBadgeOut(payload=payload, svg=badge_svg(payload))

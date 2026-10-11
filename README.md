@@ -163,8 +163,10 @@ that adds SIMD-accelerated vector search:
   (`scripts/scanner_bridge.py`). It never guesses: keyword matching is opt-in
   and refused outright when combined with a stock adjustment, and it will not
   open a serial port it has not verified as the M-10's `065A:A002`.
-- **QR badge login**: every account can get a printable QR badge
-  (`HCRM1:…` payload) that logs in instead of email+password — scan it into
+- **QR badge login**: every account gets a printable QR badge
+  automatically at creation (returned once, in the register / staff-create
+  response, for immediate printing) and can rotate/revoke it anytime — a
+  `HCRM1:…` payload that logs in instead of email+password — scan it into
   the badge field on the login page (USB-HID mode) or exchange it via
   `POST /api/auth/qr-login` (bridge/kiosk). Badges are bearer credentials:
   only the SHA-256 hash is stored, regenerating revokes the previous one.

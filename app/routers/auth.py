@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
 from app.models import AuthToken, User, utcnow
-from app.qrbadge import BADGE_PREFIX, badge_svg, new_badge_payload, parse_badge_payload
+from app.qrbadge import BADGE_PREFIX, badge_svg, new_badge_for, parse_badge_payload
 from app.schemas import (
     AuthOut,
     ChangePasswordIn,
@@ -19,6 +19,7 @@ from app.schemas import (
     QrBadgeOut,
     QrLoginIn,
     RegisterIn,
+    RegisterOut,
     UserOut,
 )
 from app.security import (
@@ -51,7 +52,7 @@ def _issue_token(session: Session, user: User) -> AuthOut:
     return AuthOut(token=raw, user=UserOut.model_validate(user))
 
 
-@router.post("/register", response_model=AuthOut, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=RegisterOut, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterIn, session: Session = Depends(get_session)):
     if is_well_known_password(payload.password):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
@@ -66,6 +67,14 @@ def register(payload: RegisterIn, session: Session = Depends(get_session)):
         password_hash=hash_password(payload.password),
         role="member",
     )
+    # Auto-badge: every new account is issued its first QR badge. The hash
+    # is set BEFORE the add (generate-before-commit), so it rides in the
+    # same INSERT as the account — a raced duplicate-email insert rolls
+    # back the row and the never-shown payload together. The raw payload
+    # is returned exactly once, in this response; if the client never
+    # reads it (disconnect), recovery is rotation: POST /api/auth/qr-badge
+    # replaces the hash and re-shows a fresh badge.
+    badge_payload = new_badge_for(user)
     session.add(user)
     try:
         session.commit()
@@ -74,7 +83,15 @@ def register(payload: RegisterIn, session: Session = Depends(get_session)):
         session.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
     session.refresh(user)
-    return _issue_token(session, user)
+    auth_out = _issue_token(session, user)
+    # badge_svg is rendered after the commit (pure CPU over the payload;
+    # the rotate endpoints do the same), so the response carries the badge
+    # only on the success path.
+    return RegisterOut(
+        token=auth_out.token,
+        user=auth_out.user,
+        qr_badge=QrBadgeOut(payload=badge_payload, svg=badge_svg(badge_payload)),
+    )
 
 
 @router.post("/login", response_model=AuthOut)
@@ -126,10 +143,11 @@ def create_my_badge(
     """Generate (or replace) the caller's own QR badge.
 
     Regenerating is also how you rotate a lost/copied badge: the old payload
-    stops working the moment the new hash is stored.
+    stops working the moment the new hash is stored. This is also the
+    recovery path for an auto-issued creation badge whose response was
+    never seen (client disconnect): rotate and a fresh badge is shown.
     """
-    payload = new_badge_payload()
-    user.qr_badge_hash = token_hash(payload)
+    payload = new_badge_for(user)
     session.add(user)
     session.commit()
     return QrBadgeOut(payload=payload, svg=badge_svg(payload))
