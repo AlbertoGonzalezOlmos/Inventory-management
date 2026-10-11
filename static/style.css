@@ -640,7 +640,7 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
 }
 
 /* The badge payload under the QR (manual-entry fallback; prints with the
-   card, shown exactly once). */
+   card — re-viewable at any time since Task A, so print on demand). */
 .badge-payload {
   text-align: center;
   font-size: 0.68rem;
@@ -672,4 +672,37 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
     margin: 0;
   }
   .no-print { display: none !important; }
+}
+
+/* ================= Task D: the profile tab + purchase history ================= */
+
+/* The tabbed profile card is wider than the login card (tables + receipts). */
+.profile-card {
+  max-width: 46rem;
+  width: 100%;
+}
+
+/* A purchase in the history list: clickable header, receipt expands below. */
+.order-card {
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  margin-bottom: 0.75rem;
+  overflow: hidden;
+}
+.order-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  background: #f8fafc;
+  cursor: pointer;
+  user-select: none;
+}
+.order-head:hover {
+  background: #eff6ff;
+}
+.order-card .table {
+  margin: 0;
+  border-radius: 0;
 }
