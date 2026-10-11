@@ -1,5 +1,6 @@
 """API request/response schemas."""
 
+import re
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -8,6 +9,35 @@ from app.barcodes import normalize_input_gtin
 
 # Pragmatic email check (dependency-free alternative to EmailStr).
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+def normalise_phone(value: str | None) -> str | None:
+    """Canonicalise a phone number (Task B): strip whitespace and the visual
+    separators space/-/./(), keep an optional single leading '+', then
+    require 6–15 digits. None/'' → None (CLEAR — the ItemPatch.barcode
+    ""-clears precedent). Anything else → ValueError (→ 422): a typo must
+    not become a contact identity. Shape validation only — no carrier/
+    region truth (no SMS/OTP in scope).
+
+    Stored form examples: '+34 600 123 456' → '+34600123456';
+    '(555) 123-4567' → '5551234567'. Deterministic equality, so no-op
+    comparisons are exact.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("phone must be a string")
+    cleaned = re.sub(r"[\s\-().]", "", value.strip())
+    if not cleaned:
+        return None
+    plus = cleaned.startswith("+")
+    digits = cleaned[1:] if plus else cleaned
+    if not digits.isdigit() or not 6 <= len(digits) <= 15:
+        raise ValueError(
+            "phone must be 6-15 digits with an optional leading '+' "
+            "(spaces, dashes, dots and parentheses are ignored); got " + repr(value)
+        )
+    return ("+" + digits) if plus else digits
 
 
 def _normalized_gtin_or_none(value):
@@ -135,6 +165,52 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class ChangePhoneIn(_Stripped):
+    """Set (or clear) the caller's phone. Contact info, not a credential:
+    session-only, NO password re-entry (a stolen session can at worst
+    change a contact field — the same exposure class as saying it at the
+    counter). Single-field command body: both "" and null CLEAR (there is
+    no omit-semantics here, unlike MemberPatch's patch document).
+    Idempotent: setting the current value is a 200, not an error (no
+    credential semantics, no revocation — contrast ChangeEmailIn's no-op
+    400)."""
+
+    # Required key; the VALUE may be null or "" (both clear).
+    phone: str | None = Field(max_length=32)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def _canonical_phone(cls, v):
+        return normalise_phone(v)
+
+
+class ChangeEmailIn(BaseModel):
+    """Change the caller's EMAIL — the login identifier and therefore the
+    account-takeover surface: the CURRENT PASSWORD is required (a stolen
+    session must not be able to move the login identity), and every OTHER
+    session is revoked (change-password parity). A no-op (new == current
+    after normalisation) is a 400: it must not look like a change, and a
+    "successful" one would revoke every other session for nothing. The
+    badge is NEVER touched (derivation keys on user_id, Task A).
+
+    Deliberately NOT _Stripped: that would strip `current_password` too,
+    and the password must reach verify_password RAW — exactly as LoginIn
+    and ChangePasswordIn (both strip-free) deliver it, so a password with
+    leading/trailing spaces keeps working here. Only `new_email` is
+    stripped, before the pattern gate (mirroring RegisterIn's _Stripped
+    behaviour: a padded email is normalised, not rejected).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    new_email: str = Field(min_length=3, max_length=255, pattern=EMAIL_PATTERN)
+    current_password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("new_email", mode="before")
+    @classmethod
+    def _strip_email(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -144,6 +220,10 @@ class UserOut(BaseModel):
     role: str
     must_change_password: bool = False
     has_qr_badge: bool = False
+    # Contact phone, normalised (None = not set). Visible to self (/me) and
+    # to staff (the members list) — the shop's own member directory, the
+    # same exposure class as email.
+    phone: str | None = None
     created_at: datetime
 
 
@@ -285,6 +365,13 @@ class MemberIn(_Stripped):
     email: str = Field(min_length=3, max_length=255, pattern=EMAIL_PATTERN)
     password: str = Field(min_length=8, max_length=128)
     role: str = "member"  # "member" | "staff" | "admin" (admin role: admins only)
+    # Contact phone, optional at counter signup; normalised ("" → None).
+    phone: str | None = Field(default=None, max_length=32)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def _canonical_phone(cls, v):
+        return normalise_phone(v)
 
 
 class MemberPatch(_PatchIn):
@@ -292,6 +379,18 @@ class MemberPatch(_PatchIn):
     role: str | None = None
     # Password reset — only admins may set this (enforced in the router).
     password: str | None = Field(default=None, min_length=8, max_length=128)
+    # Contact phone (Task B): staff may edit a member's phone. Omit =
+    # unchanged (exclude_unset), explicit null = 422 (_PatchIn's rule — a
+    # patch document has omit-semantics, unlike ChangePhoneIn's command
+    # body), "" clears. NEVER email: staff must not move a member's login
+    # identifier (a takeover vector) — the field is absent and
+    # extra="forbid" makes any attempt a 422.
+    phone: str | None = Field(default=None, max_length=32)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def _canonical_phone(cls, v):
+        return normalise_phone(v)
 
 
 # --- Cart -----------------------------------------------------------------

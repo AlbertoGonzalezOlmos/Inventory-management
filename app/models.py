@@ -34,6 +34,13 @@ class User(SQLModel, table=True):
     # Monotonic per account: rotation increments, generations are never
     # reused — a revoked-then-reissued badge never equals an older one.
     qr_badge_generation: int = Field(default=0)
+    # Contact phone (Task B), stored NORMALISED (optional leading '+',
+    # 6-15 digits — see app/schemas.py::normalise_phone). NULL = not set;
+    # "" on input clears (the ItemPatch.barcode precedent). Not unique
+    # (households share numbers); not a credential: changing it needs only
+    # a live session (changing the EMAIL — the login identifier — is the
+    # password-gated path).
+    phone: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
 
     @property

@@ -117,13 +117,14 @@ def test_migration_table_is_well_formed():
 
 
 def test_every_migration_the_app_currently_needs_is_listed():
-    """The table is the whole story: five columns, one index."""
+    """The table is the whole story: six columns, one index."""
     assert {(t, c) for t, c, _d, _e in COLUMN_MIGRATIONS} == {
         ("users", "must_change_password"),
         ("items", "barcode"),
         ("users", "qr_badge_hash"),
         ("auth_tokens", "logoff_deadline"),
         ("users", "qr_badge_generation"),
+        ("users", "phone"),
     }
     assert {t for t, _s in INDEX_MIGRATIONS} == {"auth_tokens"}
 
@@ -173,6 +174,12 @@ def test_all_migrations_land_on_a_pre_scanner_database(tmp_path, monkeypatch):
     assert conn.execute(
         "SELECT qr_badge_generation FROM users WHERE id=1"
     ).fetchone()[0] == 0
+    # Task B: the phone column lands NULL (not provided) — the upgrade adds
+    # nothing to anyone's profile.
+    assert "phone" in _columns(db, "users")
+    assert conn.execute(
+        "SELECT phone FROM users WHERE id=1"
+    ).fetchone()[0] is None
     conn.close()
 
 

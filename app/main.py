@@ -181,6 +181,9 @@ COLUMN_MIGRATIONS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # any live badge (hashes keep verifying; first re-view auto-migrates).
     # No index: read off the PK-fetched row, never queried by.
     ("users", "qr_badge_generation", "INTEGER NOT NULL DEFAULT 0", ()),
+    # Contact phone (Task B): nullable, normalised in the schemas; existing
+    # rows land NULL (not set) — the upgrade changes nothing.
+    ("users", "phone", "TEXT", ()),
 )
 
 #: Index migrations: an index added to a model never reaches an existing

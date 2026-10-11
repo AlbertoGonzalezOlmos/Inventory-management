@@ -76,6 +76,8 @@ def create_member(
         name=payload.name.strip(),
         password_hash=hash_password(payload.password),
         role=payload.role,
+        # Contact phone, normalised by the schema (None = not provided).
+        phone=payload.phone,
         # A staff- or admin-issued password is a *temporary* password — the UI
         # has always labelled the field that way, but the flag was never set, so
         # the account worked indefinitely on a password somebody else chose and

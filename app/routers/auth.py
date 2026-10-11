@@ -23,7 +23,9 @@ from app.qrbadge import (
 )
 from app.schemas import (
     AuthOut,
+    ChangeEmailIn,
     ChangePasswordIn,
+    ChangePhoneIn,
     LogoffScheduleOut,
     LoginIn,
     QrBadgeOut,
@@ -370,6 +372,86 @@ def change_password(
         if token.token != current_hash:
             session.delete(token)
     session.commit()
+
+
+@router.post("/change-phone", response_model=UserOut)
+def change_phone(
+    payload: ChangePhoneIn,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Set or clear the caller's contact phone.
+
+    Session-only — NO password re-entry (coordinator decision 3): a phone
+    is contact info, not a credential; a stolen session can at worst change
+    a contact field, the same exposure class as saying it at the counter.
+    The schema normalises (optional '+', 6-15 digits) or clears (""/null).
+    Idempotent: setting the current value is a plain 200 (no credential
+    semantics, no revocation — the deliberate contrast with change-email's
+    no-op 400). The full UserOut returns so the SPA refreshes in one
+    assignment (the Task-1 mutator contract).
+    """
+    if payload.phone != user.phone:  # normalise-then-compare: exact no-op
+        user.phone = payload.phone
+        session.add(user)
+        session.commit()
+    return UserOut.model_validate(user)
+
+
+@router.post("/change-email", response_model=UserOut)
+def change_email(
+    payload: ChangeEmailIn,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Change the caller's EMAIL — the login identifier, therefore the
+    account-takeover surface (coordinator decision 4):
+
+    1. the CURRENT PASSWORD is verified first (a stolen session must not be
+       able to move the login identity); the taken-email 409 is only served
+       to callers who proved credential possession;
+    2. a NO-OP (new == current after normalisation) is a 400 — it must not
+       look like a change, and a "successful" one would revoke every other
+       session for nothing (the change-password no-op doctrine);
+    3. every OTHER session is revoked, the presented one survives
+       (change-password parity — the identity moved; old-identity sessions
+       should not silently persist);
+    4. the BADGE is never touched: derivation keys on user_id (Task A),
+       pinned in tests/test_profile.py.
+    """
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Current password is incorrect"
+        )
+    email = payload.new_email.strip().lower()
+    if email == user.email:  # normalise-then-compare, BEFORE any revocation
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "New email must differ from the current email",
+        )
+    existing = session.exec(select(User).where(User.email == email)).first()
+    if existing:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+
+    user.email = email
+    session.add(user)
+    # Revoke every other session; the presented one stays valid (the
+    # change_password loop, verbatim — keyed on the presented token's hash).
+    current_hash = token_hash(credentials.credentials)
+    for token in session.exec(
+        select(AuthToken).where(AuthToken.user_id == user.id)
+    ).all():
+        if token.token != current_hash:
+            session.delete(token)
+    try:
+        session.commit()
+    except IntegrityError:
+        # Concurrent change raced past the pre-check (register's pattern:
+        # the pre-check is courtesy, the unique index is the law).
+        session.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+    return UserOut.model_validate(user)
 
 
 @router.get("/me", response_model=UserOut)
