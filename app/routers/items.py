@@ -11,7 +11,7 @@ from app.database import VECTOR_OPTIONS, engine, get_session
 from app.deps import get_current_user, require_staff
 from app.embeddings import embed_text, embed_text_blob, item_embedding_text, vec_to_blob
 from app.barcodes import normalize_input_gtin
-from app.models import Item, User, utcnow
+from app.models import CartItem, Item, User, utcnow
 from app.schemas import (ItemIn, ItemOut, ItemPatch, StockAdjustIn,
                          StockAdjustOut, VectorSearchOut)
 
@@ -375,5 +375,14 @@ def delete_item(
     item = session.get(Item, item_id)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    # Cart cleanup in the same transaction (FKs are declarative only,
+    # app/database.py D4): deleting the item must not leave cart rows that
+    # point at it — GET /api/cart would silently drop them via the join, but
+    # they would live in the table forever. Mirrors the AuthToken cleanup
+    # in members.delete_member.
+    for line in session.exec(
+        select(CartItem).where(CartItem.item_id == item_id)
+    ).all():
+        session.delete(line)
     session.delete(item)
     session.commit()

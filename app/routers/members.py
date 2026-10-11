@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 
 from app.database import get_session
 from app.deps import require_admin, require_staff
-from app.models import AuthToken, User
+from app.models import AuthToken, CartItem, User
 from app.qrbadge import badge_svg, new_badge_payload
 from app.schemas import MemberIn, MemberPatch, QrBadgeOut, UserOut
 from app.security import hash_password, is_well_known_password, token_hash
@@ -240,6 +240,13 @@ def delete_member(
         select(AuthToken).where(AuthToken.user_id == user_id)
     ).all():
         session.delete(token)
+    # Cart cleanup in the same transaction (FKs are declarative only,
+    # app/database.py D4): the user's cart lines must not outlive the
+    # account. Mirrors the token cleanup above.
+    for line in session.exec(
+        select(CartItem).where(CartItem.user_id == user_id)
+    ).all():
+        session.delete(line)
     session.delete(user)
     try:
         session.commit()

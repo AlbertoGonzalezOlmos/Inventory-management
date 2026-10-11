@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, LargeBinary, String
+from sqlalchemy import Column, DateTime, LargeBinary, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -69,6 +69,48 @@ class Item(SQLModel, table=True):
     @property
     def has_embedding(self) -> bool:
         return self.embedding is not None
+
+
+class CartItem(SQLModel, table=True):
+    """One line of a user's server-side shopping cart (purchase list).
+
+    The cart is per-user and durable — every mutation is its own committed
+    request — so scans and browsers converge on one list, and the badge-driven
+    account switch can guarantee "whatever had been done is saved" by
+    construction. The old browser-localStorage list was user-agnostic and not
+    even cleared on logout, so it could never support either.
+
+    Live prices only: no price snapshot column. Totals are computed at read
+    time from ``items.price_cents`` (checkout, the only consumer of "price at
+    time of order", does not exist yet; a snapshot would be write-only data
+    with a staleness reconciliation problem).
+
+    FKs are declarative only (``PRAGMA foreign_keys`` is OFF,
+    app/database.py D4): the item/user API delete paths clean up rows
+    explicitly, and every cart read lazily reaps rows orphaned by any other
+    path (hand-written SQL, races).
+    """
+
+    __tablename__ = "cart_items"
+
+    # One row per (user, item): "already in cart" is an increment, never a
+    # duplicate line — and this constraint is the conflict target of the
+    # single-statement upsert in app/routers/cart.py. Declared from day one:
+    # SQLite cannot add a unique constraint to a live table later.
+    __table_args__ = (
+        UniqueConstraint("user_id", "item_id", name="uq_cart_items_user_item"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    item_id: int = Field(foreign_key="items.id", index=True)
+    # No DB CHECK and no Field bound: SQLModel does not validate table models,
+    # and a CHECK(qty > 0) would fight a decrement-then-delete write path.
+    # Quantity bounds are the API schemas' job (app/schemas.py, CartAddIn
+    # & co); accumulation beyond them is capped in the upsert itself.
+    qty: int
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
 
 
 class AuthToken(SQLModel, table=True):
