@@ -27,7 +27,7 @@
       <a href="#/catalogue" :class="{active: currentView === 'catalogue'}">Catalogue</a>
       <a v-if="isStaff" href="#/table" :class="{active: currentView === 'table'}">Table</a>
       <a v-if="isStaff" href="#/admin" :class="{active: currentView === 'admin'}">Admin</a>
-      <a href="#/account" :class="{active: currentView === 'account'}">Account</a>
+      <a href="#/account" :class="{active: currentView === 'account'}">My profile</a>
     </nav>
 
     <div class="userbox">
@@ -209,7 +209,7 @@
         </ul>
         <div class="selection-actions" v-if="purchase.length">
           <button class="btn ghost block" @click="clearPurchase">Clear list</button>
-          <button class="btn block" @click="requestPurchase">Request items</button>
+          <button class="btn block" :disabled="busy" @click="completePurchase">Complete purchase</button>
         </div>
         <div class="selection-total" v-if="purchase.length">
           <span>Total</span>
@@ -218,66 +218,157 @@
       </aside>
     </section>
 
-    <!-- ================= Account (change password) ================= -->
-    <section v-else-if="currentView === 'account'" class="auth-card">
-      <h1>Account</h1>
-      <p class="muted">{{ user.name }} · {{ user.email }} · role: {{ user.role }}</p>
+    <!-- ================= My profile (tabbed, Task D) =================
+         Route unchanged (#/account — the must_change_password redirect
+         depends on it); a flagged account lands on the Security tab. -->
+    <section v-else-if="currentView === 'account'" class="auth-card profile-card">
+      <h1>My profile</h1>
+      <p class="muted">{{ user.name }} · role: {{ user.role }} · {{ user.email }}</p>
       <p v-if="user.must_change_password" class="error">
         You are using a default or admin-issued password — you must change it
         before using the app.
       </p>
-      <h2>Change password</h2>
-      <form @submit.prevent="changePassword">
-        <label>Current password
-          <input type="password" autocomplete="current-password"
-                 v-model="pwForm.current_password" required />
-        </label>
-        <label>New password (min. 8 characters)
-          <input type="password" autocomplete="new-password"
-                 v-model="pwForm.new_password" minlength="8" required />
-        </label>
-        <p v-if="pwError" class="error">{{ pwError }}</p>
-        <p v-if="pwOk" class="ok">Password updated. Other sessions were signed out.</p>
-        <button class="btn block" :disabled="busy">Change password</button>
-      </form>
 
-      <h2>QR badge login</h2>
-      <p class="muted">
-        A QR badge logs you in without email and password — anyone holding the
-        printed code can log in as you, so treat it like a password.
-        <template v-if="user.has_qr_badge">A badge is currently <strong>active</strong> for this account.</template>
-        <template v-else>No badge is active for this account.</template>
-      </p>
-      <div v-if="badgeSvg" class="qr-badge" v-html="badgeSvg"></div>
-      <div class="badge-actions">
-        <button class="btn" :disabled="busy" @click="generateMyBadge">
-          {{ user.has_qr_badge ? "Regenerate badge (revokes the old one)" : "Generate QR badge" }}
-        </button>
-        <button v-if="badgeSvg" class="btn ghost no-print" @click="printAccountBadge">Print</button>
-        <button v-if="user.has_qr_badge" class="btn ghost danger no-print" @click="revokeMyBadge">
-          Revoke badge
-        </button>
+      <div class="admin-tabs">
+        <button :class="{active: profileTab === 'profile'}" @click="selectProfileTab('profile')">Profile</button>
+        <button :class="{active: profileTab === 'security'}" @click="selectProfileTab('security')">Security</button>
+        <button :class="{active: profileTab === 'badge'}" @click="selectProfileTab('badge')">My QR badge</button>
+        <button :class="{active: profileTab === 'purchases'}" @click="selectProfileTab('purchases')">Purchase history</button>
+        <button :class="{active: profileTab === 'requests'}" @click="selectProfileTab('requests')">My scan requests</button>
       </div>
 
-      <!-- My scan requests: "your report was resolved" -->
-      <h2 style="margin-top: 2rem">My scan requests</h2>
-      <p class="muted" v-if="myRequests.length === 0">
-        Unknown items you report at the counter appear here, with their status.
-      </p>
-      <table class="table" v-else>
-        <thead>
-          <tr><th>Requested</th><th>Code</th><th>Proposed item</th><th>Price</th><th>Status</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="req in myRequests" :key="req.id">
-            <td>{{ formatDate(req.created_at) }}</td>
-            <td><code>{{ req.code }}</code></td>
-            <td>{{ req.name }}</td>
-            <td>{{ formatPrice(req.price_cents) }}</td>
-            <td><span class="status-chip" :class="req.status">{{ req.status }}</span></td>
-          </tr>
-        </tbody>
-      </table>
+      <!-- Profile: identity + contact -->
+      <div v-if="profileTab === 'profile'">
+        <h2>Email</h2>
+        <p class="muted">Your email is your login identifier. Changing it signs
+          out your other sessions.</p>
+        <form @submit.prevent="submitEmailChange">
+          <label>New email
+            <input type="email" v-model="emailForm.new_email" required />
+          </label>
+          <label>Current password
+            <input type="password" autocomplete="current-password"
+                   v-model="emailForm.current_password" required />
+          </label>
+          <p v-if="emailError" class="error">{{ emailError }}</p>
+          <p v-if="emailOk" class="ok">Email updated — other sessions were signed out.</p>
+          <button class="btn block" :disabled="busy">Change email</button>
+        </form>
+
+        <h2 style="margin-top: 2rem">Phone</h2>
+        <p class="muted">Optional: an optional leading "+" and 6–15 digits.
+          Saving an empty field clears it.</p>
+        <form @submit.prevent="submitPhoneChange">
+          <label>Phone
+            <input type="tel" v-model="phoneForm.phone"
+                   placeholder="+34 600 123 456" />
+          </label>
+          <p v-if="phoneError" class="error">{{ phoneError }}</p>
+          <button class="btn block" :disabled="busy">Save phone</button>
+        </form>
+      </div>
+
+      <!-- Security: the existing change-password form -->
+      <div v-else-if="profileTab === 'security'">
+        <h2>Change password</h2>
+        <form @submit.prevent="changePassword">
+          <label>Current password
+            <input type="password" autocomplete="current-password"
+                   v-model="pwForm.current_password" required />
+          </label>
+          <label>New password (min. 8 characters)
+            <input type="password" autocomplete="new-password"
+                   v-model="pwForm.new_password" minlength="8" required />
+          </label>
+          <p v-if="pwError" class="error">{{ pwError }}</p>
+          <p v-if="pwOk" class="ok">Password updated. Other sessions were signed out.</p>
+          <button class="btn block" :disabled="busy">Change password</button>
+        </form>
+      </div>
+
+      <!-- My QR badge -->
+      <div v-else-if="profileTab === 'badge'">
+        <h2>QR badge login</h2>
+        <p class="muted">
+          A QR badge logs you in without email and password — anyone holding the
+          printed code can log in as you, so treat it like a password.
+          <template v-if="user.has_qr_badge">A badge is currently <strong>active</strong> for this account.</template>
+          <template v-else>No badge is active for this account.</template>
+        </p>
+        <div class="badge-actions">
+          <button v-if="user.has_qr_badge" class="btn" :disabled="busy" @click="showMyBadge">
+            Show my QR
+          </button>
+          <button class="btn" :disabled="busy" @click="generateMyBadge">
+            {{ user.has_qr_badge ? "Regenerate badge (revokes the old one)" : "Generate QR badge" }}
+          </button>
+          <button v-if="badgeSvg" class="btn ghost no-print" @click="printAccountBadge">Print</button>
+          <button v-if="user.has_qr_badge" class="btn ghost danger no-print" @click="revokeMyBadge">
+            Revoke badge
+          </button>
+        </div>
+        <div v-if="badgeSvg" class="qr-badge" v-html="badgeSvg"></div>
+      </div>
+
+      <!-- Purchase history -->
+      <div v-else-if="profileTab === 'purchases'">
+        <h2>Purchase history</h2>
+        <p class="muted" v-if="myOrders.length === 0">
+          Nothing purchased yet — complete a purchase from your list in the catalogue.
+        </p>
+        <div v-for="order in myOrders" :key="order.id" class="order-card">
+          <div class="order-head" @click="toggleOrder(order.id)">
+            <span><strong>#{{ order.id }}</strong> · {{ formatDate(order.created_at) }}
+              · {{ order.lines.length }} item(s)</span>
+            <span>
+              <span v-if="order.id === lastCheckout" class="status-chip resolved">new</span>
+              <strong>{{ formatPrice(order.total_cents) }}</strong>
+            </span>
+          </div>
+          <table class="table" v-if="expandedOrders.includes(order.id)">
+            <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+            <tbody>
+              <tr v-for="line in order.lines" :key="line.item_id">
+                <td>{{ line.name }}<br /><small class="muted">SKU {{ line.sku }}</small></td>
+                <td>
+                  <template v-if="line.clamped">
+                    <span class="status-chip open" :title="'requested ' + line.qty + ', only ' + line.applied_qty + ' in stock'">
+                      {{ line.applied_qty }} of {{ line.qty }}
+                    </span>
+                  </template>
+                  <template v-else>{{ line.qty }}</template>
+                </td>
+                <td>{{ formatPrice(line.price_cents) }}</td>
+                <td>{{ formatPrice(line.line_total_cents) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <button v-if="myOrders.length >= ordersLimit && ordersLimit < 100" class="btn ghost block"
+                @click="loadMoreOrders">Load more</button>
+      </div>
+
+      <!-- My scan requests: existing block, moved -->
+      <div v-else-if="profileTab === 'requests'">
+        <h2>My scan requests</h2>
+        <p class="muted" v-if="myRequests.length === 0">
+          Unknown items you report at the counter appear here, with their status.
+        </p>
+        <table class="table" v-else>
+          <thead>
+            <tr><th>Requested</th><th>Code</th><th>Proposed item</th><th>Price</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="req in myRequests" :key="req.id">
+              <td>{{ formatDate(req.created_at) }}</td>
+              <td><code>{{ req.code }}</code></td>
+              <td>{{ req.name }}</td>
+              <td>{{ formatPrice(req.price_cents) }}</td>
+              <td><span class="status-chip" :class="req.status">{{ req.status }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ================= Table view (items + export + analysis) ================= -->
@@ -540,6 +631,11 @@
                   >QR badge</button>
                   <button
                     v-if="user && (user.role === 'admin' || m.role !== 'admin') && m.has_qr_badge"
+                    class="btn tiny ghost"
+                    @click="viewMemberBadge(m)"
+                  >View</button>
+                  <button
+                    v-if="user && (user.role === 'admin' || m.role !== 'admin') && m.has_qr_badge"
                     class="btn tiny danger"
                     @click="revokeMemberBadge(m)"
                   >Revoke</button>
@@ -700,11 +796,13 @@
     </div>
   </div>
 
-  <!-- ================= One-shot badge print modal =================
-       The payload is shown EXACTLY ONCE (at creation/rotation) and never
-       persisted — closing this modal is final. The badge-backdrop class is
-       the print-precedence hook: when this modal prints, other open modals
-       are suppressed (see the @media print block). -->
+  <!-- ================= Badge print modal =================
+       The payload is a credential — the modal holds it in memory only and
+       never persists it. Re-viewable since Task A: a re-view re-fetches via
+       GET, so closing is NOT final; the warning text is context-set
+       (creation urgency vs re-view privacy vs migration). The
+       badge-backdrop class is the print-precedence hook: when this modal
+       prints, other open modals are suppressed (see the @media print block). -->
   <div class="modal-backdrop badge-backdrop" v-if="badgePrint" @click.self="badgePrint = null">
     <div class="modal badge-card">
       <button class="modal-close no-print" @click="badgePrint = null">✕</button>
@@ -713,14 +811,50 @@
       <div class="qr-badge" v-html="badgePrint.svg"></div>
       <p class="badge-payload"><code>{{ badgePrint.payload }}</code></p>
       <p class="badge-warn">
-        <strong>Shown only once — print or write it down now.</strong>
-        Whoever holds this code can log in to the account: hand it over privately.
-        It cannot be retrieved again.
+        {{ badgePrint.warning || "Anyone holding this code can log in — keep it private." }}
       </p>
       <div class="badge-actions modal-footer">
         <button class="btn block no-print" @click="() => window.print()">Print</button>
         <button class="btn ghost block no-print" @click="badgePrint = null">Done</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ================= Checkout receipt modal =================
+       The result of Complete purchase (Task D): the immutable receipt with
+       per-line applied/clamped and skipped orphans. Joins _modalOpen() /
+       _closeOverlays() so it can never strand over a logout/switch. -->
+  <div class="modal-backdrop" v-if="lastReceipt" @click.self="lastReceipt = null">
+    <div class="modal">
+      <button class="modal-close" @click="lastReceipt = null">✕</button>
+      <h2>Purchase complete</h2>
+      <p class="muted">
+        Order #{{ lastReceipt.purchase.id }} ·
+        {{ lastReceipt.purchase.lines.length }} item(s) ·
+        <strong>{{ formatPrice(lastReceipt.purchase.total_cents) }}</strong>
+      </p>
+      <table class="table">
+        <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+        <tbody>
+          <tr v-for="line in lastReceipt.purchase.lines" :key="line.item_id">
+            <td>{{ line.name }}</td>
+            <td>
+              <template v-if="line.clamped">
+                <span class="status-chip open">{{ line.applied_qty }} of {{ line.qty }}</span>
+              </template>
+              <template v-else>{{ line.qty }}</template>
+            </td>
+            <td>{{ formatPrice(line.price_cents) }}</td>
+            <td>{{ formatPrice(line.line_total_cents) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-if="lastReceipt.skipped && lastReceipt.skipped.length" class="muted">
+        {{ lastReceipt.skipped.length }} scanned item(s) no longer exist and were skipped.
+      </p>
+      <p class="muted">Your purchase list was cleared. The receipt also appears
+        in My profile → Purchase history.</p>
+      <button class="btn block" @click="lastReceipt = null">Done</button>
     </div>
   </div>
 

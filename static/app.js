@@ -177,13 +177,30 @@ Vue.createApp({
       badgePayload: "",   // its one-time payload (shown only via the print modal)
       myRequests: [],    // "My scan requests" (GET /api/scan-requests/mine)
 
+      // Task D — the tabbed "My profile" (#/account, no route churn):
+      // profile | security | badge | purchases | requests. A flagged
+      // account (must_change_password) is steered to "security" on arrival
+      // — the redirect keeps working and lands one click from the fix.
+      profileTab: "profile",
+      emailForm: { new_email: "", current_password: "" },
+      emailError: "",
+      emailOk: false,
+      phoneForm: { phone: "" },
+      phoneError: "",
+      myOrders: [],        // GET /api/orders/mine, newest first
+      ordersLimit: 10,     // the single pagination knob (loadMoreOrders)
+      expandedOrders: [],  // ids of receipts opened inline
+      lastCheckout: null,  // the just-completed order id ("new" chip + pre-expand)
+      lastReceipt: null,   // the checkout result modal { purchase, skipped }
+
       // members: badge being displayed for printing
       memberBadge: null,  // { id, name, email, svg }
 
-      // one-shot badge print (Task 5): shown after register / member-create.
-      // The payload lives in memory only — never localStorage — and is
-      // cleared when the modal closes: it cannot be retrieved again.
-      badgePrint: null,   // { title, subtitle, svg, payload }
+      // The badge print modal (creation, rotation, re-view): the payload
+      // lives in memory only — never localStorage. Re-viewable since Task A:
+      // a re-view re-fetches it via GET, so nothing here is "one-shot"
+      // except the creation moment's urgency.
+      badgePrint: null,   // { title, subtitle, svg, payload, warning }
 
       // admin: scan requests queue
       scanReqFilter: "open",
@@ -307,7 +324,17 @@ Vue.createApp({
       }
       if (view === "admin") this.loadAdminData();
       if (view === "table") this.loadDataPage();
-      if (view === "account") this.loadMyRequests();
+      if (view === "account") {
+        // A flagged account's mandatory change is the point of the visit:
+        // land on the Security tab, one click from the fix. Everyone else
+        // keeps their last tab.
+        if (this.user && this.user.must_change_password) this.profileTab = "security";
+        this.selectProfileTab(this.profileTab);
+      }
+    },
+    profileTab(tab) {
+      // The phone field always reflects the server truth on entry ("" = none).
+      if (tab === "profile") this.phoneForm.phone = (this.user && this.user.phone) || "";
     },
   },
 
@@ -407,14 +434,17 @@ Vue.createApp({
           method: "POST", body: this.registerForm,
         });
         await this.afterLogin(data);
-        // Task 2: the 201 carries the account's FIRST badge, shown exactly
-        // once — print it now, it cannot be retrieved again.
+        // Task 2: the 201 carries the account's FIRST badge. Re-viewable
+        // forever (Task A), so no "cannot be retrieved" claim — but keep
+        // the creation-moment urgency to print it.
         if (data.qr_badge) {
           this.badgePrint = {
             title: "Your QR login badge",
             subtitle: "Welcome, " + data.user.name + "!",
             svg: data.qr_badge.svg,
             payload: data.qr_badge.payload,
+            warning: "Anyone holding this code can log in as you — keep it " +
+                     "private. Print it now while you have it.",
           };
         }
         this.showToast("Welcome, " + data.user.name + "!");
@@ -443,6 +473,7 @@ Vue.createApp({
       this.memberBadge = null;
       this.badgePrint = null;
       this.pwResetMember = null;
+      this.lastReceipt = null;   // the checkout result — same stranding class
       this.badgeSvg = "";
       this.badgePayload = "";
       this.myRequests = [];
@@ -504,7 +535,7 @@ Vue.createApp({
 
     printAccountBadge() {
       // Print isolation for the account view's rotated badge (Task 6): route
-      // it through the one-shot badgePrint modal, which carries the
+      // it through the badgePrint modal, which carries the
       // .printing-badge body class + @media print isolation — printing the
       // account page directly would print the whole page around the card.
       if (!this.badgeSvg) return;
@@ -513,6 +544,7 @@ Vue.createApp({
         subtitle: "Rotated just now — the previous badge stopped working",
         svg: this.badgeSvg,
         payload: this.badgePayload || "",
+        warning: "Anyone holding this code can log in as you — keep it private.",
       };
     },
 
@@ -703,12 +735,148 @@ Vue.createApp({
         this.cart = await api("/cart", { method: "DELETE" });
       });
     },
-    requestPurchase() {
-      // Barebones placeholder: checkout is a tracked non-goal.
-      this.showToast(
-        `Request noted: ${this.cart.lines.length} item type(s), total ` +
-        this.formatPrice(this.purchaseTotalCents) + ". (Checkout to be implemented)"
-      );
+    /* ---------- Task D: checkout + profile tab ---------- */
+
+    selectProfileTab(tab) {
+      this.profileTab = tab;
+      if (tab === "purchases") this.loadMyOrders();
+      if (tab === "requests") this.loadMyRequests();
+      if (tab === "profile")
+        this.phoneForm.phone = (this.user && this.user.phone) || "";
+    },
+
+    async submitEmailChange() {
+      this.emailError = "";
+      this.emailOk = false;
+      this.busy = true;
+      try {
+        const user = await api("/auth/change-email", {
+          method: "POST", body: this.emailForm,
+        });
+        // Refresh the cached session user (the changePassword pattern) so
+        // the SPA never shows a stale login identifier.
+        this.user = user;
+        localStorage.setItem(USER_KEY, JSON.stringify(user));
+        this.emailForm = { new_email: "", current_password: "" };
+        this.emailOk = true;
+        this.showToast("Email updated — you were signed out on other devices");
+      } catch (e) {
+        this.emailError = e.message;   // 400 wrong-password/no-op, 409 taken, 422 shape
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    async submitPhoneChange() {
+      this.phoneError = "";
+      this.busy = true;
+      try {
+        const user = await api("/auth/change-phone", {
+          method: "POST", body: { phone: this.phoneForm.phone },
+        });
+        this.user = user;
+        localStorage.setItem(USER_KEY, JSON.stringify(user));
+        this.showToast(user.phone ? "Phone saved" : "Phone cleared");
+      } catch (e) {
+        this.phoneError = e.message;   // 422: the normaliser's shape message
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    _handleBadgeView(r, title, subtitle) {
+      /* ONE envelope handler for the self re-view and the staff view
+       * (Task A's status convention — raw mode, branch on the
+       * discriminator). Returns true when the modal was shown. */
+      if (r.status === 401) {
+        // Raw mode skips the wrapper's global 401 cleanup by design — the
+        // caller owns it (the Task-5 contract every raw site follows).
+        this.handleSessionExpired();
+        return false;
+      }
+      if (r.status === 200 && r.data) {
+        this.badgePrint = {
+          title, subtitle,
+          svg: r.data.svg,
+          payload: r.data.payload,
+          warning: r.data.migrated
+            ? "Your PREVIOUS printed badge stopped working when you viewed " +
+              "this one — print the new card now and replace it."
+            : "Anyone holding this code can log in as you — keep it private.",
+        };
+        return true;
+      }
+      const s = r.data && r.data.detail && r.data.detail.status;
+      if (r.status === 404 || s === "none") {
+        this.showToast("You have no badge yet — generate one below");
+      } else if (s === "no_key") {
+        this.showToast("Badge viewing is unavailable (no key) — logins are " +
+                       "unaffected; ask an admin to restore the badge key");
+      } else if (s === "key_mismatch") {
+        this.showToast("The badge key changed — regenerate your badge to " +
+                       "re-enable viewing (logins are unaffected)");
+      } else {
+        this.showToast("Could not view the badge");
+      }
+      return false;
+    },
+
+    async showMyBadge() {
+      const r = await api("/auth/qr-badge", { raw: true });
+      this._handleBadgeView(r, "Your QR badge", this.user ? this.user.name : "");
+    },
+
+    async viewMemberBadge(member) {
+      const r = await api("/members/" + member.id + "/qr-badge", { raw: true });
+      this._handleBadgeView(r, "QR badge — " + member.name, member.email);
+    },
+
+    async loadMyOrders() {
+      if (!this.user || this.user.must_change_password) return;
+      try {
+        this.myOrders = await api("/orders/mine?limit=" + this.ordersLimit);
+      } catch (_) { /* non-critical */ }
+    },
+
+    async loadMoreOrders() {
+      // The single pagination knob (Task D spec): one method, one bound —
+      // capped at the backend's Query(le=100): asking for more would 422
+      // into the silent catch and leave the button visibly dead.
+      if (this.ordersLimit >= 100) return;
+      this.ordersLimit = Math.min(100, this.ordersLimit + 10);
+      await this.loadMyOrders();
+    },
+
+    toggleOrder(id) {
+      this.expandedOrders = this.expandedOrders.includes(id)
+        ? this.expandedOrders.filter((i) => i !== id)
+        : this.expandedOrders.concat([id]);
+    },
+
+    async completePurchase() {
+      if (this.busy) return;
+      // Checkout is consequential (stock decrements, the cart empties, the
+      // receipt is immutable) — confirm, like every other consequential
+      // action in this SPA (deleteItem, deleteMember, revoke badge).
+      if (!confirm(`Complete this purchase (${this.cart.total_qty} item(s), ` +
+                   `${this.formatPrice(this.purchaseTotalCents)})?`)) return;
+      this.busy = true;   // also drives the button's :disabled binding —
+      try {               // without it a double-click fires a second POST
+        const r = await api("/orders", { method: "POST", raw: true });
+        if (r.status === 401) { this.handleSessionExpired(); return; }
+        if (r.status === 201 && r.data) {
+          this.cart = r.data.cart;                    // the emptied cart, one payload
+          this.lastReceipt = r.data;                  // the result modal (§ _closeOverlays)
+          this.lastCheckout = r.data.purchase.id;     // "new" chip in history
+          await this.loadMyOrders();
+          this.expandedOrders = [r.data.purchase.id]; // pre-expand the receipt
+          return;
+        }
+        if (r.status === 400) { this.showToast("Cart is empty"); return; }
+        this.showToast("Checkout failed (" + r.status + ")");
+      } finally {
+        this.busy = false;
+      }
     },
 
     /* ---------- global HID scan capture + the handleScan bus ---------- */
@@ -843,7 +1011,7 @@ Vue.createApp({
 
     _modalOpen() {
       return !!(this.detailItem || this.memberBadge || this.badgePrint
-        || this.pwResetMember || this.scanIntake);
+        || this.pwResetMember || this.scanIntake || this.lastReceipt);
     },
 
     async handleBadgeScan(code) {
@@ -1554,14 +1722,17 @@ Vue.createApp({
       try {
         const data = await api("/members", { method: "POST", body: this.memberForm });
         this.showToast("Account created for " + this.memberForm.name);
-        // Task 2: the 201 carries the member's first badge — show it once
-        // so the counter can print the card immediately.
+        // Task 2: the 201 carries the member's first badge — show it so the
+        // counter can print the card immediately (re-viewable after Task A;
+        // keep the urgency, drop the old unrecoverability claim).
         if (data.qr_badge) {
           this.badgePrint = {
             title: "QR badge — " + this.memberForm.name,
             subtitle: "Print the membership card now",
             svg: data.qr_badge.svg,
             payload: data.qr_badge.payload,
+            warning: "Anyone holding this code can log in as the member — " +
+                     "hand it over privately. Print it now while you have it.",
           };
         }
         this.memberForm = { name: "", email: "", password: "", role: "member" };
