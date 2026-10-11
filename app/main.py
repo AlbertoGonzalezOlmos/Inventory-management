@@ -20,7 +20,7 @@ from sqlmodel import Session, select
 from app import models  # noqa: F401  (registers tables)
 from app.database import create_all, engine, vector_extension_available
 from app.embeddings import model_status, warm_up
-from app.routers import auth, cart, items, members, scan_requests
+from app.routers import auth, cart, items, members, orders, scan_requests
 from app.seed import backfill_embeddings, seed_example_items
 from app.security import (
     DEFAULT_ADMIN_EMAIL,
@@ -341,6 +341,7 @@ app.include_router(auth.router)
 app.include_router(items.router)
 app.include_router(members.router)
 app.include_router(cart.router)
+app.include_router(orders.router)
 app.include_router(scan_requests.router)
 
 # Cached at startup; computed lazily on first call when the lifespan did not

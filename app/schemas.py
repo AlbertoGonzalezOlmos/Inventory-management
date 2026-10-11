@@ -511,3 +511,42 @@ class ScanRequestResolveIn(_Stripped):
 
     item_id: int
     add_to_cart: bool = False
+
+
+# --- Purchases (Task C) --------------------------------------------------------
+
+
+class PurchaseLineOut(BaseModel):
+    """A receipt line: the checkout-time snapshot, with the ordered amount
+    (qty), what was actually deliverable (applied_qty), and whether the sale
+    was clamped at stock. Clamp-not-veto: a shortfall sells what is
+    available and the receipt records BOTH numbers."""
+
+    item_id: int | None
+    sku: str
+    name: str
+    price_cents: int
+    qty: int
+    applied_qty: int
+    clamped: bool
+    line_total_cents: int
+
+
+class PurchaseOut(BaseModel):
+    """A purchase with its lines — the immutable receipt."""
+
+    id: int
+    created_at: datetime
+    total_cents: int
+    lines: list[PurchaseLineOut]
+
+
+class CheckoutOut(BaseModel):
+    """The receipt of a checkout: the purchase, the emptied cart (the SPA
+    re-renders from one payload — the Task-1 mutator contract), and the
+    item_ids of orphaned cart lines that were skipped (their items no
+    longer exist; the checkout proceeded for the rest)."""
+
+    purchase: PurchaseOut
+    cart: CartOut
+    skipped: list[int] = []

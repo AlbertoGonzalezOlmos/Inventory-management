@@ -7,16 +7,16 @@ Privilege rules:
   (so the system can never end up with zero admins).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.database import get_session
 from app.deps import require_admin, require_staff
-from app.models import AuthToken, CartItem, ScanRequest, User
+from app.models import AuthToken, CartItem, Purchase, PurchaseLine, ScanRequest, User
 from app.qrbadge import badge_svg, new_badge_for
-from app.schemas import (MemberCreatedOut, MemberIn, MemberPatch, QrBadgeOut,
-                         QrBadgeViewOut, UserOut)
+from app.schemas import (MemberCreatedOut, MemberIn, MemberPatch, PurchaseOut,
+                         QrBadgeOut, QrBadgeViewOut, UserOut)
 from app.security import hash_password, is_well_known_password
 
 router = APIRouter(prefix="/api/members", tags=["members"])
@@ -242,6 +242,23 @@ def view_member_badge(
     return badge_view_response(session, user)
 
 
+@router.get("/{user_id}/orders", response_model=list[PurchaseOut])
+def member_orders(
+    user_id: int,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    staff: User = Depends(require_staff),
+    session: Session = Depends(get_session),
+):
+    """A member's purchase history (staff view) — same shape as
+    GET /api/orders/mine, same privilege rule as account edits (staff never
+    read an admin's history)."""
+    from app.routers.orders import _history
+
+    user = _get_manageable_member(session, user_id, staff)
+    return _history(session, user.id, limit, offset)
+
+
 @router.delete("/{user_id}/qr-badge", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_member_badge(
     user_id: int,
@@ -291,6 +308,22 @@ def delete_member(
         select(ScanRequest).where(ScanRequest.requester_id == user_id)
     ).all():
         session.delete(request)
+    # Purchase history is erased with the account (doctrine parity with
+    # cart rows and scan requests — operational data, D4): lines first
+    # (they reference their purchases), then the purchases.
+    purchase_ids = session.exec(
+        select(Purchase.id).where(Purchase.user_id == user_id)
+    ).all()
+    if purchase_ids:
+        for line in session.exec(
+            select(PurchaseLine).where(
+                PurchaseLine.purchase_id.in_(purchase_ids))
+        ).all():
+            session.delete(line)
+        for purchase in session.exec(
+            select(Purchase).where(Purchase.user_id == user_id)
+        ).all():
+            session.delete(purchase)
     session.delete(user)
     try:
         session.commit()
