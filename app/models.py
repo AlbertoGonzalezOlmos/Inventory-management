@@ -163,6 +163,46 @@ class ScanRequest(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
 
 
+class Purchase(SQLModel, table=True):
+    """A completed checkout (Task C): an immutable receipt.
+
+    The cart is intent; THIS is the sale — the only member-facing flow that
+    touches stock (coordinator decision 2). Created atomically by
+    POST /api/orders together with its lines and the cart clear.
+    """
+
+    __tablename__ = "purchases"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    # Σ price_cents × applied_qty at checkout — what was actually paid, never
+    # what was merely requested (you don't pay for undelivered goods).
+    total_cents: int = 0
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+
+
+class PurchaseLine(SQLModel, table=True):
+    """One line of a purchase receipt — a DENORMALISED SNAPSHOT: what was
+    actually bought, at the checkout-time price. History must never rewrite
+    when the catalogue changes (price edits) or disappear (item deletion)."""
+
+    __tablename__ = "purchase_lines"
+
+    id: int | None = Field(default=None, primary_key=True)
+    purchase_id: int = Field(foreign_key="purchases.id", index=True)
+    # Plain int, deliberately NOT a FK: history survives item deletion (the
+    # scan_requests.resolved_item_id weak-ref precedent).
+    item_id: int | None = None
+    sku: str
+    name: str
+    # The snapshot: live at checkout time.
+    price_cents: int
+    qty: int            # the ORDERED amount (what the member wanted)
+    applied_qty: int    # what was actually deliverable (clamped at stock)
+    clamped: bool = False
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+
+
 class AuthToken(SQLModel, table=True):
     """A bearer token issued at login."""
 
