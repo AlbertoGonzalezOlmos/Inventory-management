@@ -52,7 +52,7 @@ import urllib.request
 # repo root on sys.path so `app.*` and `scripts.*` imports resolve.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.barcodes import analyze_scan  # noqa: E402
+from app.scanlookup import resolve_scan, verdict_message  # noqa: E402
 from app.scanner import OpticonM10, find_scanner_ports  # noqa: E402
 from app.scanner.transport import SerialOpenError  # noqa: E402
 
@@ -119,44 +119,49 @@ def find_item(get, code, fuzzy=False, symbology=""):
     SKU equality for an opaque label), ``"search"`` (keyword hit — only with
     ``fuzzy=True``) or ``None``.
 
+    The decision table itself now lives in ``app.scanlookup.resolve_scan``
+    — the ONE table the server's ``POST /api/cart/scan`` uses too, so the
+    two paths cannot drift on identity; this function is a thin adapter,
+    and its offline test suite is the parity guarantee. The adapter is
+    **memoising**: the opaque path's SKU check and the fuzzy first-hit
+    share one ``?q=`` fetch, exactly as the pre-extraction bridge did —
+    the pinned call sequences (one ``?barcode=``, one ``?q=``, zero calls
+    for a misread) are part of the contract.
+
     There is deliberately **no** silent fallback to "the first search hit"
     (REVIEW-m10.md P1): that made any partial word, mis-scan or label fragment
     resolve to an unrelated item, and with `--stock-out` it *demonstrably*
     decremented the wrong product's stock. A code that identifies nothing is
     reported as identifying nothing.
-
-    Identity comes from `app.barcodes.analyze_scan` (P5), so a product scanned
-    as UPC-E finds the item filed under its EAN-13 GTIN — which the old
-    "put the barcode in the SKU field" convention could never do, since the two
-    forms are different strings.
     """
-    analysis = analyze_scan(code, symbology)
+    pages = {}
 
-    if analysis.kind in ("gtin", "restricted"):
-        _, items = get(f"/api/items?barcode={urllib.parse.quote(analysis.key)}")
-        if items:
-            return items[0], "barcode", analysis
-        return None, None, analysis
+    def _fetch_page(query):
+        # One ?q= fetch per query, shared by by_sku and search (the
+        # pre-extraction bridge fetched once and reused the page).
+        if query not in pages:
+            _, items = get(f"/api/items?q={urllib.parse.quote(query)}&limit=100")
+            pages[query] = items
+        return pages[query]
 
-    if analysis.kind == "invalid-gtin":
-        # Right shape, bad check digit: a misread. Looking it up would turn a
-        # scanning error into either a phantom identity or a wrong match.
-        return None, None, analysis
+    class _HttpLookup:
+        def by_barcode(self, gtin14):
+            _, items = get(f"/api/items?barcode={urllib.parse.quote(gtin14)}")
+            return items
 
-    # Opaque payload (Code 128 SKU label, internal code): exact SKU equality
-    # only. A short all-digit payload *might* be a zero-suppressed UPC-E, but
-    # app.barcodes deliberately refuses to expand one without the scanner's
-    # word — the expansion computes its own check digit, so any 6 digits would
-    # "validate" and internal numeric codes would turn into fake GTINs. The
-    # bridge does not undermine that by trying both number systems; the verdict
-    # it emits says what is missing instead (--symbology UPC-E).
-    _, items = get(f"/api/items?q={urllib.parse.quote(code)}&limit=100")
-    for item in items:
-        if item["sku"].lower() == code.lower():
-            return item, "sku", analysis
-    if fuzzy and items:
-        return items[0], "search", analysis
-    return None, None, analysis
+        def by_sku(self, sku):
+            # The API offers substring search, not an exact-SKU query — the
+            # exact case-insensitive equality is applied client-side (fetch
+            # mechanics; the DOCTRINE lives in scanlookup's contract).
+            return [item for item in _fetch_page(sku)
+                    if item["sku"].lower() == sku.lower()]
+
+        def search(self, q):
+            return _fetch_page(q)
+
+    verdict = resolve_scan(_HttpLookup(), code,
+                           symbology=symbology, fuzzy=fuzzy)
+    return verdict.item, verdict.match, verdict.analysis
 
 
 def call_with_relogin(api_call, login_call, path, token, method="GET",
@@ -386,19 +391,10 @@ def main():
         record["analysis"] = {"kind": analysis.kind, "key": analysis.key,
                               "addon": analysis.addon}
         if item is None:
-            record["verdict"] = {
-                "invalid-gtin": "MISREAD — check digit fails; re-scan, do not file",
-                "opaque": ("no catalogue match (opaque payload)"
-                           + (" — if this is a UPC-E, the scanner must transmit "
-                              "its symbology ID: re-run with --symbology UPC-E"
-                              if code.isdigit() and len(code) in (6, 7, 8) else "")),
-                "gtin": "valid GTIN, not in the catalogue — new-entry candidate",
-                "restricted": "valid in-store GTIN, not in the catalogue — "
-                              "new-entry candidate (restricted circulation)",
-            }.get(analysis.kind, "no catalogue match")
-            if analysis.kind in ("gtin", "restricted") and analysis.info:
-                where = analysis.info.region or "unknown GS1 region"
-                record["verdict"] += f" ({where}, {analysis.info.usage})"
+            # One wording for the bridge's stdout and the API's 404
+            # detail: app.scanlookup.verdict_message is the shared source
+            # (verbatim strings, including the UPC-E symbology hint).
+            record["verdict"] = verdict_message(analysis)
             emit(record)
             return
         if adjust:

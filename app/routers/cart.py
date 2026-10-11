@@ -42,15 +42,20 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.deps import get_current_user
 from app.models import CartItem, Item, User, utcnow
+from app.qrbadge import parse_badge_payload
+from app.routers.items import DbLookup, suggest_items
 from app.schemas import (
     CART_QTY_MAX,
     CartAddIn,
     CartLineOut,
     CartOut,
     CartReplaceIn,
+    CartScanIn,
+    CartScanOut,
     CartSetIn,
     ItemOut,
 )
+from app.scanlookup import resolve_scan, verdict_message
 
 router = APIRouter(prefix="/api/cart", tags=["cart"])
 
@@ -151,6 +156,101 @@ def _get_line(session: Session, user_id: int, item_id: int) -> CartItem | None:
             CartItem.user_id == user_id, CartItem.item_id == item_id
         )
     ).first()
+
+
+def _analysis_out(analysis) -> dict:
+    """Serialise a ScanAnalysis (+ its BarcodeInfo) for the 404/422 detail:
+    the flat fields the Task-5 intake form needs — kind, canonical key, and
+    the barcode-system context (format/region/usage) that renders next to
+    the name+price fields."""
+    info = analysis.info
+    return {
+        "kind": analysis.kind,
+        "gtin14": analysis.key if analysis.kind in ("gtin", "restricted") else None,
+        "raw": analysis.raw,
+        "addon": analysis.addon,
+        "format": info.format if info is not None else None,
+        "prefix": info.prefix if info is not None else None,
+        "region": info.region if info is not None else None,
+        "usage": info.usage if info is not None else None,
+        "globally_unique": info.globally_unique if info is not None else None,
+        "notes": list(info.notes) if info is not None else [],
+    }
+
+
+@router.post("/scan", response_model=CartScanOut)
+def scan_code(
+    payload: CartScanIn,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Scan-to-cart: resolve one scanned code by EXACT identity and add it.
+
+    The API path never guesses (fuzzy stays the bridge's CLI opt-in) — a
+    code that identifies nothing is a 404 carrying everything the intake UI
+    needs (barcode-system analysis + suggestions) in one round-trip.
+    Badges never reach the catalogue (the bridge's invariant): a QR badge
+    payload is a login credential, not an item.
+    """
+    if parse_badge_payload(payload.code) is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"status": "badge",
+                    "message": "QR badge payload — badges log in via "
+                               "POST /api/auth/qr-login, they are not "
+                               "catalogue items"},
+        )
+
+    verdict = resolve_scan(DbLookup(session), payload.code,
+                           symbology=payload.symbology)
+
+    if verdict.analysis.kind == "invalid-gtin":
+        # Misread: mirrors GET /api/items?barcode='s 422-on-invalid — a
+        # misread is a client error, never an empty result, never a filing.
+        # NO suggestions: a misread must not be suggested around.
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"status": "misread",
+                    "message": verdict_message(verdict.analysis),
+                    "analysis": _analysis_out(verdict.analysis)},
+        )
+
+    if verdict.item is not None:
+        _upsert_line(session, user.id, verdict.item.id, payload.qty)
+        line = _get_line(session, user.id, verdict.item.id)
+        return CartScanOut(
+            status="added",
+            match=verdict.match,
+            item=ItemOut.model_validate(verdict.item),
+            qty=line.qty if line else payload.qty,
+            cart=_cart_out(session, user),
+        )
+
+    # Unknown: the structured 404 that drives the Task-5 name+price modal.
+    analysis = verdict.analysis
+    gtin14 = analysis.key if analysis.kind in ("gtin", "restricted") else None
+    # semantic=False: the 404 surfaces by_prefix/by_keyword only — running
+    # the embedding model on a raw code would cost a forward pass per
+    # unknown scan and its result would be discarded.
+    suggestions = suggest_items(session, gtin14=gtin14, q=analysis.raw,
+                                semantic=False)
+    # HTTPException.detail goes through Starlette's plain json.dumps (NOT
+    # jsonable_encoder), so the ItemOut groups must be pre-serialised.
+    raise HTTPException(
+        status.HTTP_404_NOT_FOUND,
+        detail={
+            "status": "unknown",
+            "message": verdict_message(analysis),
+            "analysis": _analysis_out(analysis),
+            "catalogable": analysis.kind in ("gtin", "restricted"),
+            "suggestions": {
+                "by_prefix": [i.model_dump(mode="json")
+                              for i in suggestions["by_prefix"]],
+                "by_keyword": [i.model_dump(mode="json")
+                               for i in suggestions["by_keyword"]],
+            },
+        },
+    )
 
 
 @router.get("", response_model=CartOut)

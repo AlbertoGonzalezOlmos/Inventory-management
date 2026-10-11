@@ -113,6 +113,43 @@ class CartItem(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
 
 
+class ScanRequest(SQLModel, table=True):
+    """A member's proposal for a catalogue entry from an unresolvable scan.
+
+    Staff-only catalogue creation (coordinator decision 1): a member at the
+    counter gets the intake form, and filing it persists THIS request for
+    staff to resolve — by creating the item through the normal staff-only
+    path (POST /api/items, prefilled from gtin14) and linking it back, or by
+    dismissing it. The member never writes the catalogue.
+
+    Classification fields are captured AT FILING time (server-derived, never
+    trusted from the client) so the request stays interpretable after
+    barcode rules or the catalogue change.
+    """
+
+    __tablename__ = "scan_requests"
+
+    id: int | None = Field(default=None, primary_key=True)
+    requester_id: int = Field(foreign_key="users.id", index=True)
+    code: str = Field(max_length=64)
+    symbology: str = ""
+    # analyze_scan snapshot at filing: kind + canonical key.
+    kind: str = ""
+    gtin14: str | None = None
+    # The member's proposal (what the intake modal collected).
+    name: str
+    price_cents: int = 0
+    status: str = Field(default="open", index=True)  # open|resolved|dismissed
+    # Plain int, deliberately NOT a FK: a resolved request is a historical
+    # audit record and must survive the item's later deletion (weak ref;
+    # read paths tolerate the dangling id with a null join result).
+    resolved_item_id: int | None = None
+    resolved_by: int | None = None
+    resolved_at: datetime | None = Field(default=None, sa_type=DateTime)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+
+
 class AuthToken(SQLModel, table=True):
     """A bearer token issued at login."""
 

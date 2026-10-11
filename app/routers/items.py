@@ -3,19 +3,82 @@
 import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, or_, select
 
 from app.database import VECTOR_OPTIONS, engine, get_session
 from app.deps import get_current_user, require_staff
 from app.embeddings import embed_text, embed_text_blob, item_embedding_text, vec_to_blob
-from app.barcodes import normalize_input_gtin
+from app.barcodes import normalize_input_gtin, rank_prefix_siblings
 from app.models import CartItem, Item, User, utcnow
 from app.schemas import (ItemIn, ItemOut, ItemPatch, StockAdjustIn,
-                         StockAdjustOut, VectorSearchOut)
+                         StockAdjustOut, SuggestOut, VectorSearchOut)
 
 router = APIRouter(prefix="/api/items", tags=["items"])
+
+
+def keyword_filter(statement, q: str):
+    """The ONE keyword-search condition (extracted from list_items so every
+    consumer — ?q=, the suggest endpoint, DbLookup.search — shares one
+    dialect, wildcards escaped identically).
+
+    Substring match, case-insensitive, over name/description/SKU/barcode.
+    Stored barcodes are canonical GTIN-14 (zero-padded), so a typed/scanned
+    13- or 12-digit form still substring-matches; a keyboard-mode scanner
+    typing into the search box finds the item without any dedicated
+    integration.
+    """
+    # Escape LIKE wildcards so q="%" or q="___" search literally instead
+    # of matching every row.
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    needle = f"%{escaped}%"
+    return statement.where(
+        or_(
+            Item.name.ilike(needle, escape="\\"),
+            Item.description.ilike(needle, escape="\\"),
+            Item.sku.ilike(needle, escape="\\"),
+            Item.barcode.ilike(needle, escape="\\"),
+        )
+    )
+
+
+class DbLookup:
+    """The server-side ``ItemLookup`` of the shared decision table
+    (``app/scanlookup.py``), over an ORM session.
+
+    Deliberately lives HERE, not in ``app/scanlookup.py``: the bridge imports
+    that module and its documented contract is "Stdlib only, except the
+    optional pyserial" — this class needs sqlmodel/app.models, so hosting it
+    in the core would silently widen the bridge's dependency footprint
+    (measured incident: the bridge pulled in sqlmodel/sqlalchemy/pydantic).
+
+    ``by_sku`` compares ``lower(sku) == lower(code)`` directly: the same
+    case-insensitive exact equality the bridge obtains via ``?q=`` plus a
+    client-side filter, without depending on the search endpoint's LIKE
+    escaping. Small catalogues: no functional index needed (documented).
+    ``search`` mirrors the ``?q=`` ordering (id DESC) so parity holds for
+    the bridge's fuzzy first-hit; the server itself never calls it (fuzzy
+    is the bridge's CLI opt-in — the API never guesses).
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def by_barcode(self, gtin14: str) -> list[Item]:
+        return list(self.session.exec(
+            select(Item).where(Item.barcode == gtin14)
+        ).all())
+
+    def by_sku(self, sku: str) -> list[Item]:
+        return list(self.session.exec(
+            select(Item).where(func.lower(Item.sku) == sku.strip().lower())
+        ).all())
+
+    def search(self, q: str) -> list[Item]:
+        return list(self.session.exec(
+            keyword_filter(select(Item), q).order_by(Item.id.desc()).limit(100)
+        ).all())
 
 
 @router.get("", response_model=list[ItemOut])
@@ -48,22 +111,7 @@ def list_items(
             )
         statement = statement.where(Item.barcode == gtin)
     if q:
-        # Escape LIKE wildcards so q="%" or q="___" search literally instead
-        # of matching every row.
-        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        needle = f"%{escaped}%"
-        statement = statement.where(
-            or_(
-                Item.name.ilike(needle, escape="\\"),
-                Item.description.ilike(needle, escape="\\"),
-                Item.sku.ilike(needle, escape="\\"),
-                # Stored barcodes are canonical GTIN-14 (zero-padded), so a
-                # typed/scanned 13- or 12-digit form still substring-matches;
-                # a keyboard-mode scanner typing into the search box finds
-                # the item without any dedicated integration.
-                Item.barcode.ilike(needle, escape="\\"),
-            )
-        )
+        statement = keyword_filter(statement, q)
     if category:
         statement = statement.where(Item.category == category)
     statement = statement.order_by(Item.id.desc()).offset(offset).limit(limit)
@@ -105,32 +153,13 @@ def vector_search(
     query_blob = vec_to_blob(query_vec)
 
     # vector_init registers the column for this connection (idempotent).
-    try:
-        session.execute(
-            text("SELECT vector_init('items', 'embedding', :opts)"),
-            {"opts": VECTOR_OPTIONS},
-        )
-    except Exception as exc:
+    rows = _vector_search_rows(session, query_blob, category=category,
+                               limit=limit, offset=offset)
+    if rows is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Vector search unavailable (sqlite-vector extension not loaded)",
-        ) from exc
-
-    # The category filter is applied in SQL (before LIMIT/OFFSET) so that
-    # pagination stays correct; filtering after the scan would break it.
-    scan_sql = (
-        "SELECT v.rowid AS row_id, v.distance AS distance "
-        "FROM vector_full_scan('items', 'embedding', :qvec) AS v "
-        "JOIN items i ON i.id = v.rowid "
-    )
-    if category:
-        scan_sql += "WHERE i.category = :cat "
-    scan_sql += "ORDER BY v.distance LIMIT :limit OFFSET :offset"
-
-    params = {"qvec": query_blob, "limit": limit, "offset": offset}
-    if category:
-        params["cat"] = category
-    rows = session.execute(text(scan_sql), params).all()
+        )
     if not rows:
         return []
 
@@ -154,6 +183,125 @@ def vector_search(
                 )
             )
     return results
+
+
+def _vector_search_rows(session: Session, query_blob: bytes, *,
+                        category: str = "", limit: int = 12, offset: int = 0):
+    """The sqlite-vector exact cosine scan (extracted from vector_search so
+    the suggest endpoint can reuse it AND degrade to [] instead of 503).
+
+    Returns the ``(row_id, distance)`` rows, or ``None`` when the extension
+    is unavailable — the caller decides whether that is a 503 (the search
+    endpoint, unchanged behaviour) or an empty suggestion group.
+    The category filter is applied in SQL (before LIMIT/OFFSET) so that
+    pagination stays correct; filtering after the scan would break it.
+    """
+    # vector_init registers the column for this connection (idempotent).
+    try:
+        session.execute(
+            text("SELECT vector_init('items', 'embedding', :opts)"),
+            {"opts": VECTOR_OPTIONS},
+        )
+    except Exception:
+        return None
+
+    scan_sql = (
+        "SELECT v.rowid AS row_id, v.distance AS distance "
+        "FROM vector_full_scan('items', 'embedding', :qvec) AS v "
+        "JOIN items i ON i.id = v.rowid "
+    )
+    if category:
+        scan_sql += "WHERE i.category = :cat "
+    scan_sql += "ORDER BY v.distance LIMIT :limit OFFSET :offset"
+
+    params = {"qvec": query_blob, "limit": limit, "offset": offset}
+    if category:
+        params["cat"] = category
+    return session.execute(text(scan_sql), params).all()
+
+
+def suggest_items(session: Session, *, gtin14: str | None = None,
+                  q: str = "", limit: int = 5, semantic: bool = True) -> dict:
+    """The ONE suggestion assembler — consumed by GET /api/items/suggest and
+    embedded in POST /api/cart/scan's 404 detail, so there is a single
+    suggestion brain.
+
+    - ``by_prefix``: GS1 company-prefix siblings of ``gtin14`` (ranked by
+      longest shared significant prefix — see app.barcodes.
+      rank_prefix_siblings); only when a canonical GTIN is given.
+    - ``by_keyword``: the shared keyword_filter on ``q`` (useful for opaque
+      labels whose code resembles a SKU fragment).
+    - ``by_semantic``: vector search on ``q`` — DEGRADES TO [] on any
+      embedding/extension unavailability: a suggestion miss must never
+      fail a scan flow (coordinator decision 7). Only computed for a text
+      query of >= 2 chars (the vector-search endpoint's own minimum), and
+      only when ``semantic`` is true: the cart-scan 404 surfaces just
+      by_prefix/by_keyword, and embedding a raw barcode/label there would
+      run a real model forward pass per unknown scan whose result is
+      discarded — ``semantic=False`` skips it entirely.
+    """
+    by_prefix: list[ItemOut] = []
+    if gtin14:
+        with_barcodes = session.exec(
+            select(Item).where(Item.barcode.is_not(None))  # type: ignore[attr-defined]
+        ).all()
+        pairs = [(item.barcode, item.name) for item in with_barcodes]
+        by_id = {item.barcode: item for item in with_barcodes}
+        for stored, _name in rank_prefix_siblings(gtin14, pairs, limit=limit):
+            by_prefix.append(ItemOut.model_validate(by_id[stored]))
+
+    by_keyword: list[ItemOut] = []
+    if q:
+        hits = session.exec(keyword_filter(select(Item), q).limit(limit)).all()
+        by_keyword = [ItemOut.model_validate(i) for i in hits]
+
+    by_semantic: list[ItemOut] = []
+    if semantic and q and len(q) >= 2:
+        query_vec = embed_text(q)
+        if query_vec is not None:
+            rows = _vector_search_rows(session, vec_to_blob(query_vec),
+                                       limit=limit)
+            if rows:
+                items_by_id = {
+                    item.id: item
+                    for item in session.exec(
+                        select(Item).where(Item.id.in_([r.row_id for r in rows]))
+                    ).all()
+                }
+                by_semantic = [
+                    ItemOut.model_validate(items_by_id[r.row_id])
+                    for r in rows if r.row_id in items_by_id
+                ]
+
+    return {"by_prefix": by_prefix, "by_keyword": by_keyword,
+            "by_semantic": by_semantic}
+
+
+@router.get("/suggest", response_model=SuggestOut)
+def suggest(
+    barcode: str = Query(default="", description="Canonical or any EAN/UPC "
+                 "form; drives the by_prefix group"),
+    q: str = Query(default="", description="Keyword/semantic text "
+                 "(e.g. the name being typed in the intake form)"),
+    limit: int = Query(default=5, ge=1, le=25),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Suggestions for the unknown-item intake flow.
+
+    ``by_semantic`` degrades to ``[]`` when the embedding model or the
+    sqlite-vector extension is unavailable: this endpoint NEVER answers
+    503 — a suggestion miss must not fail the flow that called it.
+    """
+    gtin14 = None
+    if barcode:
+        gtin14 = normalize_input_gtin(barcode)
+        if gtin14 is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"not a valid GTIN (bad check digit or length): {barcode!r}",
+            )
+    return suggest_items(session, gtin14=gtin14, q=q, limit=limit)
 
 
 @router.get("/{item_id}", response_model=ItemOut)

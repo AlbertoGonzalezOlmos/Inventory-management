@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 
 from app.database import get_session
 from app.deps import require_admin, require_staff
-from app.models import AuthToken, CartItem, User
+from app.models import AuthToken, CartItem, ScanRequest, User
 from app.qrbadge import badge_svg, new_badge_for
 from app.schemas import MemberCreatedOut, MemberIn, MemberPatch, QrBadgeOut, UserOut
 from app.security import hash_password, is_well_known_password
@@ -262,6 +262,13 @@ def delete_member(
         select(CartItem).where(CartItem.user_id == user_id)
     ).all():
         session.delete(line)
+    # Their open/resolved scan requests die with the account too (an
+    # operational queue item, not an audit record). Resolved requests keep
+    # their historical catalogue link — that lives in the items table.
+    for request in session.exec(
+        select(ScanRequest).where(ScanRequest.requester_id == user_id)
+    ).all():
+        session.delete(request)
     session.delete(user)
     try:
         session.commit()

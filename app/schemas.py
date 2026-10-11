@@ -236,6 +236,16 @@ class VectorSearchOut(ItemOut):
     similarity: float
 
 
+class SuggestOut(BaseModel):
+    """Suggestion groups for the unknown-item intake flow. All groups carry
+    plain ItemOut (a uniform pick-list; similarity scores are noise for
+    suggestions). by_semantic degrades to [] — never a 503."""
+
+    by_prefix: list[ItemOut]
+    by_keyword: list[ItemOut]
+    by_semantic: list[ItemOut]
+
+
 # --- Members ---------------------------------------------------------------
 
 class MemberIn(_Stripped):
@@ -303,3 +313,70 @@ class CartOut(BaseModel):
     lines: list[CartLineOut]
     total_qty: int
     total_cents: int
+
+
+class CartScanIn(_Stripped):
+    """One scanned code, resolved against the catalogue by exact identity
+    and added to the caller's cart on a match."""
+
+    code: str = Field(min_length=1, max_length=64)  # fits HCRM1: payloads (49)
+    symbology: str = Field(default="", max_length=32)  # scanner-reported, optional
+    qty: int = Field(default=1, ge=CART_QTY_MIN, le=CART_QTY_MAX)
+
+
+class CartScanOut(BaseModel):
+    """A successful scan-to-cart: what matched, the resulting line, and the
+    full cart (the Task-1 mutator contract — one payload, no read-after-write)."""
+
+    status: str  # "added"
+    match: str   # "barcode" | "sku"
+    item: ItemOut
+    qty: int     # the resulting line quantity
+    cart: CartOut
+
+
+# --- Scan requests ------------------------------------------------------------
+
+class ScanRequestIn(_Stripped):
+    """A member's 'unknown item' report: the scanned code plus the name/price
+    the intake modal collected. The classification is re-derived server-side
+    — a client-supplied kind is never trusted."""
+
+    code: str = Field(min_length=1, max_length=64)
+    symbology: str = Field(default="", max_length=32)
+    name: str = Field(min_length=1, max_length=255)
+    price_cents: int = Field(default=0, ge=0)
+
+
+class RequesterOut(BaseModel):
+    """The filer of a scan request — public fields only (staff queue view)."""
+
+    id: int
+    name: str
+    email: str
+
+
+class ScanRequestOut(BaseModel):
+    id: int
+    requester: RequesterOut
+    code: str
+    symbology: str
+    kind: str
+    gtin14: str | None
+    name: str
+    price_cents: int
+    status: str
+    resolved_item_id: int | None
+    resolved_by: int | None
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScanRequestResolveIn(_Stripped):
+    """Staff resolution: link the (already created) catalogue item. When
+    add_to_cart is set, the item is also added to the requester's cart —
+    the loop-closing option; default off (resolution is administrative)."""
+
+    item_id: int
+    add_to_cart: bool = False

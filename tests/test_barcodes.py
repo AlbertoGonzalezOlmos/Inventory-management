@@ -22,6 +22,7 @@ from app.barcodes import (
     is_valid_gtin,
     normalize_gtin,
     normalize_input_gtin,
+    rank_prefix_siblings,
     split_addon,
     upce_to_upca,
 )
@@ -269,3 +270,60 @@ def test_analyze_upce_preamble_is_global_gtin12_not_restricted_gtin8():
     # A genuine EAN-8 is still a GTIN-8.
     c = analyze_scan("96385074", "")
     assert c.kind == "gtin" and c.info.format == "GTIN-8"
+
+
+# --- prefix-sibling ranking ("closest items via the barcode system") --------
+
+
+def test_rank_prefix_siblings_ranks_longest_shared_first():
+    target = "08412345678905"  # significant view: 8412345678905
+    items = [
+        ("08412345000009", "Same company, other product"),  # shares 8412345 (7)
+        ("18412345678902", "Case pack of the same product"),  # indicator 1: shares 12
+        ("08412399999994", "Shares only 5 significant digits"),  # 84123 -> below floor
+        ("00000087654327", "Unrelated EAN-8"),  # significant 87654327: shares 0
+    ]
+    ranked = rank_prefix_siblings(target, items)
+    assert [name for _, name in ranked] == [
+        "Case pack of the same product",
+        "Same company, other product",
+    ]
+
+
+def test_rank_prefix_siblings_strips_indicator_and_padding():
+    # The indicator digit must not break family matching: a GTIN-14 case code
+    # (indicator 1-8) is the top sibling of its retail GTIN-13.
+    assert rank_prefix_siblings("18412345678902", [("08412345678905", "retail")]) == \
+        [("08412345678905", "retail")]
+    # The padding zeros must not CREATE siblings: two EAN-8s share six zeros
+    # of pure padding and zero significant digits — not siblings.
+    assert rank_prefix_siblings("00000012345674", [("00000087654327", "other ean8")]) == []
+
+
+def test_rank_prefix_siblings_floor_is_significant_digits():
+    target = "08412345678905"  # significant: 8412345678905
+    # shares exactly 6 significant digits (841234) -> included
+    assert rank_prefix_siblings(target, [("08412349999998", "at floor")]) == \
+        [("08412349999998", "at floor")]
+    # shares 5 -> excluded
+    assert rank_prefix_siblings(target, [("08412399999994", "below floor")]) == []
+
+
+def test_rank_prefix_siblings_tiebreak_and_limit():
+    target = "08412345678905"
+    items = [
+        ("08412345000009", "Banana"),
+        ("08412345001231", "Apple"),   # same shared length as Banana -> name order
+        ("18412345678902", "Zebra"),   # longer shared -> first despite the name
+    ]
+    ranked = rank_prefix_siblings(target, items, limit=2)
+    assert [name for _, name in ranked] == ["Zebra", "Apple"]
+
+
+def test_rank_prefix_siblings_skips_malformed_entries():
+    ranked = rank_prefix_siblings(
+        "08412345678905",
+        [("", "empty"), (None, "none"), ("84123", "too short"),
+         ("0841234567890X", "not digits"), ("08412345000009", "good")],
+    )
+    assert ranked == [("08412345000009", "good")]
