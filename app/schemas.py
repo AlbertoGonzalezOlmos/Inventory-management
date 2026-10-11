@@ -227,3 +227,56 @@ class MemberPatch(_PatchIn):
     role: str | None = None
     # Password reset — only admins may set this (enforced in the router).
     password: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+# --- Cart -----------------------------------------------------------------
+
+# Quantity bounds: a hard API bound so a garbage client gets a 422, never a
+# silent clamp; accumulation *across* requests is capped where it happens,
+# inside the upsert (app/routers/cart.py, QTY_CAP).
+CART_QTY_MIN = 1
+CART_QTY_MAX = 10_000
+CART_MAX_LINES = 200
+
+
+class CartAddIn(_Stripped):
+    """Add-or-increment one cart line (the UI/scanner add path)."""
+
+    item_id: int
+    qty: int = Field(default=1, ge=CART_QTY_MIN, le=CART_QTY_MAX)
+
+
+class CartSetIn(_Stripped):
+    """Absolute quantity set for an existing line; 0 removes it."""
+
+    qty: int = Field(ge=0, le=CART_QTY_MAX)
+
+
+class CartReplaceLineIn(_Stripped):
+    item_id: int
+    qty: int = Field(ge=CART_QTY_MIN, le=CART_QTY_MAX)
+
+
+class CartReplaceIn(_Stripped):
+    """Whole-cart replace (the flush/replay primitive for the account-switch
+    flow and the one-time localStorage import). All-or-nothing: any unknown
+    item or duplicate line rejects the request, leaving the cart untouched."""
+
+    lines: list[CartReplaceLineIn] = Field(max_length=CART_MAX_LINES)
+
+
+class CartLineOut(BaseModel):
+    """One cart line with LIVE catalogue data (price, stock) — never a
+    snapshot: the totals follow the shop's current prices at read time."""
+
+    item: ItemOut
+    qty: int
+    line_total_cents: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class CartOut(BaseModel):
+    lines: list[CartLineOut]
+    total_qty: int
+    total_cents: int
