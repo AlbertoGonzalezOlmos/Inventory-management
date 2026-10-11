@@ -50,6 +50,10 @@ def seed_default_admin(session: Session) -> None:
         password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
         role="admin",
         must_change_password=True,  # enforced until the password is changed
+        # Deliberately NO QR badge: a badge payload can be shown exactly
+        # once (at generation) and a seed has no viewer — logging it would
+        # put a bearer credential in stdout/journald. Issue on demand via
+        # POST /api/members/{id}/qr-badge instead.
         created_at=models.utcnow(),
     )
     session.add(admin)
@@ -84,6 +88,9 @@ def _ensure_dev_admin(session: Session) -> None:
             # is blocked from the API until it changes its password, which would
             # defeat the directive.
             must_change_password=False,
+            # Deliberately NO QR badge (same reasoning as seed_default_admin:
+            # a payload can be shown only once, and this seed exists to be
+            # printed to logs — never to print a credential back).
             created_at=models.utcnow(),
         )
     )

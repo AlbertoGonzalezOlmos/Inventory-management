@@ -17,6 +17,7 @@ The QR code itself is generated with the vendored Nayuki encoder
 
 import secrets
 
+from app.security import token_hash
 from app.vendor.qrcodegen import QrCode
 
 BADGE_PREFIX = "HCRM1:"
@@ -48,6 +49,26 @@ def parse_badge_payload(scanned: str) -> str | None:
     if len(token) != 43 or not all(c.isalnum() or c in "-_" for c in token):
         return None
     return scanned
+
+
+def new_badge_for(user) -> str:
+    """Generate a fresh badge for ``user`` and store only its hash.
+
+    The one shared copy of the security-critical generate+hash pair, used by
+    account creation (register, staff member creation) and badge rotation
+    alike, so the four sites cannot drift. Nothing is committed here — the
+    caller's transaction decides. Call BEFORE adding the user
+    (generate-before-commit, return-after-commit): the hash rides in the
+    same INSERT as the account, so a raced or failed insert rolls back the
+    row and the never-shown payload together.
+
+    Returns the raw payload — the caller is responsible for committing and
+    for showing it exactly once (only its SHA-256 ever reaches the
+    database, same treatment as session tokens).
+    """
+    payload = new_badge_payload()
+    user.qr_badge_hash = token_hash(payload)
+    return payload
 
 
 def badge_svg(payload: str, border: int = 2) -> str:

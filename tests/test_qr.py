@@ -2,15 +2,25 @@
 
 The QR matrix rendering itself is validated against the Nayuki reference
 encoder (vendored in app/vendor/qrcodegen.py); here we assert the payload
-contract and the API behaviour.
+contract and the API behaviour — including the automatic badge issued at
+account creation (register / staff member creation): it is returned
+exactly once, only its hash is stored, and no other response ever carries
+badge material.
 """
 
+import json
+
+from sqlmodel import Session, select
+
+from app.database import engine
+from app.models import User
 from app.qrbadge import (
     BADGE_PREFIX,
     badge_svg,
     new_badge_payload,
     parse_badge_payload,
 )
+from app.security import token_hash
 from tests.conftest import auth, create_user, unique_email
 
 
@@ -45,7 +55,11 @@ def test_badge_svg_is_well_formed():
 
 def test_self_badge_lifecycle(client, admin_token):
     user, token = create_user(client, admin_token)
-    assert user["has_qr_badge"] is False
+    # Task 2: account creation auto-issues a badge, so a freshly created
+    # user already HAS one (this test predates that and asserted False).
+    # The creation badge itself is covered by the tests below; this one
+    # exercises the self-service rotate/revoke lifecycle on top of it.
+    assert user["has_qr_badge"] is True
 
     # Generate a badge.
     r = client.post("/api/auth/qr-badge", headers=auth(token))
@@ -243,3 +257,218 @@ def test_badge_svg_is_safe_for_the_v_html_sink():
     assert payload not in svg, "the secret is encoded, never echoed as text"
     tags = set(re.findall(r"<(/?[a-zA-Z]+)", svg))
     assert tags <= {"svg", "rect", "path", "/svg", "/rect", "/path"}, tags
+
+
+# --- automatic badge at account creation ------------------------------------
+
+def _register(client, name="New User"):
+    email = unique_email()
+    r = client.post(
+        "/api/auth/register",
+        json={"name": name, "email": email, "password": "password123"},
+    )
+    assert r.status_code == 201, r.text
+    return email, r.json()
+
+
+def _create_member(client, admin_token, role="member"):
+    email = unique_email()
+    r = client.post(
+        "/api/members",
+        json={"name": "Created User", "email": email,
+              "password": "temporary123", "role": role},
+        headers=auth(admin_token),
+    )
+    assert r.status_code == 201, r.text
+    return email, r.json()
+
+
+def test_register_returns_a_one_time_badge(client):
+    email, body = _register(client)
+    # Registration remains a login: the session is issued alongside.
+    assert body["token"]
+    assert body["user"]["email"] == email
+    assert body["user"]["has_qr_badge"] is True
+    badge = body["qr_badge"]
+    assert parse_badge_payload(badge["payload"]) == badge["payload"]
+    assert badge["svg"].startswith("<svg")
+    # The badge logs in immediately — in both forms (prefixed and raw token).
+    for presented in (badge["payload"], badge["payload"][len(BADGE_PREFIX):]):
+        r = client.post("/api/auth/qr-login", json={"token": presented})
+        assert r.status_code == 200, r.text
+        assert r.json()["user"]["email"] == email
+
+
+def test_create_member_returns_a_working_badge(client, admin_token):
+    for role in ("member", "staff", "admin"):
+        email, body = _create_member(client, admin_token, role=role)
+        assert body["email"] == email
+        assert body["has_qr_badge"] is True
+        badge = body["qr_badge"]
+        assert parse_badge_payload(badge["payload"]) is not None
+        assert badge["svg"].startswith("<svg")
+        r = client.post("/api/auth/qr-login", json={"token": badge["payload"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["user"]["email"] == email
+
+
+def test_creation_badge_respects_the_password_gate(client, admin_token):
+    # A staff-created account is flagged must_change_password: its creation
+    # badge logs in, but the session is gated until the change; afterwards
+    # the SAME badge works fully (the gate is about the password, not the
+    # badge).
+    email, body = _create_member(client, admin_token)
+    badge = body["qr_badge"]["payload"]
+    r = client.post("/api/auth/qr-login", json={"token": badge})
+    assert r.status_code == 200, r.text
+    gated_token = r.json()["token"]
+    assert client.get("/api/items", headers=auth(gated_token)).status_code == 403
+    assert client.get("/api/auth/me", headers=auth(gated_token)).status_code == 200
+
+    login = client.post(
+        "/api/auth/login", json={"email": email, "password": "temporary123"}
+    )
+    assert login.status_code == 200, login.text
+    assert client.post(
+        "/api/auth/change-password",
+        json={"current_password": "temporary123",
+              "new_password": "ownpassword1"},
+        headers=auth(login.json()["token"]),
+    ).status_code == 204
+
+    r = client.post("/api/auth/qr-login", json={"token": badge})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/items", headers=auth(r.json()["token"])).status_code == 200
+
+
+def test_creation_badge_only_hash_at_rest(client, admin_token):
+    # Register path: the stored value is exactly the hash of the shown
+    # payload — the payload itself appears nowhere in the row.
+    email, body = _register(client)
+    payload = body["qr_badge"]["payload"]
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.email == email)).first()
+        assert user is not None
+        assert user.qr_badge_hash == token_hash(payload)
+        assert payload not in (user.email, user.name, user.password_hash)
+
+    # Staff-create path: same property.
+    email, body = _create_member(client, admin_token)
+    payload = body["qr_badge"]["payload"]
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.email == email)).first()
+        assert user is not None
+        assert user.qr_badge_hash == token_hash(payload)
+
+
+def test_no_badge_material_outside_creation_and_rotation(client, admin_token):
+    email, body = _register(client)
+    creation_badge = body["qr_badge"]["payload"]
+    token = body["token"]
+
+    # login: keys are exactly {token, user} — AuthOut did not grow the field.
+    login = client.post(
+        "/api/auth/login", json={"email": email, "password": "password123"}
+    ).json()
+    assert set(login.keys()) == {"token", "user"}
+    # qr-login: same shape.
+    qr = client.post(
+        "/api/auth/qr-login", json={"token": creation_badge}
+    ).json()
+    assert set(qr.keys()) == {"token", "user"}
+
+    # /me and the members list carry the FLAG, never the material.
+    me = client.get("/api/auth/me", headers=auth(token)).json()
+    assert me["has_qr_badge"] is True
+    members = client.get("/api/members", headers=auth(admin_token)).json()
+    entry = [m for m in members if m["email"] == email][0]
+    assert entry["has_qr_badge"] is True
+
+    # PATCH member: UserOut shape, no badge field.
+    patched = client.patch(
+        f"/api/members/{entry['id']}",
+        json={"name": "Renamed"},
+        headers=auth(admin_token),
+    ).json()
+    assert patched["name"] == "Renamed"
+
+    # Rotate legitimately carries a NEW payload (different from the
+    # creation one); revoke is a bodyless 204. Everywhere else, neither the
+    # creation payload nor any HCRM1:/svg material may appear.
+    rotated = client.post("/api/auth/qr-badge", headers=auth(token)).json()
+    assert rotated["payload"] != creation_badge
+    assert client.delete("/api/auth/qr-badge", headers=auth(token)).status_code == 204
+
+    for response_body in (login, qr, me, members, patched):
+        dumped = json.dumps(response_body)
+        assert "HCRM1:" not in dumped
+        assert '"svg"' not in dumped
+        assert '"payload"' not in dumped
+
+
+def test_register_conflict_leaves_no_badge_trace(client):
+    email, first = _register(client)
+    first_badge = first["qr_badge"]["payload"]
+
+    r = client.post(
+        "/api/auth/register",
+        json={"name": "Other", "email": email, "password": "password456"},
+    )
+    assert r.status_code == 409, r.text
+    assert "qr_badge" not in r.json()
+
+    # The DB has exactly one row, still holding the FIRST registration's
+    # badge hash (the raced insert — row and never-shown payload together —
+    # rolled back), and the first badge still works.
+    with Session(engine) as session:
+        users = session.exec(select(User).where(User.email == email)).all()
+        assert len(users) == 1
+        assert users[0].qr_badge_hash == token_hash(first_badge)
+    assert client.post(
+        "/api/auth/qr-login", json={"token": first_badge}
+    ).status_code == 200
+
+
+def test_creation_badges_are_unique(client, admin_token):
+    _, a = _register(client)
+    _, b = _register(client)
+    _, c = _create_member(client, admin_token)
+    payloads = {a["qr_badge"]["payload"], b["qr_badge"]["payload"],
+                c["qr_badge"]["payload"]}
+    assert len(payloads) == 3
+
+
+def test_creation_badge_rotates_and_revokes(client):
+    # The auto-issued badge is an ordinary badge: rotate kills it, revoke
+    # kills it — nothing about auto-issuance is special.
+    _, body = _register(client)
+    creation = body["qr_badge"]["payload"]
+    token = body["token"]
+
+    r = client.post("/api/auth/qr-badge", headers=auth(token))
+    assert r.status_code == 201, r.text
+    new_payload = r.json()["payload"]
+    assert new_payload != creation
+    assert client.post("/api/auth/qr-login", json={"token": creation}).status_code == 401
+    assert client.post("/api/auth/qr-login", json={"token": new_payload}).status_code == 200
+
+    assert client.delete("/api/auth/qr-badge", headers=auth(token)).status_code == 204
+    assert client.post("/api/auth/qr-login", json={"token": new_payload}).status_code == 401
+
+
+def test_seeded_admin_has_no_badge(client, admin_token):
+    # admin_token IS the seeded default admin (post mandatory change).
+    me = client.get("/api/auth/me", headers=auth(admin_token)).json()
+    assert me["has_qr_badge"] is False
+    with Session(engine) as session:
+        admin = session.exec(
+            select(User).where(User.email == "admin@shop.local")
+        ).first()
+        assert admin is not None
+        assert admin.qr_badge_hash is None
+        # Freshly seeded DB (HCRM_DEV_ADMIN=0 in the suite): NO account
+        # carries a badge — pins the structural seed exclusion.
+        badged = session.exec(
+            select(User).where(User.qr_badge_hash.is_not(None))  # type: ignore[attr-defined]
+        ).all()
+        assert badged == []

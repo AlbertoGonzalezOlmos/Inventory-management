@@ -151,6 +151,10 @@ def test_staff_created_account_is_flagged_until_changed(client, admin_token):
                     headers=auth(admin_token))
     assert r.status_code == 201, r.text
     assert r.json()["must_change_password"] is True          # was False (B9)
+    # Task 2: staff-created accounts get their badge automatically —
+    # returned once, here, for printing the membership card.
+    assert r.json()["has_qr_badge"] is True
+    assert r.json()["qr_badge"]["payload"].startswith("HCRM1:")
 
     token = _login(client, email, "temporary123").json()["token"]
     assert token

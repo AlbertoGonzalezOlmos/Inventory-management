@@ -361,6 +361,7 @@ badge** that is scanned instead of typing email+password.
 
 | Who | Endpoint / UI |
 |---|---|
+| Automatic at creation | `POST /api/auth/register` and staff `POST /api/members` return the account's **first** badge (payload + SVG) exactly once, in the creation response — print it immediately; a never-seen one (client disconnect) is recovered by rotating via either path below |
 | Self-service | Account → *QR badge login*, or `POST /api/auth/qr-badge` (replace = rotate), `DELETE /api/auth/qr-badge` (revoke) |
 | Staff at the counter | Members table → *QR badge* (prints a card), or `POST /api/members/{id}/qr-badge` / `DELETE …/qr-badge` |
 
