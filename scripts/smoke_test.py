@@ -316,6 +316,66 @@ def run_checks(report: Reporter, base: str, token: str, degraded: bool,
     status, payload, _ = mreq("/api/auth/logoff-cancel", "POST")
     report.check("logoff-cancel -> 204 (idempotent disarm)", status == 204,
                  f"(HTTP {status})")
+
+    # --- Task F additions: re-view / change-phone / change-email /
+    # checkout / history (the profile feature's public flows).
+    status, payload, _ = mreq("/api/auth/qr-badge")   # GET (re-view)
+    view = as_dict(payload) or {}
+    report.check("GET /api/auth/qr-badge re-views the identical payload",
+                 status == 200 and view.get("payload") == badge_payload
+                 and view.get("generation") == 1
+                 and view.get("status") == "ok",
+                 f"(HTTP {status} {detail_of(payload)})")
+
+    status, payload, _ = mreq("/api/auth/change-phone", "POST",
+                              {"phone": "+34 600 123 456"})
+    report.check("change-phone -> 200 with the normalised phone",
+                 status == 200 and (as_dict(payload) or {}).get("phone") == "+34600123456",
+                 f"(HTTP {status} {detail_of(payload)})")
+
+    new_email = "kiosk-smoke-renamed-" + kiosk_email
+    status, payload, _ = mreq("/api/auth/change-email", "POST",
+                              {"new_email": new_email,
+                               "current_password": "kiosk-pass-123"})
+    email_ok = status == 200 and (as_dict(payload) or {}).get("email") == new_email
+    report.check("change-email -> 200 (password-gated, revokes others)",
+                 email_ok, f"(HTTP {status} {detail_of(payload)})")
+    if email_ok:
+        kiosk_email = new_email   # cleanup finds the member under the new email
+        # The email change must NOT touch the badge (derivation keys on user_id).
+        status, payload, _ = mreq("/api/auth/qr-badge")
+        report.check("badge unchanged after the email change",
+                     status == 200 and (as_dict(payload) or {}).get("payload") == badge_payload,
+                     f"(HTTP {status} {detail_of(payload)})")
+
+    # Checkout: the cart currently holds the scannable item x2 (skipped in
+    # degraded mode — no barcoded item could be created), qty 2 vs stock 9.
+    # The POST runs ONLY in the non-degraded branch: smoke can target an
+    # external deployment (--base), where firing a checkout just to skip it
+    # would be a real (if empty-cart) side effect.
+    if degraded:
+        report.skip("checkout (needs a barcoded item in the cart)",
+                    "embedding model not loaded; nothing was scannable")
+    else:
+        status, payload, _ = mreq("/api/orders", "POST")
+        order = as_dict(payload) or {}
+        purchase = as_dict(order.get("purchase")) or {}
+        lines = [as_dict(l) for l in (purchase.get("lines") or []) if isinstance(l, dict)]
+        report.check("checkout -> 201 (snapshot, no clamp, cart emptied)",
+                     status == 201 and purchase.get("total_cents") == 246
+                     and len(lines) == 1 and lines[0].get("qty") == 2
+                     and lines[0].get("applied_qty") == 2
+                     and lines[0].get("clamped") is False
+                     and (as_dict(order.get("cart")) or {}).get("lines") == [],
+                     f"(HTTP {status} {detail_of(payload)})")
+        status, payload, _ = mreq("/api/orders/mine")
+        history = as_list(payload) or []
+        report.check("GET /api/orders/mine lists the receipt",
+                     status == 200 and any(
+                         (as_dict(p) or {}).get("id") == purchase.get("id")
+                         for p in history),
+                     f"(HTTP {status} {detail_of(payload)})")
+
     status, payload, _ = get("/api/members")
     for m in (as_list(payload) or []):
         if isinstance(m, dict) and m.get("email") == kiosk_email:

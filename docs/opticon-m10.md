@@ -438,6 +438,36 @@ works, but only the password-change endpoints until the flag is cleared.
   revoke on loss. For shared/kiosk PCs, remember the session itself is the
   normal 7-day bearer token — log out after use.
 
+### 9.5 Key-rotation runbook (operations)
+
+The derivation key is `HCRM_BADGE_SECRET` (env) or `data/badge.key`
+(auto-generated, 0600). **`backup_db.sh` copies the key beside the database
+and warns that the backup is credential-bearing — restore both together.**
+
+**Key lost / suspected leak — rotate it:**
+
+1. Change the secret: set a new `HCRM_BADGE_SECRET` (32+ chars) or delete
+   `data/badge.key` (a new one is generated on the next boot — announced
+   in the log).
+2. Restart the server. **Logins keep working everywhere** — verification is
+   by stored hash and needs no key.
+3. Re-viewing answers a structured `409 key_mismatch` for every previously
+   derived badge. Legacy (generation-0) badges are unaffected until viewed.
+4. **Heal by rotation**: each member regenerates their badge (profile tab →
+   My QR badge → Regenerate, or the staff counter path) — the new badge
+   derives from the new key and re-viewing works again. There is no bulk
+   endpoint by design (rotation revokes each member's current card — a
+   per-member decision, not a batch operation); for a shop, staff walk the
+   members list, or members help themselves from the profile tab. The
+   mass-rotation option is deliberately absent: rotating everyone's badge
+   at once invalidates every printed card in one stroke — the runbook is
+   per-member on demand.
+5. If the OLD key is suspected compromised (not merely lost): the stored
+   hashes still match the old derived payloads, so logins are as safe as
+   the old key's secrecy — treat per §9.4 (rotate + regenerate is the
+   complete remedy; consider proxy rate limiting on `/api/auth/qr-login`
+   for the transition window).
+
 ## 10. Counter & kiosk flows (the SPA's scan bus)
 
 Everything in §9 logs *in*; this section is what the M-10 does at the
@@ -447,6 +477,12 @@ unit's **USB-HID personality** (how it is configured today — no udev rule,
 no bridge; the SPA captures scans itself). The USB-COM bridge keeps its
 back-office modes (§6/§6a); a browser-driving relay is **Phase B,
 deferred — not built, do not test for it**.
+
+Since Tasks D–E, the profile rounds this out: the login page's
+**auto-detect** (scan a badge anywhere — no click, no field; the collapsed
+"badge code" field is only the manual fallback), and the profile tab's
+re-viewable QR badge (`Show my QR`, §9.1) — a member who forgot their
+printed card can pull it up and print it from any kiosk or phone browser.
 
 ### 10.1 Global scan capture
 
