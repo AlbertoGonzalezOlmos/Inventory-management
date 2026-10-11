@@ -30,6 +30,8 @@ from app.security import (
     DEV_ADMIN_USERNAME,
     PBKDF2_ITERATIONS,
     WELL_KNOWN_PASSWORDS,
+    badge_secret,
+    badge_secret_source,
     hash_password,
     verify_password,
 )
@@ -123,6 +125,20 @@ def _startup() -> None:
     # under load that turned a busy DB into a false "vector: false".
     global _vector_status
     _vector_status = vector_extension_available()
+    # Touch the badge derivation key now (not mid-request): validates the
+    # env (an invalid value already failed at import), auto-generates the
+    # keyfile on first boot, and lands the announcement in the boot log
+    # (the dev-admin announcement pattern).
+    if badge_secret() is not None:
+        logger.info(
+            "badge derivation key: %s — back it up with the database; losing "
+            "it makes badges non-re-viewable until rotation (logins are "
+            "unaffected: they verify by hash).", badge_secret_source())
+    else:
+        logger.warning(
+            "badge derivation key UNAVAILABLE (no env secret, keyfile "
+            "unwritable/corrupt) — badge re-viewing disabled and new badges "
+            "fall back to random (not re-viewable); logins unaffected.")
 
 
 #: Column migrations, for databases created before a column existed.
@@ -160,6 +176,11 @@ COLUMN_MIGRATIONS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # index: the deadline is only ever read off the row already fetched by
     # the token-hash primary-key seek — no query filters on it.
     ("auth_tokens", "logoff_deadline", "DATETIME", ()),
+    # Badge derivation generation (Task A): 0 = legacy random badge. Every
+    # existing row lands at 0 = legacy, so the upgrade changes nothing about
+    # any live badge (hashes keep verifying; first re-view auto-migrates).
+    # No index: read off the PK-fetched row, never queried by.
+    ("users", "qr_badge_generation", "INTEGER NOT NULL DEFAULT 0", ()),
 )
 
 #: Index migrations: an index added to a model never reaches an existing
@@ -431,6 +452,11 @@ def healthz():
         # Not a secret, and load tests need it: a latency budget is meaningless
         # without the hashing cost it was measured at (PLAN-v2 §8.2 N10).
         "pbkdf2_iterations": PBKDF2_ITERATIONS,
+        # Badge derivation (Task A): whether re-viewing is available and where
+        # the master secret lives ("env" | "file" | None). Not a secret — the
+        # source string is the same exposure class as pbkdf2_iterations.
+        "badge_key": badge_secret() is not None,
+        "badge_key_source": badge_secret_source(),
     }
 
 # Frontend: hash-based routing means a plain static mount is enough.

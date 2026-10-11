@@ -352,12 +352,26 @@ badge** that is scanned instead of typing email+password.
 
 - Payload printed inside the QR: `HCRM1:<urlsafe-token>` — a versioned
   prefix (distinguishes badges from product barcodes; the bridge keys on
-  it, §6a) plus 256 bits of randomness (`secrets.token_urlsafe(32)`).
+  it, §6a) plus 43 urlsafe characters. Since Task A the token is
+  **derived**, not random: `HMAC-SHA256(badge master secret,
+  "badge:{user_id}:{generation}")` truncated to 32 bytes — so a badge can
+  be **re-viewed forever** (`GET /api/auth/qr-badge` recomputes it on
+  demand; legacy pre-derivation badges auto-migrate on first view, which
+  replaces the old printed card).
 - A badge is a **bearer credential, exactly like a password**: whoever
   holds the printed code logs in as that account. Only the SHA-256 hash is
-  stored (`users.qr_badge_hash`, same treatment as session tokens), so the
-  raw payload is shown **exactly once** — at generation time — and a
-  database leak does not yield printable badges.
+  stored (`users.qr_badge_hash`, same treatment as session tokens) and
+  the hash remains the **sole login authority** — the master secret is
+  never needed to authenticate. The secret itself lives **outside the
+  database** (`HCRM_BADGE_SECRET` env, or a 0600 `data/badge.key`
+  auto-generated on first boot): a database leak alone still yields no
+  printable badges; **database + key together derive every member's
+  badge** — protect them together, and back the key up with the database
+  (`scripts/backup_db.sh` copies it and warns).
+- Rotation (self-service or staff) bumps the `generation` — generations
+  are monotonic and never reused, so an old payload never becomes valid
+  again. Losing or rotating the master secret disables **re-viewing**
+  (409 `key_mismatch`) but never login; users recover by rotating.
 - The QR is generated server-side with a vendored pure-Python encoder
   (`app/vendor/qrcodegen.py`, Nayuki, MIT — the project installs offline,
   so no new dependency) and returned as **inline SVG** (ECC level M,
@@ -405,9 +419,19 @@ works, but only the password-change endpoints until the flag is cleared.
 
 ### 9.4 Security notes
 
-- Badges are unguessable (256-bit), so the unauthenticated `qr-login`
-  endpoint carries no rate limit; do not "simplify" badges to short
-  numeric codes.
+- Badges are unguessable (256-bit HMAC output over a server secret), so
+  the unauthenticated `qr-login` endpoint carries no rate limit; do not
+  "simplify" badges to short numeric codes. Note the derivation corollary:
+  **the master secret joins the database as protected material** — whoever
+  holds both can derive every current badge (the accepted trade-off of
+  re-viewability). And with the secret ALONE (no database) an attacker can
+  still compute candidates for the small (user-id × generation) space and
+  probe `qr-login` online — the stored-hash check rejects every miss, but
+  the no-rate-limit premise now rests on key secrecy: treat a suspected key
+  leak as a full compromise — rotate the key, restart (re-view 409s
+  `key_mismatch`; logins unaffected), mass-rotate badges via the staff
+  endpoint to re-arm re-viewing, and consider proxy-level rate limiting on
+  `/api/auth/qr-login` for the duration.
 - No user-enumeration channel: the lookup is by exact hash match and
   failures are a uniform 401.
 - Treat badges physically like keys: print on demand, hand over privately,

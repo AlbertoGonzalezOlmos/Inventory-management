@@ -45,6 +45,13 @@ def _legacy_db(path, *, with_must_change=True):
         "user_id INTEGER NOT NULL, expires_at DATETIME NOT NULL)"
     )
     conn.execute(
+        "INSERT INTO users (id, email, name, password_hash, role"
+        + (", must_change_password" if with_must_change else "")
+        + ", created_at) VALUES (1, 'legacy@shop.local', 'Legacy User', 'x',"
+        " 'admin'" + (", 0" if with_must_change else "")
+        + ", '2026-01-01')"
+    )
+    conn.execute(
         "INSERT INTO auth_tokens VALUES ('legacy-token-hash', 1, '2030-01-01')"
     )
     conn.execute(
@@ -110,12 +117,13 @@ def test_migration_table_is_well_formed():
 
 
 def test_every_migration_the_app_currently_needs_is_listed():
-    """The table is the whole story: four columns, one index."""
+    """The table is the whole story: five columns, one index."""
     assert {(t, c) for t, c, _d, _e in COLUMN_MIGRATIONS} == {
         ("users", "must_change_password"),
         ("items", "barcode"),
         ("users", "qr_badge_hash"),
         ("auth_tokens", "logoff_deadline"),
+        ("users", "qr_badge_generation"),
     }
     assert {t for t, _s in INDEX_MIGRATIONS} == {"auth_tokens"}
 
@@ -146,6 +154,7 @@ def test_all_migrations_land_on_a_pre_scanner_database(tmp_path, monkeypatch):
     _run(db, monkeypatch)
     assert {"barcode"} <= _columns(db, "items")
     assert {"qr_badge_hash"} <= _columns(db, "users")
+    assert {"qr_badge_generation"} <= _columns(db, "users")
     assert {"logoff_deadline"} <= _columns(db, "auth_tokens")
     assert "ix_items_barcode" in _indexes(db, "items")
     assert "ix_users_qr_badge_hash" in _indexes(db, "users")
@@ -158,6 +167,12 @@ def test_all_migrations_land_on_a_pre_scanner_database(tmp_path, monkeypatch):
     assert conn.execute(
         "SELECT logoff_deadline FROM auth_tokens WHERE token='legacy-token-hash'"
     ).fetchone()[0] is None
+    # Task A: the generation column lands at 0 (legacy random badge) for
+    # every existing row — the upgrade changes nothing about any live badge
+    # (hashes keep verifying; first re-view auto-migrates).
+    assert conn.execute(
+        "SELECT qr_badge_generation FROM users WHERE id=1"
+    ).fetchone()[0] == 0
     conn.close()
 
 

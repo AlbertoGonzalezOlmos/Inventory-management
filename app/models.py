@@ -28,6 +28,12 @@ class User(SQLModel, table=True):
     # account has no badge. Like session tokens, the raw badge secret is
     # never persisted — a leaked database must not yield printable badges.
     qr_badge_hash: str | None = Field(default=None, index=True)
+    # Badge derivation generation (Task A): 0 = a random (legacy/pre-key)
+    # badge that cannot be re-derived; >= 1 = derived from the master secret
+    # (app/security.py) and re-viewable via GET /api/auth/qr-badge.
+    # Monotonic per account: rotation increments, generations are never
+    # reused — a revoked-then-reissued badge never equals an older one.
+    qr_badge_generation: int = Field(default=0)
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
 
     @property

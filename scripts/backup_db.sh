@@ -73,6 +73,17 @@ for suffix in "" "-wal" "-shm"; do
     fi
 done
 
+# 2b. The badge derivation key (Task A): database + key together can derive
+#     every member's QR badge. A backup WITHOUT the key restores logins but
+#     breaks badge re-viewing; a backup WITH it is credential-bearing —
+#     protect it like a password list.
+if [ -f "$DATA_DIR/badge.key" ]; then
+    cp -p "$DATA_DIR/badge.key" "$DEST/badge.key"
+    echo "WARNING: this backup includes badge.key and is credential-bearing" >&2
+    echo "         (database + key can derive member QR badges) — protect it" >&2
+    echo "         like a password list." >&2
+fi
+
 # 3. Verify the copy by opening it.
 "$PY" - "$DEST/hcrm.db" "$DB" <<'PYEOF'
 import sqlite3, sys
@@ -104,3 +115,7 @@ PYEOF
 echo "backup written to: $DEST"
 ls -la "$DEST" | sed 's/^/   /'
 echo "restore with: stop the server, then copy $DEST/hcrm.db* back into $DATA_DIR/"
+if [ -f "$DEST/badge.key" ]; then
+    echo "  (and badge.key too — the backup is credential-bearing)"
+fi
+exit 0

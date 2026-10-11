@@ -88,13 +88,27 @@ class QrLoginIn(BaseModel):
 class QrBadgeOut(BaseModel):
     """A freshly generated badge: the secret payload and its printable form.
 
-    The payload is returned exactly once — afterwards only its hash exists
-    server-side, so a lost badge means generating a new one (which revokes
-    the old one automatically).
+    The payload is returned exactly once at issuance — afterwards it is
+    re-viewable forever via GET (derived from the server's master key, Task
+    A); a lost badge can also always be rotated (which revokes the old one
+    automatically).
     """
 
     payload: str
     svg: str
+
+
+class QrBadgeViewOut(QrBadgeOut):
+    """A RE-VIEWED badge (repeatable): the payload + SVG + its generation,
+    and whether this view auto-migrated a legacy (random) badge — in which
+    case the previously printed card stopped working and the UI must say so.
+    ``status`` is the house envelope discriminator ("ok" | "migrated"),
+    matching the error envelopes' {status: "none"|"no_key"|"key_mismatch"}.
+    """
+
+    status: str
+    generation: int
+    migrated: bool = False
 
 
 class QrIdentifyOut(BaseModel):
