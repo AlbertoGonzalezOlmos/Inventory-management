@@ -31,10 +31,32 @@ def get_current_user(
 
     # Tokens are stored as SHA-256 hashes; look up by hash of the presented one.
     auth_token = session.get(AuthToken, token_hash(credentials.credentials))
-    if auth_token is None or auth_token.expires_at < utcnow():
+    now = utcnow()
+    if auth_token is None or auth_token.expires_at < now:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token invalid or expired",
+        )
+
+    # Lazy logoff expiry (Task 4): a pending countdown whose deadline has
+    # passed kills the token even if the browser that armed it never comes
+    # back — that is the whole point of server-side enforcement. Inclusive
+    # comparison: the countdown reaching zero IS the logoff moment (unlike
+    # expires_at, which keeps its strict <). Reject-AND-delete so the row
+    # cannot linger or be resurrected (logout's end state); the delete fires
+    # at most once per killed token — never on the hot path, which is why a
+    # write here does not repeat the database.py begin-hook incident.
+    if auth_token.logoff_deadline is not None and now >= auth_token.logoff_deadline:
+        try:
+            session.delete(auth_token)
+            session.commit()
+        except Exception:
+            # The 401 must not depend on the cleanup write succeeding: the
+            # deadline comparison is authoritative even if the delete fails.
+            session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token invalid or expired",  # uniform: no mechanism leak
         )
 
     user = session.get(User, auth_token.user_id)

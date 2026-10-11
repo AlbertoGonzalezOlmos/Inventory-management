@@ -97,6 +97,24 @@ class QrBadgeOut(BaseModel):
     svg: str
 
 
+class QrIdentifyOut(BaseModel):
+    """The answer to "is this scanned badge the CALLER's own?" — one bit,
+    no side effects, no enumeration (a non-matching input — garbage, a
+    product barcode, somebody else's badge — all answer the same false)."""
+
+    same_user: bool
+
+
+class LogoffScheduleOut(BaseModel):
+    """The armed kiosk logoff countdown: the server-computed deadline (the
+    SPA counts down from THIS, never from a client-side now+30 — clock
+    skew and request latency are not allowed near the truth) and the
+    configured grace, echoed for display."""
+
+    logoff_deadline: datetime
+    grace_seconds: int
+
+
 class ChangePasswordIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     current_password: str = Field(min_length=1, max_length=128)

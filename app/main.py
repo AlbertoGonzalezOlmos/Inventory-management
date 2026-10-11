@@ -155,6 +155,11 @@ COLUMN_MIGRATIONS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("users", "qr_badge_hash", "TEXT",
      ("CREATE INDEX IF NOT EXISTS ix_users_qr_badge_hash "
       "ON users (qr_badge_hash)",)),
+    # Server-enforced kiosk logoff countdown (Task 4): NULL = no countdown
+    # armed, so existing rows (and the upgrade) cannot log anyone off. No
+    # index: the deadline is only ever read off the row already fetched by
+    # the token-hash primary-key seek — no query filters on it.
+    ("auth_tokens", "logoff_deadline", "DATETIME", ()),
 )
 
 #: Index migrations: an index added to a model never reaches an existing

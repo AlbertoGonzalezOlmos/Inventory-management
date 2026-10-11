@@ -55,6 +55,17 @@ def is_well_known_password(password: str) -> bool:
     """True for a password published by this repo (reject it with a 400)."""
     return password in WELL_KNOWN_PASSWORDS
 
+
+# The kiosk logoff countdown grace (Task 4). Env-overridable for demos and
+# tests; read once at import like the other HCRM_* knobs. Clamped >= 1 at
+# parse so a zero/negative env value cannot make scheduling an instant
+# self-logout; tests that need zero grace monkeypatch the module attribute
+# (app.security.LOGOFF_GRACE_SECONDS) at call time instead — the router
+# reads the module attribute precisely so that override works.
+LOGOFF_GRACE_SECONDS = max(
+    1, int(os.environ.get("HCRM_LOGOFF_GRACE_SECONDS", "30"))
+)
+
 # A syntactically valid hash that never matches. Login verifies against this
 # when the email is unknown, so response time does not reveal whether an
 # account exists (user-enumeration timing side-channel).
