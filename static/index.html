@@ -9,6 +9,16 @@
 <body>
 <div id="app" v-cloak>
 
+  <!-- The capture-status flag: renders data-scan-capture="on" once the
+       global scan listener has installed. (A dedicated element — bindings
+       on the ROOT element are never compiled in an in-DOM template.)
+       This is the ui_check pin that the scan bus is live. -->
+  <span hidden :data-scan-capture="scanCapture ? 'on' : 'off'"></span>
+
+  <!-- Scan status pill: every captured scan is visible (silent misroutes
+       must be observable at a counter) -->
+  <div class="scan-pill" v-if="scanFlash">⌁ {{ scanFlash }}</div>
+
   <!-- ================= Header / navigation ================= -->
   <header class="topbar">
     <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">HCRM <span>Shop</span></a>
@@ -60,6 +70,7 @@
             v-model="badgeCode"
             placeholder="Scan your QR badge here"
             autocomplete="off"
+            data-scan-sink
           />
         </label>
         <p class="muted">
@@ -68,6 +79,13 @@
         </p>
         <button class="btn block" :disabled="busy || !badgeCode">Log in with badge</button>
       </form>
+      <p class="muted">Scanner ready — barcodes and badges are captured anywhere on the page.</p>
+      <!-- Attribution banner: anonymous scans staged while logged out -->
+      <div class="staged-banner" v-if="stagedScans.length">
+        <strong>{{ stagedScans.length }} scanned item(s) waiting</strong> —
+        scan your QR badge or log in to add them to your list.
+        <button class="btn tiny ghost" @click="discardStagedScans">Discard</button>
+      </div>
       <p class="muted">No account yet? <a href="#/register">Create a member account</a></p>
     </section>
 
@@ -94,6 +112,18 @@
     <!-- ================= Catalogue (browse + select) ================= -->
     <section v-else-if="currentView === 'catalogue'" class="catalogue-layout">
       <div class="catalogue-main">
+        <!-- The visible scan field: explicit operator intent, no heuristics —
+             also the deterministic path for payloads the global capture
+             gate deliberately ignores (short internal codes). -->
+        <input
+          class="scan-field"
+          type="text"
+          v-model="scanFieldCode"
+          placeholder="⌁ Scan items or badges here (or scan anywhere)…"
+          autocomplete="off"
+          data-scan-sink
+          @keydown.enter.prevent="scanFieldSubmit"
+        />
         <div class="toolbar">
           <input
             class="search"
@@ -153,7 +183,7 @@
         <p v-if="loading" class="muted loading-note">Loading…</p>
       </div>
 
-      <!-- Purchase list sidebar -->
+        <!-- Purchase list sidebar (the server-side cart: durable per user) -->
       <aside class="selection-panel">
         <h2>Purchase list</h2>
         <p v-if="purchase.length === 0" class="muted">
@@ -163,7 +193,11 @@
           <li v-for="entry in purchase" :key="entry.item.id">
             <div class="sel-info">
               <span>{{ entry.item.name }}</span>
-              <small>{{ formatPrice(entry.item.price_cents) }} each</small>
+              <small :class="{ 'stock-warn': entry.qty > entry.item.stock }">
+                {{ formatPrice(entry.item.price_cents) }} each
+                <template v-if="entry.qty > entry.item.stock">— only {{ entry.item.stock }} in stock</template>
+              </small>
+              <small>{{ formatPrice(entry.line_total_cents) }}</small>
             </div>
             <div class="sel-controls">
               <button class="btn tiny" @click="decPurchase(entry.item.id)" :disabled="entry.qty <= 1">−</button>
@@ -219,11 +253,31 @@
         <button class="btn" :disabled="busy" @click="generateMyBadge">
           {{ user.has_qr_badge ? "Regenerate badge (revokes the old one)" : "Generate QR badge" }}
         </button>
-        <button v-if="badgeSvg" class="btn ghost" @click="() => window.print()">Print</button>
-        <button v-if="user.has_qr_badge" class="btn ghost danger" @click="revokeMyBadge">
+        <button v-if="badgeSvg" class="btn ghost no-print" @click="() => window.print()">Print</button>
+        <button v-if="user.has_qr_badge" class="btn ghost danger no-print" @click="revokeMyBadge">
           Revoke badge
         </button>
       </div>
+
+      <!-- My scan requests: "your report was resolved" -->
+      <h2 style="margin-top: 2rem">My scan requests</h2>
+      <p class="muted" v-if="myRequests.length === 0">
+        Unknown items you report at the counter appear here, with their status.
+      </p>
+      <table class="table" v-else>
+        <thead>
+          <tr><th>Requested</th><th>Code</th><th>Proposed item</th><th>Price</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="req in myRequests" :key="req.id">
+            <td>{{ formatDate(req.created_at) }}</td>
+            <td><code>{{ req.code }}</code></td>
+            <td>{{ req.name }}</td>
+            <td>{{ formatPrice(req.price_cents) }}</td>
+            <td><span class="status-chip" :class="req.status">{{ req.status }}</span></td>
+          </tr>
+        </tbody>
+      </table>
     </section>
 
     <!-- ================= Table view (items + export + analysis) ================= -->
@@ -336,6 +390,45 @@
       <div class="admin-tabs">
         <button :class="{active: adminTab === 'items'}" @click="adminTab = 'items'">Catalogue input</button>
         <button :class="{active: adminTab === 'members'}" @click="adminTab = 'members'">Members</button>
+        <button :class="{active: adminTab === 'requests'}" @click="adminTab = 'requests'; loadScanRequests()">Scan requests</button>
+      </div>
+
+      <!-- Scan requests: the member "unknown item" queue (staff resolution) -->
+      <div v-if="adminTab === 'requests'" class="card">
+        <h2>Scan requests</h2>
+        <p class="muted">
+          Unknown items reported by members at the counter. Create the catalogue
+          entry (prefilled from their proposal) to resolve, or dismiss as junk.
+        </p>
+        <label>Status
+          <select v-model="scanReqFilter" @change="loadScanRequests">
+            <option value="open">Open</option>
+            <option value="resolved">Resolved</option>
+            <option value="dismissed">Dismissed</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+        <table class="table" v-if="scanRequests.length">
+          <thead>
+            <tr><th>Requested</th><th>Requester</th><th>Code</th><th>Proposed item</th><th>Price</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="req in scanRequests" :key="req.id">
+              <td>{{ formatDate(req.created_at) }}</td>
+              <td>{{ req.requester.name }}</td>
+              <td><code>{{ req.code }}</code><br /><small class="muted">{{ req.kind }}{{ req.gtin14 ? ' · ' + req.gtin14 : '' }}</small></td>
+              <td>{{ req.name }}</td>
+              <td>{{ formatPrice(req.price_cents) }}</td>
+              <td><span class="status-chip" :class="req.status">{{ req.status }}</span></td>
+              <td v-if="req.status === 'open'">
+                <button class="btn tiny" @click="openRequestIntake(req)">Create &amp; resolve</button>
+                <button class="btn tiny danger" @click="dismissRequest(req)">Dismiss</button>
+              </td>
+              <td v-else></td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="muted">No requests with this status.</p>
       </div>
 
       <!-- Items management -->
@@ -504,15 +597,15 @@
 
   <!-- ================= Member QR badge modal ================= -->
   <div class="modal-backdrop" v-if="memberBadge" @click.self="memberBadge = null">
-    <div class="modal">
-      <button class="modal-close" @click="memberBadge = null">✕</button>
+    <div class="modal badge-card">
+      <button class="modal-close no-print" @click="memberBadge = null">✕</button>
       <h2>QR badge — {{ memberBadge.name }}</h2>
       <p class="muted">
         {{ memberBadge.email }} · any previous badge for this account was just revoked.
         Whoever holds this code can log in as the member — hand it over privately.
       </p>
       <div class="qr-badge" v-html="memberBadge.svg"></div>
-      <div class="modal-footer">
+      <div class="modal-footer no-print">
         <button class="btn ghost" @click="memberBadge = null">Close</button>
         <button class="btn" @click="() => window.print()">Print</button>
       </div>
@@ -535,6 +628,97 @@
         <p v-if="pwResetError" class="error">{{ pwResetError }}</p>
         <button class="btn block" :disabled="!pwResetValue">Set password</button>
       </form>
+    </div>
+  </div>
+
+  <!-- ================= Kiosk logoff countdown overlay =================
+       Deliberately NO ✕ and no backdrop dismiss: leaving the countdown is a
+       deliberate act (button, expiry, or a badge decision). -->
+  <div class="modal-backdrop logoff-overlay" v-if="logoff">
+    <div class="modal logoff-card">
+      <h2>Log off {{ logoff.name }}?</h2>
+      <p class="muted">You scanned your own badge.</p>
+      <div class="countdown">{{ logoff.remaining }}</div>
+      <p class="muted">Logging off automatically when the countdown reaches zero.</p>
+      <div class="modal-footer">
+        <button class="btn ghost block" @click="cancelLogoff">Stay logged in</button>
+        <button class="btn danger block" @click="finishLogoff">Log off now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= Unknown-item intake modal ================= -->
+  <div class="modal-backdrop" v-if="scanIntake" @click.self="closeIntake">
+    <div class="modal">
+      <button class="modal-close" @click="closeIntake">✕</button>
+      <h2>Unknown item</h2>
+      <p>
+        <code>{{ scanIntake.code }}</code>
+        <span class="muted" v-if="intakeAnalysisLine()"> · {{ intakeAnalysisLine() }}</span>
+      </p>
+      <p class="muted">{{ scanIntake.message }}</p>
+
+      <!-- Suggestion groups: a click adds that item instead of filing -->
+      <template v-for="(group, key) in intakeGroups" :key="key">
+        <div v-if="group.items.length" class="suggestion-group">
+          <h3>{{ group.label }}</h3>
+          <button
+            v-for="item in group.items"
+            :key="item.id"
+            class="suggestion-item"
+            @click="addSuggestedItem(item)"
+          >
+            <strong>{{ item.name }}</strong>
+            <small>{{ formatPrice(item.price_cents) }} · SKU {{ item.sku }}</small>
+          </button>
+        </div>
+      </template>
+
+      <form @submit.prevent="submitIntake">
+        <label>Item name
+          <input v-model="scanIntake.name" @input="intakeSuggest" required
+                 placeholder="What is this item?" />
+        </label>
+        <label>Price (€)
+          <input v-model="scanIntake.price" type="number" min="0" step="0.01"
+                 placeholder="0.00" />
+        </label>
+        <label v-if="isStaff">SKU
+          <input v-model="scanIntake.sku" required />
+        </label>
+        <label v-if="scanIntake.resolveRequestId" class="checkbox-label">
+          <input type="checkbox" v-model="scanIntake.addToCart" />
+          Also add the item to {{ scanIntake.requesterName }}'s purchase list
+        </label>
+        <p v-if="!isStaff" class="muted">
+          Staff will review the request and add the item to the catalogue.
+        </p>
+        <button class="btn block" :disabled="scanIntake.busy">
+          {{ isStaff ? 'Add to catalogue & purchase list' : 'Send to staff' }}
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ================= One-shot badge print modal =================
+       The payload is shown EXACTLY ONCE (at creation/rotation) and never
+       persisted — closing this modal is final. -->
+  <div class="modal-backdrop" v-if="badgePrint" @click.self="badgePrint = null">
+    <div class="modal badge-card">
+      <button class="modal-close no-print" @click="badgePrint = null">✕</button>
+      <h2>{{ badgePrint.title }}</h2>
+      <p class="muted">{{ badgePrint.subtitle }}</p>
+      <div class="qr-badge" v-html="badgePrint.svg"></div>
+      <p class="badge-payload"><code>{{ badgePrint.payload }}</code></p>
+      <p class="badge-warn">
+        <strong>Shown only once — print or write it down now.</strong>
+        Whoever holds this code can log in to the account: hand it over privately.
+        It cannot be retrieved again.
+      </p>
+      <div class="badge-actions modal-footer">
+        <button class="btn block no-print" @click="() => window.print()">Print</button>
+        <button class="btn ghost block no-print" @click="badgePrint = null">Done</button>
+      </div>
     </div>
   </div>
 
