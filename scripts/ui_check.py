@@ -283,6 +283,19 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
         failures.append(f"[{label}] no <button> rendered")
     if copy not in dom:
         failures.append(f"[{label}] expected copy {copy!r} not rendered")
+    # Task 5 pins (count()-only, per the repo's no-interaction harness):
+    # - the global scan bus must be LIVE (the keydown listener's installer
+    #   flips the binding that renders this attribute — a JS error in the
+    #   capture code fails here even if the app still mounts);
+    # - on the LOGIN view, the badge field must still render (the capture
+    #   feature must never regress the dedicated HID badge-login path;
+    #   the register view has no badge field by design).
+    if count(r'data-scan-capture="on"', dom) < 1:
+        failures.append(f"[{label}] data-scan-capture=\"on\" missing — "
+                        "the global scan listener did not install")
+    if copy == "Log in" and count(r'placeholder="Scan your QR badge here"', dom) < 1:
+        failures.append(f"[{label}] badge login field missing — "
+                        "scan capture regressed the dedicated badge path")
     return failures
 
 
