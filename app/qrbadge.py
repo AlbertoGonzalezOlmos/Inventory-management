@@ -2,7 +2,8 @@
 
 A QR badge is a physical, printable login credential for an account — an
 alternative to typing email+password, meant to be read by the Opticon M-10
-(see docs/opticon-m10.md §10) or any 2D scanner/camera.
+(see docs/opticon-m10.md §9, and §10 for the kiosk scan flows) or any 2D
+scanner/camera.
 
 Payload format:  HCRM1:<urlsafe-token>
   - the ``HCRM1:`` prefix versions the format and lets scanners/bridges tell

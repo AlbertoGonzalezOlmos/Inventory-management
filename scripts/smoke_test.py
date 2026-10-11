@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -203,7 +204,133 @@ def run_checks(report: Reporter, base: str, token: str, degraded: bool,
                               body={"sku": "EX-TST-PERM", "name": "x", "price_cents": 1})
     report.check("anonymous item creation -> 401", status == 401, f"(HTTP {status})")
 
+    report.section("Kiosk loop (badge / cart / scan / intake)")
+    # A scratch member per run (unique email so re-runs against an external
+    # target do not collide); deleted in Cleanup.
+    kiosk_email = f"kiosk-smoke-{os.getpid()}-{int(time.time())}@example.com"
+    kiosk_member_id = None
+    scan_item_id = None
+    status, payload, _ = call(base, "/api/auth/register", "POST",
+                              body={"name": "Kiosk Smoke", "email": kiosk_email,
+                                    "password": "kiosk-pass-123"})
+    reg = as_dict(payload) or {}
+    badge = as_dict(reg.get("qr_badge")) or {}
+    member_token = reg.get("token")
+    badge_payload = badge.get("payload") or ""
+    if report.check("register -> 201 with a one-shot qr_badge",
+                    status == 201 and bool(member_token)
+                    and badge_payload.startswith("HCRM1:"),
+                    f"(HTTP {status} {detail_of(payload)})"):
+        status, payload, _ = call(base, "/api/auth/qr-login", "POST",
+                                  body={"token": badge_payload})
+        report.check("the creation badge qr-logins -> 200 + token",
+                     status == 200 and bool((as_dict(payload) or {}).get("token")),
+                     f"(HTTP {status} {detail_of(payload)})")
+        status, payload, _ = call(base, "/api/auth/qr-identify", "POST",
+                                  token=member_token, body={"token": badge_payload})
+        report.check("qr-identify own badge -> {same_user: true}",
+                     status == 200
+                     and (as_dict(payload) or {}).get("same_user") is True,
+                     f"(HTTP {status} {detail_of(payload)})")
+
+    def mreq(path, method="GET", body=None):
+        return call(base, path, method, token=member_token, body=body)
+
+    # Scan-to-cart of a KNOWN GTIN needs an item filed under that barcode;
+    # item creation requires the embedding model (503 while degraded).
+    SCAN_GTIN = "08412345678905"        # canonical of EAN-13 8412345678905
+    if degraded:
+        report.skip("scan-to-cart of a known GTIN (needs a barcoded item)",
+                    "embedding model not loaded; item creation is 503 by design")
+    else:
+        status, payload, _ = req("/api/items", "POST", {
+            "sku": "EX-TST-SCAN", "name": "Kiosk Smoke Scannable",
+            "category": "general", "price_cents": 123, "stock": 9,
+            "barcode": SCAN_GTIN})
+        scan_item = as_dict(payload) or {}
+        if report.check("create a barcoded item for the scan path -> 201",
+                        status == 201 and scan_item.get("barcode") == SCAN_GTIN,
+                        f"(HTTP {status} {detail_of(payload)})"):
+            scan_item_id = scan_item.get("id")
+            status, payload, _ = mreq("/api/cart/scan", "POST",
+                                      {"code": "8412345678905"})  # EAN-13 form
+            scan_out = as_dict(payload) or {}
+            report.check("POST /api/cart/scan (EAN-13 form) -> 200 added",
+                         status == 200 and scan_out.get("status") == "added"
+                         and scan_out.get("match") == "barcode",
+                         f"(HTTP {status} {detail_of(payload)})")
+            status, payload, _ = mreq("/api/cart/scan", "POST",
+                                      {"code": SCAN_GTIN})  # canonical form
+            cart = as_dict(as_dict(payload) or {}).get("cart") or {}
+            report.check("re-scan increments (qty 2, one line, total follows)",
+                         status == 200 and len(cart.get("lines", [])) == 1
+                         and cart.get("total_qty") == 2
+                         and cart.get("total_cents") == 246,
+                         f"(HTTP {status} {detail_of(payload)})")
+
+    # Misread: right shape, bad check digit — 422, nothing added.
+    status, payload, _ = mreq("/api/cart/scan", "POST", {"code": "8412345678906"})
+    misread = as_dict(as_dict(payload) or {}).get("detail") or {}
+    report.check("a misread GTIN -> 422 {status: misread} (never filed)",
+                 status == 422 and misread.get("status") == "misread",
+                 f"(HTTP {status} {detail_of(payload)})")
+
+    # Unknown valid GTIN -> 404 structured detail + suggestions; the intake
+    # flow then files a ScanRequest (the member path, no embeddings needed).
+    # 8412345000126 shares a >=6-significant-digit GS1 prefix with SCAN_GTIN,
+    # so the prefix-sibling suggestion must surface the scannable item when
+    # it exists.
+    UNKNOWN_GTIN = "8412345000126"
+    status, payload, _ = mreq("/api/cart/scan", "POST", {"code": UNKNOWN_GTIN})
+    unknown = as_dict(as_dict(payload) or {}).get("detail") or {}
+    unknown_suggestions = as_dict(unknown.get("suggestions")) or {}
+    report.check("unknown valid GTIN -> 404 {status: unknown, catalogable}",
+                 status == 404 and unknown.get("status") == "unknown"
+                 and unknown.get("catalogable") is True,
+                 f"(HTTP {status} {detail_of(payload)})")
+    if scan_item_id is not None:
+        sibling_names = [str(i.get("name"))
+                         for i in (unknown_suggestions.get("by_prefix") or [])
+                         if isinstance(i, dict)]
+        report.check("prefix sibling suggests the same-company item",
+                     "Kiosk Smoke Scannable" in sibling_names,
+                     f"(by_prefix: {sibling_names})")
+    status, payload, _ = mreq("/api/scan-requests", "POST", {
+        "code": UNKNOWN_GTIN, "name": "Kiosk Smoke Unknown", "price_cents": 99})
+    scan_req = as_dict(payload) or {}
+    report.check("member files a ScanRequest -> 201 (open, gtin14 captured)",
+                 status == 201 and scan_req.get("status") == "open"
+                 and scan_req.get("gtin14") == "08412345000126",
+                 f"(HTTP {status} {detail_of(payload)})")
+    status, payload, _ = mreq("/api/scan-requests/mine")
+    mine = as_list(payload) or []
+    report.check("GET /api/scan-requests/mine lists the request",
+                 status == 200 and any(r.get("code") == UNKNOWN_GTIN for r in mine),
+                 f"(HTTP {status} {detail_of(payload)})")
+    status, payload, _ = mreq("/api/auth/logoff-schedule", "POST")
+    sched = as_dict(payload) or {}
+    report.check("logoff-schedule -> 200 {logoff_deadline, grace_seconds}",
+                 status == 200 and bool(sched.get("logoff_deadline"))
+                 and isinstance(sched.get("grace_seconds"), int),
+                 f"(HTTP {status} {detail_of(payload)})")
+    status, payload, _ = mreq("/api/auth/logoff-cancel", "POST")
+    report.check("logoff-cancel -> 204 (idempotent disarm)", status == 204,
+                 f"(HTTP {status})")
+    status, payload, _ = get("/api/members")
+    for m in (as_list(payload) or []):
+        if isinstance(m, dict) and m.get("email") == kiosk_email:
+            kiosk_member_id = m.get("id")
+
     report.section("Cleanup (only what this run created)")
+    if scan_item_id is not None:
+        status, payload, _ = req(f"/api/items/{scan_item_id}", "DELETE")
+        report.check("DELETE the barcoded scan item -> 204", status == 204,
+                     f"(HTTP {status} {detail_of(payload)})")
+    if kiosk_member_id is not None:
+        status, payload, _ = req(f"/api/members/{kiosk_member_id}", "DELETE")
+        report.check("DELETE the scratch kiosk member -> 204 "
+                     "(cart rows and scan requests go with it)", status == 204,
+                     f"(HTTP {status} {detail_of(payload)})")
     if created_id is not None:
         status, payload, _ = req(f"/api/items/{created_id}", "DELETE")
         report.check("DELETE the item this run created -> 204", status == 204,

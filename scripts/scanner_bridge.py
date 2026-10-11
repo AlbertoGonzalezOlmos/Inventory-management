@@ -21,11 +21,15 @@ Usage (server must be running; scanner in USB-COM or RS-232C mode):
     ... --json
 
 Scans of an HCRM QR badge (payload "HCRM1:…") are NOT looked up in the
-catalogue: they are exchanged for a login session via /api/auth/qr-login
-and the resulting session token is printed (useful for headless/kiosk
-setups and for testing badges from the command line). For interactive
-browser login, put the scanner in USB-HID mode and scan into the badge
-field on the login page instead (docs/opticon-m10.md §9.3).
+catalogue: they are exchanged for a login session via /api/auth/qr-login.
+The resulting session token is a bearer credential, so human-readable
+output REDACTS it (first characters + "redacted") — use --json (the
+machine contract, unchanged: full token in the JSON record) or pass
+--show-token for the full value in text mode. Badge payloads themselves
+are likewise masked in every printed scan code (the HCRM1: form and the
+bare 43-char token a scanner/bridge may send without the prefix). For
+interactive browser login, put the scanner in USB-HID mode and scan into
+the badge field on the login page instead (docs/opticon-m10.md §9.3).
 
 This is an always-on back-office process, so it is built to survive its own
 environment: an API error is reported per scan and the listener keeps going
@@ -58,6 +62,31 @@ from app.scanner.transport import SerialOpenError  # noqa: E402
 
 BASE = os.environ.get("HCRM_BASE", "http://localhost:8000")
 BADGE_PREFIX = "HCRM1:"  # keep in sync with app.qrbadge.BADGE_PREFIX
+
+
+def redact_code(code):
+    """Mask a badge payload in human-readable output — a badge is a bearer
+    credential (only its SHA-256 is stored server-side), so it is never
+    printed in full: not the ``HCRM1:`` form, and not the bare 43-char
+    token a scanner/bridge may send with the prefix stripped (that form
+    reaches the catalogue path as an opaque code, and the verdict line
+    would otherwise print the secret). Barcodes pass through unchanged."""
+    if code.startswith(BADGE_PREFIX) and len(code) == len(BADGE_PREFIX) + 43:
+        return BADGE_PREFIX + "\u2022\u2022\u2022\u2022"  # HCRM1:••••
+    if len(code) == 43 and all(c.isalnum() or c in "-_" for c in code):
+        return "\u2022\u2022\u2022\u2022 (badge token)"
+    return code
+
+
+def format_session_token(token, show_token):
+    """The session token a badge scan yields: a bearer credential too, so
+    text mode prints it redacted by default (scrollback, tee, journald).
+    ``--json`` keeps the full value (the machine contract — the JSON record
+    is unchanged); ``--show-token`` opts back into the full printout."""
+    if show_token:
+        return token
+    return (token[:8] + "\u2026 (redacted — --show-token or --json "
+            "for the full value)")
 
 # urllib's default is no timeout at all: a server that accepts the connection
 # and then stalls would block the scanner's reader thread forever (scans stop
@@ -294,6 +323,10 @@ def main():
                        help="add N to stock on every scan")
     group.add_argument("--stock-out", type=int, metavar="N",
                        help="subtract N from stock on every scan")
+    parser.add_argument("--show-token", action="store_true",
+                        help="print the FULL session token on a badge login in text "
+                             "mode (default: redacted — the token is a bearer "
+                             "credential; --json always carries the full value)")
     parser.add_argument("--json", action="store_true",
                         help="emit one JSON object per scan instead of text")
     args = parser.parse_args()
@@ -335,16 +368,25 @@ def main():
 
     def emit(record):
         if args.json:
-            print(json.dumps(record), flush=True)
+            # Machine contract — but the badge PAYLOAD is masked here too:
+            # nobody needs it after login, and --json output routinely lands
+            # in logs. The session token stays (piping it onward to a
+            # headless kiosk is the point of --json).
+            safe = dict(record)
+            if "code" in safe:
+                safe["code"] = redact_code(safe["code"])
+            print(json.dumps(safe), flush=True)
             return
         if record.get("error"):
-            print(f"[{record['code']}] ERROR {record['error']}", file=sys.stderr,
-                  flush=True)
+            print(f"[{redact_code(record['code'])}] ERROR {record['error']}",
+                  file=sys.stderr, flush=True)
         elif record.get("badge_login") is not None:
             if record["badge_login"]:
                 u = record["user"]
                 print(f"[badge] logged in: {u['name']} <{u['email']}> ({u['role']})\n"
-                      f"        session token: {record['token']}", flush=True)
+                      f"        session token: "
+                      f"{format_session_token(record['token'], args.show_token)}",
+                      flush=True)
             else:
                 print(f"[badge] login failed: {record['error']}", flush=True)
         elif record["found"]:
@@ -360,7 +402,7 @@ def main():
             print(line, flush=True)
         else:
             verdict = record.get("verdict") or "no catalogue match"
-            print(f"[{record['code']}] {verdict}", flush=True)
+            print(f"[{redact_code(record['code'])}] {verdict}", flush=True)
 
     def call(path, method="GET", body=None):
         """api() with the P2 contract: one loud retry on 401 when --relogin."""

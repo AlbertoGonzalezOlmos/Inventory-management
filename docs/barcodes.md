@@ -206,6 +206,44 @@ Two corollaries worth internalising:
     *new-item* (with the number-system classification, suggested SKU, and a
     ready `POST /api/items` skeleton), and *invalid* (re-scan) groups.
     Creating entries stays an explicit staff action through the API/UI.
+  * `POST /api/cart/scan` + `app/scanlookup.py` — the server-side decision
+    table shared with the bridge (Task 3): exact identity or nothing,
+    never a guess.
+
+### 8a. Closest-item suggestions (the unknown-code intake screen)
+
+When a scanned code identifies nothing, the 404 carries suggestions —
+"the closest matching items in the shop, using the barcode system":
+
+* **By barcode family** (`rank_prefix_siblings` in `app/barcodes.py`):
+  catalogue barcodes ranked by the longest **shared significant prefix**
+  with the scanned GTIN, on the *indicator-stripped, leading-zero-stripped*
+  13-digit view. Three deliberate rules:
+  * stripping the **indicator digit** lets a case/pallet GTIN-14 rank as
+    the top sibling of its retail GTIN-13 — same product family, which is
+    exactly what a substitute suggestion wants;
+  * stripping the **padding zeros** means two EAN-8s are never "siblings"
+    on padding alone — at least **6 significant digits** must agree
+    (roughly the GS1 company-prefix neighbourhood);
+  * ties break by name; the list is capped.
+  The true company-prefix *length* is not derivable offline (GEPIR is a
+  lookup service), so observed shared length **is** the heuristic — a SQL
+  `LIKE` ladder on the raw 14-digit string was rejected because it can
+  never match across the indicator digit and pays 7 probes for one
+  ranking. One worked example, pinned in `tests/test_barcodes.py`: a scan
+  of `5901234123457` (Poland) suggests the item filed under
+  `5901234999991` (same company prefix) and never the unrelated German
+  `4006381333931`.
+* **By code or name**: the one keyword dialect — the same escaped-ILIKE
+  condition as `GET /api/items?q=` (`keyword_filter`), so suggestions and
+  search can never disagree about wildcards.
+* **By meaning** (`GET /api/items/suggest?q=…`, while typing a name):
+  vector search that **degrades to `[]`** on any embedding/extension
+  unavailability — a suggestion miss must never fail the scan flow. It is
+  never computed for the raw scanned code (embedding a digit string is
+  wasted cost with no name to match yet).
+* **Misreads are never suggested around** (§7): a bad check digit is a
+  422 "re-scan", full stop.
 
 ## 9. Sources (retrieved 2026-09-29)
 

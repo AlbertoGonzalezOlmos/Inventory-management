@@ -357,3 +357,48 @@ def test_a_failed_relogin_propagates_apierror_not_systemexit():
                           relogin=True)
     assert exc.value.status == 0
     assert not isinstance(exc.value, SystemExit)
+
+
+# --- badge redaction in human-readable output (Task 6) -------------------------
+
+from scripts.scanner_bridge import (  # noqa: E402
+    format_session_token,
+    redact_code,
+)
+
+BADGE = "HCRM1:" + "A" * 43
+BARE_TOKEN = "A" * 43
+SESSION_TOKEN = "tok_" + "x" * 60
+
+
+def test_redact_code_masks_the_full_badge_form():
+    assert redact_code(BADGE) == "HCRM1:••••"
+    assert "A" * 43 not in redact_code(BADGE)
+
+
+def test_redact_code_masks_the_bare_43_char_token_form():
+    # A scanner/bridge may strip the prefix; the bare token is the same
+    # credential and must never be printed either (it reaches the catalogue
+    # path as an opaque code, and the verdict/error line echoes the code).
+    masked = redact_code(BARE_TOKEN)
+    assert BARE_TOKEN not in masked
+    assert "badge token" in masked
+
+
+def test_redact_code_leaves_barcodes_and_skus_alone():
+    assert redact_code("8412345678905") == "8412345678905"
+    assert redact_code("EX-007") == "EX-007"
+    # 43 alphanumerics is the token shape; shorter/longer codes are not masked.
+    assert redact_code("A" * 42) == "A" * 42
+    assert redact_code("A" * 44) == "A" * 44
+    # Non-token characters disqualify the bare form.
+    assert redact_code("A" * 42 + "!") == "A" * 42 + "!"
+
+
+def test_session_token_is_redacted_by_default_and_full_with_show_token():
+    redacted = format_session_token(SESSION_TOKEN, show_token=False)
+    assert SESSION_TOKEN not in redacted
+    assert "redacted" in redacted
+    assert "--show-token" in redacted and "--json" in redacted
+    assert redacted.startswith(SESSION_TOKEN[:8])
+    assert format_session_token(SESSION_TOKEN, show_token=True) == SESSION_TOKEN

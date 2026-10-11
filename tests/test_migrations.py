@@ -211,3 +211,56 @@ def test_missing_tables_are_skipped_not_fatal(tmp_path, monkeypatch):
     conn.close()
     _run(db, monkeypatch)
     assert _columns(db, "unrelated") == {"x"}
+
+
+def test_new_tables_land_on_a_legacy_database(tmp_path, monkeypatch):
+    """create_all() owns NEW tables on every database, fresh or legacy.
+
+    The scanner feature's tables (cart_items, scan_requests) deliberately
+    have NO migration entries — create_all() adds them through the real
+    startup sequence (create_all() + _migrate_schema(), app/main.py
+    _startup). This pins that a pre-scanner database actually gains them,
+    with the upsert's conflict target (uq_cart_items_user_item) intact on
+    UPGRADED databases, not just fresh ones.
+    """
+    import app.database
+
+    db = tmp_path / "legacy.db"
+    _legacy_db(db)
+    engine = sqlalchemy.create_engine(f"sqlite:///{db}")
+    monkeypatch.setattr(app.main, "engine", engine)
+    monkeypatch.setattr(app.database, "engine", engine)
+
+    app.database.create_all()
+    app.main._migrate_schema()
+
+    conn = sqlite3.connect(db)
+    try:
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "cart_items" in tables, tables
+        assert "scan_requests" in tables, tables
+        # SQLite backs a table-level UNIQUE constraint with an AUTO-NAMED
+        # index (sqlite_autoindex_*), so the constraint's given name lives
+        # in the table DDL, not in PRAGMA index_list.
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='cart_items'"
+        ).fetchone()[0]
+        assert "uq_cart_items_user_item" in ddl, ddl
+        # Behavioural proof: the unique constraint the cart upsert relies
+        # on holds on the upgraded database.
+        conn.execute(
+            "INSERT INTO cart_items (user_id, item_id, qty, created_at, "
+            "updated_at) VALUES (1, 1, 1, '2026-01-01', '2026-01-01')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO cart_items (user_id, item_id, qty, created_at, "
+                "updated_at) VALUES (1, 1, 2, '2026-01-01', '2026-01-01')")
+        conn.rollback()
+    finally:
+        conn.close()
+
+    # A second boot is a no-op (idempotent), not an error.
+    app.database.create_all()
+    app.main._migrate_schema()
+    engine.dispose()
