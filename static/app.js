@@ -116,7 +116,9 @@ Vue.createApp({
       // auth forms
       loginForm: { email: "", password: "" },
       loginError: "",
-      badgeCode: "",  // filled by the Opticon M-10 (USB-HID types it + Enter)
+      badgeCode: "",  // the collapsed manual fallback field (Task E: the
+                       // global capture is the primary no-click path)
+      showBadgeField: false,  // "Use a badge code instead" toggle
       registerForm: { name: "", email: "", password: "" },
       registerError: "",
 
@@ -411,6 +413,10 @@ Vue.createApp({
 
     async badgeLogin(code) {
       if (!code) return;
+      // Busy double-fire guard (Task E): a fast double-Enter (the collapsed
+      // fallback + the global capture, or a shaky scan) must not fire two
+      // qr-login requests — the second would mint a throwaway session.
+      if (this.busy) return;
       this.loginError = "";
       this.busy = true;
       try {

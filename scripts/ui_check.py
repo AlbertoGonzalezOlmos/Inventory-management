@@ -296,6 +296,16 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
     if copy == "Log in" and count(r'placeholder="Scan your QR badge here"', dom) < 1:
         failures.append(f"[{label}] badge login field missing — "
                         "scan capture regressed the dedicated badge path")
+    # Task E: auto-detect is the primary login path — the "scan anywhere"
+    # copy must render on the login view (always-rendered, so a one-shot DOM
+    # dump can pin it), and no click-to-scan language may remain.
+    if copy == "Log in":
+        if count(r"logs you in automatically", dom) < 1:
+            failures.append(f"[{label}] 'scan anywhere' auto-detect copy "
+                            "missing — the no-click login hint regressed")
+        if count(r"Point the scanner at your badge", dom) != 0:
+            failures.append(f"[{label}] stale click-to-scan copy still "
+                            "rendered — the auto-detect rewording regressed")
     return failures
 
 
