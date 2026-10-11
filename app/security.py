@@ -13,6 +13,107 @@ PBKDF2_ITERATIONS = int(os.environ.get("HCRM_PBKDF2_ITERATIONS", "600000"))
 TOKEN_TTL = timedelta(days=7)
 
 
+# --- Badge derivation master secret (Task A) ----------------------------------
+#
+# QR badge payloads are DERIVED from this secret (app/qrbadge.py) so they can
+# be re-viewed forever. The secret is a bearer-grade credential: database +
+# key together can derive every member's badge (the accepted trade-off — see
+# docs/opticon-m10.md §9.4). It therefore lives OUTSIDE the database, and a
+# backup of one without the other is incomplete.
+
+BADGE_SECRET_ENV = "HCRM_BADGE_SECRET"
+BADGE_KEY_FILENAME = "badge.key"
+# Any badge secret (env or keyfile) must be at least this long: the derivation
+# key is bearer-grade; a truncated one must fail loudly, not silently fork the
+# derivation space.
+BADGE_SECRET_MIN_LEN = 32
+
+
+def _badge_data_dir() -> str:
+    """The data dir, computed WITHOUT importing app.database (that would pull
+    app.embeddings/fastembed into every security consumer for one path
+    constant). Keep in sync with app.database.DATA_DIR's default."""
+    return os.environ.get(
+        "HCRM_DATA_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"),
+    )
+
+
+# Snapshot at import (the house pattern for every HCRM_* knob). A SET but
+# invalid (short/empty) value fails FAST at import: falling back to the
+# keyfile would silently derive with a different key than the operator
+# intended — every such badge would 409 on re-view once the env is fixed.
+_env_badge_secret = os.environ.get(BADGE_SECRET_ENV)
+if _env_badge_secret is not None and len(_env_badge_secret.strip()) < BADGE_SECRET_MIN_LEN:
+    raise SystemExit(
+        f"{BADGE_SECRET_ENV} is set but shorter than {BADGE_SECRET_MIN_LEN} "
+        "characters — refusing to start. Deriving badges with a truncated "
+        "secret would silently fork the derivation space; remove the "
+        "variable (the keyfile is then used) or set a proper secret."
+    )
+
+# Lazy cache: (secret, source) once loaded; None-not-loaded vs loaded-None is
+# the tuple itself. Tests monkeypatch this attribute (or pass an explicit
+# secret to the qrbadge functions).
+_badge_secret_state: tuple[str | None, str | None] | None = None
+
+
+def _read_keyfile(path: str) -> str | None:
+    try:
+        with open(path) as f:
+            value = f.read().strip()
+        return value if len(value) >= BADGE_SECRET_MIN_LEN else None
+    except OSError:
+        return None
+
+
+def _load_badge_secret() -> tuple[str | None, str | None]:
+    """Resolve the secret: env (verbatim, never written to disk) → keyfile
+    (auto-generated on first use, 0600, O_EXCL so concurrent boots race
+    safely: the loser re-reads the winner's file) → None (data dir
+    unwritable / corrupt file). None never breaks authentication: logins
+    verify by hash and need no key; it disables badge RE-VIEWING and makes
+    issuance fall back to random legacy badges."""
+    if _env_badge_secret is not None and _env_badge_secret.strip():
+        return _env_badge_secret.strip(), "env"
+
+    path = os.path.join(_badge_data_dir(), BADGE_KEY_FILENAME)
+    existing = _read_keyfile(path)
+    if existing is not None:
+        return existing, "file"
+
+    # Auto-generate — deliberately, so the server always boots (a missing
+    # key must never lock anyone out; the loss is detected later at re-view
+    # time by the hash mismatch, never by a boot crash).
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        secret = secrets.token_urlsafe(32)  # 43 chars — same shape as badge tokens
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secret)
+        return secret, "file"
+    except FileExistsError:
+        # A concurrent boot won the race: read the winner's file.
+        winner = _read_keyfile(path)
+        return (winner, "file") if winner is not None else (None, None)
+    except OSError:
+        return None, None
+
+
+def badge_secret() -> str | None:
+    """The badge-derivation master secret (cached per process), or None."""
+    global _badge_secret_state
+    if _badge_secret_state is None:
+        _badge_secret_state = _load_badge_secret()
+    return _badge_secret_state[0]
+
+
+def badge_secret_source() -> str | None:
+    """\"env\" | \"file\" | None — for healthz/startup visibility."""
+    badge_secret()  # ensure loaded
+    return _badge_secret_state[1]
+
+
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():

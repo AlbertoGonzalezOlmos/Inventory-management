@@ -15,7 +15,8 @@ from app.database import get_session
 from app.deps import require_admin, require_staff
 from app.models import AuthToken, CartItem, ScanRequest, User
 from app.qrbadge import badge_svg, new_badge_for
-from app.schemas import MemberCreatedOut, MemberIn, MemberPatch, QrBadgeOut, UserOut
+from app.schemas import (MemberCreatedOut, MemberIn, MemberPatch, QrBadgeOut,
+                         QrBadgeViewOut, UserOut)
 from app.security import hash_password, is_well_known_password
 
 router = APIRouter(prefix="/api/members", tags=["members"])
@@ -82,12 +83,15 @@ def create_member(
         # holder changes it, exactly like an admin-issued reset.
         must_change_password=True,
     )
-    # Auto-badge, before the add: the hash rides in the same INSERT as the
-    # account (generate-before-commit, show-after-commit) — a raced
-    # duplicate-email insert rolls back row and never-shown payload together.
-    badge_payload = new_badge_for(user)
+    # Auto-badge, Task A: derivation needs user.id, so flush-then-derive in
+    # ONE transaction — the flush executes the INSERT (assigning the id)
+    # without committing, so a raced duplicate-email insert still rolls back
+    # row, generation and never-shown payload together (the IntegrityError
+    # fires at the flush instead of the commit — same 409 contract).
     session.add(user)
     try:
+        session.flush()
+        badge_payload = new_badge_for(user)
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -218,6 +222,22 @@ def create_member_badge(
     session.add(user)
     session.commit()
     return QrBadgeOut(payload=payload, svg=badge_svg(payload))
+
+
+@router.get("/{user_id}/qr-badge", response_model=QrBadgeViewOut)
+def view_member_badge(
+    user_id: int,
+    staff: User = Depends(require_staff),
+    session: Session = Depends(get_session),
+):
+    """Re-view a member's QR badge at the counter (reprint a card) —
+    repeatable; a legacy badge auto-migrates on first view (migrated: true,
+    the previously printed card dies). Regeneration stays the POST beside
+    this endpoint; same privilege rule as account edits."""
+    from app.routers.auth import badge_view_response
+
+    user = _get_manageable_member(session, user_id, staff)
+    return badge_view_response(session, user)
 
 
 @router.delete("/{user_id}/qr-badge", status_code=status.HTTP_204_NO_CONTENT)

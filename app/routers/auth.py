@@ -14,13 +14,20 @@ from app import security
 from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
 from app.models import AuthToken, User, utcnow
-from app.qrbadge import BADGE_PREFIX, badge_svg, new_badge_for, parse_badge_payload
+from app.qrbadge import (
+    BADGE_PREFIX,
+    badge_svg,
+    new_badge_for,
+    parse_badge_payload,
+    view_badge,
+)
 from app.schemas import (
     AuthOut,
     ChangePasswordIn,
     LogoffScheduleOut,
     LoginIn,
     QrBadgeOut,
+    QrBadgeViewOut,
     QrIdentifyOut,
     QrLoginIn,
     RegisterIn,
@@ -72,16 +79,18 @@ def register(payload: RegisterIn, session: Session = Depends(get_session)):
         password_hash=hash_password(payload.password),
         role="member",
     )
-    # Auto-badge: every new account is issued its first QR badge. The hash
-    # is set BEFORE the add (generate-before-commit), so it rides in the
-    # same INSERT as the account — a raced duplicate-email insert rolls
-    # back the row and the never-shown payload together. The raw payload
-    # is returned exactly once, in this response; if the client never
-    # reads it (disconnect), recovery is rotation: POST /api/auth/qr-badge
-    # replaces the hash and re-shows a fresh badge.
-    badge_payload = new_badge_for(user)
+    # Auto-badge: every new account is issued its first QR badge. Task A:
+    # derivation needs user.id, so the flow is flush-then-derive in ONE
+    # transaction — the flush executes the INSERT (assigning the id) WITHOUT
+    # committing, so a raced duplicate-email insert still rolls back row,
+    # generation and never-shown payload together (no badgeless-account
+    # window; the IntegrityError simply fires at the flush instead of the
+    # commit). The raw payload is returned exactly once, in this response
+    # — and is re-viewable forever after via GET /api/auth/qr-badge.
     session.add(user)
     try:
+        session.flush()
+        badge_payload = new_badge_for(user)
         session.commit()
     except IntegrityError:
         # Concurrent registration with the same email raced past the check.
@@ -166,6 +175,57 @@ def create_my_badge(
     session.add(user)
     session.commit()
     return QrBadgeOut(payload=payload, svg=badge_svg(payload))
+
+
+def badge_view_response(session, user) -> QrBadgeViewOut:
+    """Map the qrbadge domain result to the HTTP envelope (shared with the
+    staff endpoint in app/routers/members.py — the scan_requests→cart import
+    precedent). Status-convention envelopes, house style: a ``status``
+    discriminator, never a bare detail string."""
+    result = view_badge(session, user)
+    if result.status == "none":
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"status": "none",
+                    "message": "No QR badge for this account — generate one first"})
+    if result.status == "no_key":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"status": "no_key",
+                    "message": "Badge re-viewing is unavailable (no derivation "
+                               "key) — logins are unaffected; regenerate the "
+                               "badge once a key exists"})
+    if result.status == "key_mismatch":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"status": "key_mismatch",
+                    "message": "The badge key changed since this badge was "
+                               "issued — regenerate the badge to re-enable "
+                               "viewing (logins are unaffected: they verify "
+                               "by hash)"})
+    return QrBadgeViewOut(
+        status=result.status,          # "ok" | "migrated"
+        payload=result.payload,
+        svg=badge_svg(result.payload),
+        generation=result.generation,
+        migrated=result.migrated,
+    )
+
+
+@router.get("/qr-badge", response_model=QrBadgeViewOut)
+def view_my_badge(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Re-view the caller's QR badge — repeatable, forever (Task A).
+
+    The payload is derived from the server's master key on demand (only its
+    hash is stored), so unlike the issuance/rotation responses this can be
+    fetched again and again. A LEGACY (pre-derivation) badge auto-migrates
+    on first view: a fresh derived badge is issued and the previously
+    printed one stops working — ``migrated: true`` says so (the UI warns).
+    """
+    return badge_view_response(session, user)
 
 
 @router.delete("/qr-badge", status_code=status.HTTP_204_NO_CONTENT)

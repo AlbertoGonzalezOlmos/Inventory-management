@@ -181,3 +181,42 @@ def test_python_scripts_are_syntactically_valid():
         proc = subprocess.run([sys.executable, "-m", "py_compile", path],
                               capture_output=True, text=True, timeout=60)
         assert proc.returncode == 0, (rel, proc.stderr)
+
+
+def test_backup_includes_the_badge_key_and_warns():
+    """Task A: database + badge.key together derive every member's QR badge —
+    the backup must carry the key (or re-viewing is lost on restore) and say
+    loudly that the backup is credential-bearing."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-badgekey-") as td:
+        _make_wal_db(td)   # creates <td>/hcrm.db (+WAL) — td IS the data dir
+        # A badge key, as the app would auto-generate it.
+        with open(os.path.join(td, "badge.key"), "w") as f:
+            f.write("k" * 43)
+        dest = os.path.join(td, "backup-dest")
+        proc = subprocess.run(
+            [BASH, "scripts/backup_db.sh", dest],
+            capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
+            env={**os.environ, "HCRM_DATA_DIR": td},
+        )
+        assert proc.returncode == 0, proc.stderr
+        copied = open(os.path.join(dest, "badge.key")).read()
+        assert copied == "k" * 43
+        # The loud warning: a credential-bearing backup must announce itself.
+        assert "credential-bearing" in proc.stderr
+        # …and the restore hint mentions the key.
+        assert "badge.key" in proc.stdout
+
+
+def test_backup_succeeds_without_a_badge_key():
+    """Deployments that keep the key in env (never on disk) back up unchanged."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-nokey-") as td:
+        _make_wal_db(td)   # td IS the data dir
+        dest = os.path.join(td, "backup-dest")
+        proc = subprocess.run(
+            [BASH, "scripts/backup_db.sh", dest],
+            capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
+            env={**os.environ, "HCRM_DATA_DIR": td},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert not os.path.exists(os.path.join(dest, "badge.key"))
+        assert "credential-bearing" not in proc.stderr
