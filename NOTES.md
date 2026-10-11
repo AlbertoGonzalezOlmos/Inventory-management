@@ -15,7 +15,11 @@
 **HCRM** = *Shop Catalogue & Members*. A small shop's internal system:
 
 - **Members** browse a catalogue (keyword **and** AI semantic search), build a
-  client-side purchase list.
+  server-side, per-account purchase list — and at the counter can scan item
+  barcodes (Opticon M-10) straight into it, take unknown codes through a
+  name+price intake screen, and log in / switch accounts / log off with a
+  30-second countdown by scanning their QR badge (see
+  `docs/opticon-m10.md` §10).
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.
@@ -259,8 +263,13 @@ Inventory-management/
   re-login; maps FastAPI validation-error lists to readable messages.
 - Catalogue: infinite scroll (IntersectionObserver on `#sentinel`), category
   filter, semantic toggle (✨, requires ≥2 chars else falls back to keyword).
-- Purchase list: entirely client-side (localStorage), quantities capped by
-  stock, total at the bottom. Checkout is a placeholder toast.
+- Purchase list: **server-side and per-account** (`/api/cart`; the old
+  localStorage list is imported once on first login). Quantities may exceed
+  stock (a UI warning, never a clamp — coordinator decision); total at the
+  bottom follows live prices. Checkout is a placeholder toast. Scans at the
+  counter (M-10 USB-HID) add to it; own-badge scans arm a 30 s logoff
+  countdown, another badge saves-and-switches accounts
+  (docs/opticon-m10.md §10).
 - Table view: click/Shift/Ctrl selection of rows *and* columns, CSV export
   (UTF-8 BOM, formula-injection guard) and PDF export, stats panel
   (min/max/mean/median/σ, per-category breakdown).

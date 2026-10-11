@@ -652,9 +652,15 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
 /* ================= Print =================
    The repo's first @media print block: while a badge modal is open, the
    body carries .printing-badge and printing yields the badge card ALONE
-   (the print button used to print the whole page behind the modal). */
+   (the print button used to print the whole page behind the modal).
+   Precedence: a badge backdrop wins over every other open modal — e.g.
+   the register one-shot badge opening over a staged unknown's intake
+   modal must print the card, not both dialogs (!important, and the
+   :not(.badge-backdrop) selector makes the badge the unambiguous winner
+   without :has() so older engines degrade to the pre-Task-6 behaviour). */
 @media print {
   body.printing-badge #app > *:not(.modal-backdrop) { display: none !important; }
+  body.printing-badge .modal-backdrop:not(.badge-backdrop) { display: none !important; }
   body.printing-badge .modal-backdrop {
     position: static;
     background: none;

@@ -174,6 +174,7 @@ Vue.createApp({
       pwError: "",
       pwOk: false,
       badgeSvg: "",      // freshly generated own badge (inline SVG markup)
+      badgePayload: "",   // its one-time payload (shown only via the print modal)
       myRequests: [],    // "My scan requests" (GET /api/scan-requests/mine)
 
       // members: badge being displayed for printing
@@ -432,13 +433,19 @@ Vue.createApp({
 
     _closeOverlays() {
       // Modals whose context belongs to a session that just ended (logout,
-      // countdown expiry, account switch): leaving them up strands a stale,
+      // countdown expiry, account switch, session expiry), or to a view the
+      // user just navigated away from: leaving them up strands a stale,
       // user-specific dialog over the login screen or the new account.
+      // badgeSvg/badgePayload are the account view's rotated-badge display —
+      // a credential, and the first thing to die with its session.
       this.detailItem = null;
       this.scanIntake = null;
       this.memberBadge = null;
       this.badgePrint = null;
       this.pwResetMember = null;
+      this.badgeSvg = "";
+      this.badgePayload = "";
+      this.myRequests = [];
     },
 
     async logout() {
@@ -480,6 +487,9 @@ Vue.createApp({
       try {
         const data = await api("/auth/qr-badge", { method: "POST" });
         this.badgeSvg = data.svg;
+        // The rotation's one-time payload: kept so Print opens the isolated
+        // badge modal with it (never rendered inline on the account page).
+        this.badgePayload = data.payload;
         if (this.user) {
           this.user.has_qr_badge = true;
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
@@ -492,11 +502,26 @@ Vue.createApp({
       }
     },
 
+    printAccountBadge() {
+      // Print isolation for the account view's rotated badge (Task 6): route
+      // it through the one-shot badgePrint modal, which carries the
+      // .printing-badge body class + @media print isolation — printing the
+      // account page directly would print the whole page around the card.
+      if (!this.badgeSvg) return;
+      this.badgePrint = {
+        title: "Your QR login badge",
+        subtitle: "Rotated just now — the previous badge stopped working",
+        svg: this.badgeSvg,
+        payload: this.badgePayload || "",
+      };
+    },
+
     async revokeMyBadge() {
       if (!confirm("Revoke your QR badge? It will stop working immediately.")) return;
       try {
         await api("/auth/qr-badge", { method: "DELETE" });
         this.badgeSvg = "";
+        this.badgePayload = "";
         if (this.user) {
           this.user.has_qr_badge = false;
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
@@ -786,7 +811,12 @@ Vue.createApp({
     },
 
     enqueueScan(code, kind) {
-      this.scanFlash = "scan: " + code;
+      // NEVER render the raw badge payload on screen: it is a bearer
+      // credential, shoulder-surfable for the pill's 2 s lifetime. Mask on
+      // the ROUTED KIND (a prefix-stripped presentation is just as much a
+      // secret as an HCRM1:-prefixed one). Barcodes/SKUs are not secrets
+      // and stay visible — silent misroutes must be observable.
+      this.scanFlash = kind === "badge" ? "scan: badge received" : "scan: " + code;
       clearTimeout(this._scanFlashTimer);
       this._scanFlashTimer = setTimeout(() => (this.scanFlash = ""), 2000);
       this.scanQueue.push({ code, kind });
@@ -881,11 +911,13 @@ Vue.createApp({
     handleSessionExpired() {
       // Raw-mode 401s land here: the session is dead — mirror the api()
       // wrapper's throwing-path cleanup (raw callers own their errors, so
-      // the wrapper skipped it).
+      // the wrapper skipped it). Any open overlay belonged to the dead
+      // session: close it so it cannot strand over the login view.
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
       this.user = null;
       this.clearLogoff();
+      this._closeOverlays();
       location.hash = "#/login";
       this.route = "#/login";
       this.showToast("Session expired — please log in again.");
@@ -1613,7 +1645,18 @@ Vue.createApp({
 
   mounted() {
     window.addEventListener("hashchange", () => {
-      this.route = location.hash || "#/catalogue";
+      const next = location.hash || "#/catalogue";
+      // Close overlays only on USER-initiated navigation (links, back/
+      // forward, the api() 401 redirect) — those never pre-set this.route,
+      // so `next` differs. Programmatic routes (afterLogin, switchAccount,
+      // logout) assign this.route BEFORE the queued hashchange task runs,
+      // and their follow-up modals are set in microtasks that land before
+      // it — an unconditional close here would null the register one-shot
+      // badge modal (and a post-switch intake) before it ever rendered
+      // (measured: microtask-before-task is guaranteed by the event loop).
+      const navigated = next !== this.route;
+      this.route = next;
+      if (navigated) this._closeOverlays();
     });
 
     // The api() wrapper broadcasts this when a request comes back 401:
@@ -1621,6 +1664,7 @@ Vue.createApp({
     window.addEventListener("hcrm-session-expired", () => {
       this.user = null;
       this.clearLogoff();   // a pending countdown's timer must die here
+      this._closeOverlays();  // ...and the dead session's modals with it
       this.route = "#/login";
     });
 

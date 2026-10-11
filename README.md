@@ -91,6 +91,7 @@ On first run the app seeds:
 | `HCRM_DEV_ADMIN` | `1` (**this round**) | seed/ensure the well-known dev admin `admin`/`admin`. `0` restores the secure default (`admin@shop.local`/`changeme`, blocked until changed) |
 | `HCRM_ALLOW_INSECURE_BIND` | unset | let `scripts/run.sh` bind a non-loopback `HCRM_HOST` while `HCRM_DEV_ADMIN` is on (trusted networks only) |
 | `HCRM_SCRATCH` | unset | `1` makes `run.sh` boot on a throwaway database instead of `./data` |
+| `HCRM_LOGOFF_GRACE_SECONDS` | `30` | the kiosk logoff countdown (own-badge scan → “log off?”): the server-enforced deadline on the session token; clamped ≥ 1, read at import time |
 | `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` for production |
 | `FASTEMBED_CACHE_PATH` | `$TMPDIR/fastembed_cache` | where the embedding model is cached — note this is `/tmp` by default, so a tmp-cleaner wipes it and the next boot re-downloads ~80 MB |
 | `HCRM_BROWSER` | auto | browser binary for `scripts/ui_check.py` (it probes each candidate and refuses to run with one that cannot log console messages) |
@@ -122,8 +123,17 @@ that adds SIMD-accelerated vector search:
 - **Click an item to add it to the purchase list**; the ℹ button opens a
   details modal (with “Similar items” via vector neighbours and an
   “Add to purchase list” button)
-- **Purchase list**: add/subtract quantities of the same item (+ / − buttons),
-  remove items, and the **total amount shown at the bottom** of the panel
+- **Purchase list — server-side and per-account**: add/subtract quantities
+  of the same item (+ / − buttons), remove items, and the **total amount
+  shown at the bottom** of the panel. The list is durable across browsers
+  and survives the badge-driven account switch ("save then switch")
+- **Scan-to-cart (Opticon M-10, USB-HID)**: scan an item barcode anywhere
+  on the page and it is looked up by exact identity and added to your
+  purchase list; an unknown code opens a name+price intake screen with
+  closest-match suggestions (members file a request for staff); scanning
+  your own QR badge offers a 30-second logoff countdown, another user's
+  badge saves your list and switches accounts; anonymous scans are staged
+  and assigned to whoever logs in next (see `docs/opticon-m10.md` §10)
 
 ### Table view (staff) — `#/table`
 - Table of all items in the database, paginated
@@ -397,13 +407,13 @@ touching `./data`).
 | **`POST /api/auth/register` enumeration oracle** | Reveals whether an email is taken (409). Accepted trade-off for a shop signup page. |
 | **Tokens in `localStorage`** | Exfiltratable by any script that runs — which `'unsafe-eval'` makes easier. HttpOnly cookies + CSRF tokens would fix it and change the API contract. |
 | **Refresh tokens / session expiry UX** | Sessions simply expire after 7 days. |
-| **Server-side checkout** | The purchase list is client-side only (`requestPurchase()` is a placeholder). |
+| **Server-side checkout** | The purchase list itself **is** server-side and per-account (durable, switch-safe); only checkout remains open (`requestPurchase()` is a placeholder toast). |
 | **`PRAGMA foreign_keys` is OFF** | `auth_tokens.user_id` is declarative only; enforcing it needs a table rebuild. The only user-deleting path removes tokens first. |
 | **Quantized ANN scans** (`vector_quantize`) | Exact `vector_full_scan` is comfortable to ~100k items; see the measurements above. |
 
 ## Next steps (barebones placeholders)
 
-- Real checkout/order endpoint for the purchase list (currently client-side only)
+- Real checkout/order endpoint for the purchase list (the list is server-side; checkout is the placeholder)
 - Refresh tokens / proper session expiry handling
 - Image uploads (only URLs are supported now)
 - Server-side streaming exports for very large tables

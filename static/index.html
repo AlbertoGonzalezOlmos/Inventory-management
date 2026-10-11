@@ -253,7 +253,7 @@
         <button class="btn" :disabled="busy" @click="generateMyBadge">
           {{ user.has_qr_badge ? "Regenerate badge (revokes the old one)" : "Generate QR badge" }}
         </button>
-        <button v-if="badgeSvg" class="btn ghost no-print" @click="() => window.print()">Print</button>
+        <button v-if="badgeSvg" class="btn ghost no-print" @click="printAccountBadge">Print</button>
         <button v-if="user.has_qr_badge" class="btn ghost danger no-print" @click="revokeMyBadge">
           Revoke badge
         </button>
@@ -596,7 +596,7 @@
   </div>
 
   <!-- ================= Member QR badge modal ================= -->
-  <div class="modal-backdrop" v-if="memberBadge" @click.self="memberBadge = null">
+  <div class="modal-backdrop badge-backdrop" v-if="memberBadge" @click.self="memberBadge = null">
     <div class="modal badge-card">
       <button class="modal-close no-print" @click="memberBadge = null">✕</button>
       <h2>QR badge — {{ memberBadge.name }}</h2>
@@ -702,8 +702,10 @@
 
   <!-- ================= One-shot badge print modal =================
        The payload is shown EXACTLY ONCE (at creation/rotation) and never
-       persisted — closing this modal is final. -->
-  <div class="modal-backdrop" v-if="badgePrint" @click.self="badgePrint = null">
+       persisted — closing this modal is final. The badge-backdrop class is
+       the print-precedence hook: when this modal prints, other open modals
+       are suppressed (see the @media print block). -->
+  <div class="modal-backdrop badge-backdrop" v-if="badgePrint" @click.self="badgePrint = null">
     <div class="modal badge-card">
       <button class="modal-close no-print" @click="badgePrint = null">✕</button>
       <h2>{{ badgePrint.title }}</h2>

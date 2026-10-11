@@ -327,3 +327,16 @@ def test_rank_prefix_siblings_skips_malformed_entries():
          ("0841234567890X", "not digits"), ("08412345000009", "good")],
     )
     assert ranked == [("08412345000009", "good")]
+
+
+def test_rank_prefix_siblings_worked_example_from_the_docs():
+    # The worked example in docs/barcodes.md §8a: a scan of the Polish
+    # EAN-13 5901234123457 suggests the same-company filing and NEVER an
+    # unrelated-prefix item.
+    target = "05901234123457"  # canonical of 5901234123457
+    items = [
+        ("05901234999991", "Same GS1 company prefix (Poland)"),   # shares 5901234 (7)
+        ("04006381333931", "Unrelated German EAN-13"),            # shares 0
+    ]
+    assert rank_prefix_siblings(target, items) == [
+        ("05901234999991", "Same GS1 company prefix (Poland)")]

@@ -99,7 +99,7 @@ bits, no parity, 1 stop bit, no handshaking**; data suffix = **CR**; read mode
 > QR-badge login and catalogue-search scanning (§9). Whether that unit is an
 > M-10 is the open question from §2: `A001` is not a documented Opticon PID.
 > **The experiment that settles both at once** — scan the *USB COM Port*
-> configuration sheet (wiki link in §10): if the device re-enumerates as
+> configuration sheet (wiki link in §11): if the device re-enumerates as
 > `065A:A002` and a `COMx`/`ttyACM*` port appears, it is an M-10, the bridge
 > works, and `docs/opticon-hardware.md` §1 can upgrade `A001` to
 > `confirmed`. Until then, receive from it with
@@ -293,11 +293,17 @@ rather than a 500 — a retry-later condition.
 Since the QR-login feature (§9), the bridge treats scans whose payload
 starts with `HCRM1:` specially: instead of a catalogue lookup it exchanges
 the badge for a session via `POST /api/auth/qr-login` and prints the
-resulting session token (honouring `--json`). A rejected badge is reported
-and the bridge keeps listening. This covers headless/kiosk setups where
-the scanned credential must reach the API without a browser field to type
-into; for an interactive PC, USB-HID + the login-page badge field (§9) is
-the simpler path.
+resulting session token **redacted** by default — badge payloads and
+tokens are bearer credentials and must not accumulate in terminal
+scrollback, `tee` logs or journald. `--show-token` restores the full
+text-mode printout; `--json` is the machine contract: the session token
+stays full (piping it to a headless kiosk is the point) while the badge
+payload in `code` is masked there too — the payload is needed by nobody
+after the login, and `--json` output routinely lands in logs. A rejected
+badge is reported (code masked) and the bridge keeps listening. This covers headless/kiosk setups where the scanned credential
+must reach the API without a browser field to type into; for an
+interactive PC, USB-HID + the SPA's global scan capture (§10) is the
+simpler path.
 
 ## 7. Configuring the scanner itself
 
@@ -388,7 +394,7 @@ focus): `scripts/scanner_hid.py` reads the raw HID reports — see
 ```bash
 uv run python scripts/scanner_bridge.py --email staff@shop.local
 # scan a badge → "[badge] logged in: Alice <alice@shop.local> (member)"
-#                 session token: <bearer token>
+#                 session token: tok_9f2c… (redacted — --show-token or --json)
 ```
 
 **API:** `POST /api/auth/qr-login {"token": "HCRM1:…"}` → the same
@@ -408,7 +414,106 @@ works, but only the password-change endpoints until the flag is cleared.
   revoke on loss. For shared/kiosk PCs, remember the session itself is the
   normal 7-day bearer token — log out after use.
 
-## 10. References
+## 10. Counter & kiosk flows (the SPA's scan bus)
+
+Everything in §9 logs *in*; this section is what the M-10 does at the
+counter once somebody **is** logged in — scan-to-cart, the 30-second
+logoff countdown, and the badge-driven account switch. Transport: the
+unit's **USB-HID personality** (how it is configured today — no udev rule,
+no bridge; the SPA captures scans itself). The USB-COM bridge keeps its
+back-office modes (§6/§6a); a browser-driving relay is **Phase B,
+deferred — not built, do not test for it**.
+
+### 10.1 Global scan capture
+
+One document-level keydown listener, always on — every view, behind
+modals, logged in or out:
+
+- **Timing**: a scan is a burst with < 50 ms inter-key gaps, ≥ 4
+  characters, terminated by Enter. Human typing pauses break the burst;
+  nothing is ever *eaten* — there is no `preventDefault` on buffered
+  characters, and a burst landing in a focused field is **restored** to
+  its pre-scan value when the Enter turns out to be a scan (held-key
+  repeats in inputs are therefore safe too).
+- **Shape gate** (routing only — the server classifies): `HCRM1:` +
+  43 chars, or a bare 43-char token → badge; 4–14 digits or an
+  opaque code containing a digit → barcode; anything else is ignored
+  silently (no server call).
+- **Sinks**: the login-page badge field (§9.3) and the visible scan
+  field (catalogue header) own their keys — the deterministic,
+  no-heuristics path, including codes too short for the global gate.
+- **Discipline**: scans are queued and drained one at a time; while a
+  modal is open, barcodes are dropped with a toast (“finish the current
+  dialog first”) but **badges always process** — a second person at the
+  counter is never ignored. The scan pill echoes every capture — badges
+  masked (`scan: badge received`), barcodes visible.
+
+### 10.2 Badge flows while logged in
+
+Scanning a badge calls `POST /api/auth/qr-identify` — a pure predicate
+(no session minted, no writes) answering “is this **my** badge?”:
+
+- **Own badge → the logoff countdown.** The SPA arms
+  `POST /api/auth/logoff-schedule` and shows a full-screen overlay —
+  “Log off *name*?” with a per-second countdown computed **from the
+  returned server deadline** (never a client-side `now + 30`). Buttons:
+  *Stay logged in* (`/logoff-cancel`) and *Log off now* (logout). When
+  the countdown reaches zero, the session is logged out — and this is
+  **server-enforced**: the token carries `logoff_deadline`, and
+  `get_current_user` kills it lazily even if the browser died
+  mid-countdown (close the tab, wait the grace period, and the token is
+  dead on its next use anywhere). Re-scanning the same badge restarts
+  the countdown (re-schedule); scanning a *different* badge cancels it
+  and switches. The grace is `HCRM_LOGOFF_GRACE_SECONDS` (default 30,
+  clamped ≥ 1). No backdrop-click dismiss: leaving is deliberate.
+- **Different badge → save-then-switch.** The cart is server-side and
+  per-account, so “save whatever had been done” is durable by
+  construction; the flow then (in order): secure the **new** session via
+  `qr-login` (on failure, stay exactly as you are), revoke the old kiosk
+  token via `logout` (per-token — the user's phone session survives),
+  load the incoming user's cart. A flagged account lands on the
+  change-password screen, exactly like any login.
+
+### 10.3 Barcode flows
+
+- **Known code** → `POST /api/cart/scan`: exact identity (canonical GTIN
+  or exact SKU — a UPC-E finds the EAN-13 filing) → added to the cart
+  with a toast; `qty > stock` warns, never clamps; stock is never
+  decremented (checkout is the tracked non-goal).
+- **Misread** (bad check digit) → 422, “re-scan, do not file”; nothing
+  added, never suggested around.
+- **Unknown code** → 404 with everything the intake screen needs:
+  classification (format · region · usage), `catalogable`, and
+  suggestion groups — *same barcode family* (GS1 company-prefix
+  siblings, see `docs/barcodes.md`), *similar code or name*, and (while
+  typing a name) *similar meaning*. Clicking a suggestion adds that item
+  instead. **Staff** create the catalogue entry right there (editable
+  SKU prefilled from the GTIN, duplicate-barcode races handled) and any
+  matching member request is resolved; **members** file a `ScanRequest`
+  for staff (visible in Admin → Scan requests, resolved with an optional
+  add-to-their-cart, and in Account → My scan requests).
+- **Nobody logged in** → the scan is **staged** (localStorage, codes
+  only, cap 50) with a banner; whoever logs in next — password or badge
+  — gets them replayed into their cart (badge scan is the primary
+  “which account?” answer; it identifies *and* authenticates). Unknown
+  staged codes go through intake after login.
+
+### 10.4 Accepted risks (audited, Task 6)
+
+- Deadline-past tokens of vanished browsers linger ≤ 7 days, inert (any
+  presentation deletes them; the login-time purge reaps the rest).
+- No rate limit on badge endpoints: 256-bit unguessable payloads.
+- Staged scans are codes only — visible to anyone with browser-profile
+  access, the same trust as the session token in the same store.
+- Cart `PUT` (legacy import / whole-list replace) is last-writer-wins
+  across kiosks on one account; line operations are race-free.
+- The bridge's `--json` carries the session token by design (machine
+  pipe); text mode redacts (§6a).
+- If body-logging middleware is ever added in front of the app, it must
+  exclude `/api/auth/*` and `/api/cart/scan` — request bodies carry
+  credentials.
+
+## 11. References
 
 - M-10 product page — <https://wiki.opticonusa.com/techsupport/en/M-10>
 - M-10 datasheet — <https://files.opticonusa.com/Downloads/m10datasheet.pdf>
