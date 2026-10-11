@@ -1,13 +1,16 @@
 """Authentication endpoints: register, login (password & QR badge), logout,
-whoami, password change."""
+whoami, password change, kiosk logoff scheduling, badge identification."""
 
+import hmac
 import re
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from app import security
 from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
 from app.models import AuthToken, User, utcnow
@@ -15,8 +18,10 @@ from app.qrbadge import BADGE_PREFIX, badge_svg, new_badge_for, parse_badge_payl
 from app.schemas import (
     AuthOut,
     ChangePasswordIn,
+    LogoffScheduleOut,
     LoginIn,
     QrBadgeOut,
+    QrIdentifyOut,
     QrLoginIn,
     RegisterIn,
     RegisterOut,
@@ -111,6 +116,18 @@ def login(payload: LoginIn, session: Session = Depends(get_session)):
 _RAW_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
+def _badge_from_scanned(scanned: str) -> str | None:
+    """The ONE badge-acceptance rule (Task 4): a full ``HCRM1:`` payload, or
+    the raw 43-char token — a scanner/bridge may strip the prefix. Shared by
+    qr-login and qr-identify so the two endpoints cannot drift on what
+    counts as a badge presentation (the same anti-drift doctrine as the
+    Task-3 scan-resolution core)."""
+    badge = parse_badge_payload(scanned)
+    if badge is None and _RAW_TOKEN_RE.fullmatch(scanned.strip()):
+        badge = BADGE_PREFIX + scanned.strip()
+    return badge
+
+
 @router.post("/qr-login", response_model=AuthOut)
 def qr_login(payload: QrLoginIn, session: Session = Depends(get_session)):
     """Log in with a QR badge instead of email+password.
@@ -120,9 +137,7 @@ def qr_login(payload: QrLoginIn, session: Session = Depends(get_session)):
     SHA-256 hash is stored, and a compromised badge must be revoked/rotated
     (Account → QR badge, or staff in Members).
     """
-    badge = parse_badge_payload(payload.token)
-    if badge is None and _RAW_TOKEN_RE.fullmatch(payload.token.strip()):
-        badge = BADGE_PREFIX + payload.token.strip()
+    badge = _badge_from_scanned(payload.token)
     user = (
         session.exec(select(User).where(User.qr_badge_hash == token_hash(badge))).first()
         if badge is not None
@@ -174,6 +189,88 @@ def logout(
     if token is not None:
         session.delete(token)
         session.commit()
+
+
+@router.post("/logoff-schedule", response_model=LogoffScheduleOut)
+def logoff_schedule(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Arm the kiosk logoff countdown on the PRESENTED token (Task 4).
+
+    Per-presented-token, exactly like logout: the user's other sessions are
+    unaffected. The SPA calls this when the user scans their own badge
+    ("log off in 30 seconds?"); calling it again re-arms from now — that
+    overwrite IS the same-badge-rescan-restarts-the-countdown semantics, no
+    special case. The deadline is clamped to the token's natural expiry so
+    an absurd grace cannot arm a countdown past the token's life. The
+    deadline is computed server-side and returned — the SPA counts down
+    from THIS timestamp, never from a client-side now+30 (clock skew and
+    request latency stay away from the truth).
+
+    Even if the browser dies mid-countdown, get_current_user enforces the
+    deadline lazily on the token's next use anywhere — the security property
+    never depends on the client.
+    """
+    token = session.get(AuthToken, token_hash(credentials.credentials))
+    # Module attribute at call time (not a from-import binding): tests
+    # monkeypatch app.security.LOGOFF_GRACE_SECONDS to 0 — the env clamp
+    # stays out of the way.
+    grace = security.LOGOFF_GRACE_SECONDS
+    deadline = min(utcnow() + timedelta(seconds=grace), token.expires_at)
+    token.logoff_deadline = deadline
+    session.add(token)
+    session.commit()
+    return LogoffScheduleOut(logoff_deadline=deadline, grace_seconds=grace)
+
+
+@router.post("/logoff-cancel", status_code=status.HTTP_204_NO_CONTENT)
+def logoff_cancel(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Disarm the kiosk logoff countdown on the presented token.
+
+    Idempotent ("the desired end state, not a client error" — logout's
+    doctrine): the SPA fires it on [Stay logged in], on a different-badge
+    scan before the account switch, and defensively; none of those should
+    be able to error. Note: after the deadline has passed the token is
+    already dead — cancel then 401s (a dead session cannot be resurrected).
+    """
+    token = session.get(AuthToken, token_hash(credentials.credentials))
+    token.logoff_deadline = None
+    session.add(token)
+    session.commit()
+
+
+@router.post("/qr-identify", response_model=QrIdentifyOut)
+def qr_identify(
+    payload: QrLoginIn,
+    user: User = Depends(get_current_user),
+):
+    """Is this scanned badge the CALLER's own? (Task 4)
+
+    The same-user question the kiosk flow needs before choosing
+    "logoff screen" vs "save-then-switch". A pure predicate: no session
+    minted, nothing armed, no writes of any kind — unlike qr-login (which
+    mints a full bearer session to answer a question that is usually
+    same-user, leaving a live credential to revoke). The switch flow still
+    uses qr-login exactly when it wants the new session.
+
+    Enumeration-safe: every non-matching input — garbage, a product
+    barcode, somebody else's badge — answers the same {same_user: false}; a
+    badgeless account answers false to everything. The one bit disclosed is
+    about the caller's OWN qr_badge_hash, nothing else.
+    """
+    badge = _badge_from_scanned(payload.token)
+    same_user = (
+        badge is not None
+        and user.qr_badge_hash is not None
+        and hmac.compare_digest(token_hash(badge), user.qr_badge_hash)
+    )
+    return QrIdentifyOut(same_user=same_user)
 
 
 @router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)

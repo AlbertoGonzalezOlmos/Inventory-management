@@ -45,6 +45,9 @@ def _legacy_db(path, *, with_must_change=True):
         "user_id INTEGER NOT NULL, expires_at DATETIME NOT NULL)"
     )
     conn.execute(
+        "INSERT INTO auth_tokens VALUES ('legacy-token-hash', 1, '2030-01-01')"
+    )
+    conn.execute(
         "INSERT INTO items VALUES (1, 'OLD-1', 'Legacy item', '', 'general', "
         "0, 0, '', NULL, '2026-01-01', '2026-01-01')"
     )
@@ -107,11 +110,12 @@ def test_migration_table_is_well_formed():
 
 
 def test_every_migration_the_app_currently_needs_is_listed():
-    """The table is the whole story: three columns, one index."""
+    """The table is the whole story: four columns, one index."""
     assert {(t, c) for t, c, _d, _e in COLUMN_MIGRATIONS} == {
         ("users", "must_change_password"),
         ("items", "barcode"),
         ("users", "qr_badge_hash"),
+        ("auth_tokens", "logoff_deadline"),
     }
     assert {t for t, _s in INDEX_MIGRATIONS} == {"auth_tokens"}
 
@@ -142,12 +146,18 @@ def test_all_migrations_land_on_a_pre_scanner_database(tmp_path, monkeypatch):
     _run(db, monkeypatch)
     assert {"barcode"} <= _columns(db, "items")
     assert {"qr_badge_hash"} <= _columns(db, "users")
+    assert {"logoff_deadline"} <= _columns(db, "auth_tokens")
     assert "ix_items_barcode" in _indexes(db, "items")
     assert "ix_users_qr_badge_hash" in _indexes(db, "users")
     assert "ix_auth_tokens_expires_at" in _indexes(db, "auth_tokens")
     # Existing rows survive, with the new column NULL:
     conn = sqlite3.connect(db)
     assert conn.execute("SELECT barcode FROM items WHERE id=1").fetchone()[0] is None
+    # …and the upgrade cannot log anyone off: the legacy token lands NULL
+    # (no countdown armed by deploying this).
+    assert conn.execute(
+        "SELECT logoff_deadline FROM auth_tokens WHERE token='legacy-token-hash'"
+    ).fetchone()[0] is None
     conn.close()
 
 

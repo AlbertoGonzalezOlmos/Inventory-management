@@ -162,6 +162,12 @@ class AuthToken(SQLModel, table=True):
     # (PLAN-v2 §8.2 N8). Existing databases get the index in _migrate_schema(),
     # because create_all() never alters a table it finds.
     expires_at: datetime = Field(sa_type=DateTime, index=True)
+    # Server-enforced kiosk logoff countdown (Task 4): when set, this token
+    # dies at this instant even if the browser vanishes mid-countdown —
+    # lazily enforced in get_current_user (reject-and-delete). NULL = no
+    # countdown armed. Per-TOKEN, not per-user: the user's other sessions
+    # are unaffected (the same principle as logout).
+    logoff_deadline: datetime | None = Field(default=None, sa_type=DateTime)
 
 
 class AppMeta(SQLModel, table=True):

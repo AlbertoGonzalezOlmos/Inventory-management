@@ -472,3 +472,104 @@ def test_seeded_admin_has_no_badge(client, admin_token):
             select(User).where(User.qr_badge_hash.is_not(None))  # type: ignore[attr-defined]
         ).all()
         assert badged == []
+
+
+# --- qr-identify (Task 4): "is this MY badge?" --------------------------------
+
+
+def _register_with_badge(client):
+    """Register (auto-badge, Task 2) → (email, token, badge payload)."""
+    email = unique_email()
+    r = client.post(
+        "/api/auth/register",
+        json={"name": "Ident User", "email": email, "password": "password123"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    return email, body["token"], body["qr_badge"]["payload"]
+
+
+def _identify(client, token, scanned):
+    return client.post("/api/auth/qr-identify", json={"token": scanned},
+                       headers=auth(token))
+
+
+def test_identify_own_badge_both_forms(client):
+    email, token, badge = _register_with_badge(client)
+    for presented in (badge, badge[len(BADGE_PREFIX):]):  # prefixed + raw
+        r = _identify(client, token, presented)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"same_user": True}
+
+
+def test_identify_other_users_badge_is_false(client):
+    _, token_a, _ = _register_with_badge(client)
+    _, _, badge_b = _register_with_badge(client)
+    r = _identify(client, token_a, badge_b)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"same_user": False}
+
+
+def test_identify_garbage_is_false_never_an_error(client):
+    _, token, _ = _register_with_badge(client)
+    for bad in ("not-a-badge", "5901234123457",  # a product EAN
+                BADGE_PREFIX + "short", BADGE_PREFIX + "!" * 43):
+        r = _identify(client, token, bad)
+        assert r.status_code == 200, (bad, r.text)
+        assert r.json() == {"same_user": False}  # uniform: no enumeration
+    # An empty payload is a client bug, caught by the shared schema's
+    # min_length (422) before the handler — same contract as qr-login.
+    assert _identify(client, token, "").status_code == 422
+
+
+def test_identify_badgeless_account_is_false(client, admin_token):
+    user, token = create_user(client, admin_token)
+    # Task 2: created accounts HAVE a badge — revoke it to get a badgeless one.
+    assert client.delete("/api/auth/qr-badge", headers=auth(token)).status_code == 204
+    other_email, _, other_badge = _register_with_badge(client)
+    r = _identify(client, token, other_badge)
+    assert r.json() == {"same_user": False}
+    # And its own (now-revoked) badge is no longer its own.
+    r = client.post("/api/auth/qr-badge", headers=auth(token))
+    assert r.status_code == 201
+    rotated = r.json()["payload"]
+    assert _identify(client, token, rotated).json() == {"same_user": True}
+
+
+def test_identify_follows_rotation(client):
+    email, token, creation_badge = _register_with_badge(client)
+    assert _identify(client, token, creation_badge).json() == {"same_user": True}
+    r = client.post("/api/auth/qr-badge", headers=auth(token))
+    assert r.status_code == 201
+    new_badge = r.json()["payload"]
+    assert _identify(client, token, creation_badge).json() == {"same_user": False}
+    assert _identify(client, token, new_badge).json() == {"same_user": True}
+
+
+def test_identify_has_no_side_effects(client):
+    from app.models import AuthToken
+    _, token, badge = _register_with_badge(client)
+    with Session(engine) as session:
+        before = len(session.exec(select(AuthToken)).all())
+    for _ in range(3):
+        assert _identify(client, token, badge).status_code == 200
+    with Session(engine) as session:
+        after = len(session.exec(select(AuthToken)).all())
+    assert before == after  # no session minted, nothing armed, nothing revoked
+
+
+def test_identify_response_is_exactly_one_bit(client):
+    _, token, badge = _register_with_badge(client)
+    r = _identify(client, token, badge)
+    assert set(r.json().keys()) == {"same_user"}  # no user fields, no material
+
+
+def test_identify_requires_auth(client, admin_token):
+    _, _, badge = _register_with_badge(client)
+    # Anonymous: 401, nothing probeable.
+    r = client.post("/api/auth/qr-identify", json={"token": badge})
+    assert r.status_code == 401
+    # Flagged account: 403 (not exempt — change the password first).
+    from tests.test_cart import _flagged_token
+    flagged = _flagged_token(client, admin_token)
+    assert _identify(client, flagged, badge).status_code == 403
