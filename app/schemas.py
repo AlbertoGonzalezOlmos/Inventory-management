@@ -151,7 +151,7 @@ class QrIdentifyOut(BaseModel):
 
 class LogoffScheduleOut(BaseModel):
     """The armed kiosk logoff countdown: the server-computed deadline (the
-    SPA counts down from THIS, never from a client-side now+30 — clock
+    SPA counts down from THIS, never from a client-side now+60 — clock
     skew and request latency are not allowed near the truth) and the
     configured grace, echoed for display."""
 
@@ -550,3 +550,25 @@ class CheckoutOut(BaseModel):
     purchase: PurchaseOut
     cart: CartOut
     skipped: list[int] = []
+
+
+class CalendarDayOut(BaseModel):
+    """One UTC day of the purchase-history calendar: what was PAID that day
+    (Σ price_cents × applied_qty over the day's receipt lines — the
+    clamp-not-veto rule, you don't pay for undelivered goods) and how many
+    orders landed on it."""
+
+    cents: int
+    count: int
+
+
+class OrderCalendarOut(BaseModel):
+    """A month of the caller's purchase history aggregated per UTC day (the
+    purchase-history calendar): `days` maps "YYYY-MM-DD" → {cents, count};
+    only days with at least one purchase appear (an empty month is `{}` +
+    0, never a 404). `total_cents` is the month's paid total."""
+
+    year: int
+    month: int
+    days: dict[str, CalendarDayOut]
+    total_cents: int

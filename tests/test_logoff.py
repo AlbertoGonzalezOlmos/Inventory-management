@@ -83,11 +83,11 @@ def test_schedule_arms_only_the_presented_token(client, admin_token):
     assert r.status_code == 200, r.text
     body = r.json()
     assert set(body.keys()) == {"logoff_deadline", "grace_seconds"}
-    assert body["grace_seconds"] == 30  # the default
+    assert body["grace_seconds"] == 60  # the default
     from app.models import utcnow
     deadline = _deadline_from_response(body)
-    delta = (utcnow() + timedelta(seconds=30) - deadline).total_seconds()
-    assert abs(delta) < 5, deadline  # server-computed now+30
+    delta = (utcnow() + timedelta(seconds=60) - deadline).total_seconds()
+    assert abs(delta) < 5, deadline  # server-computed now+60
 
     row_a = _get_token_row(token_a)
     row_b = _get_token_row(token_b)
@@ -144,7 +144,7 @@ def test_cancel_disarms_and_is_idempotent(client, admin_token, monkeypatch):
 
 def test_expired_deadline_401s_deletes_row_uniform_detail(client, admin_token):
     user, token = create_user(client, admin_token)
-    _schedule(client, token)  # default 30s: still armed, not passed
+    _schedule(client, token)  # default 60s: still armed, not passed
 
     # Push the deadline into the past directly (no sleep, no monkeypatch).
     from app.models import utcnow

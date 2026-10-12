@@ -91,7 +91,7 @@ On first run the app seeds:
 | `HCRM_DEV_ADMIN` | `1` (**this round**) | seed/ensure the well-known dev admin `admin`/`admin`. `0` restores the secure default (`admin@shop.local`/`changeme`, blocked until changed) |
 | `HCRM_ALLOW_INSECURE_BIND` | unset | let `scripts/run.sh` bind a non-loopback `HCRM_HOST` while `HCRM_DEV_ADMIN` is on (trusted networks only) |
 | `HCRM_SCRATCH` | unset | `1` makes `run.sh` boot on a throwaway database instead of `./data` |
-| `HCRM_LOGOFF_GRACE_SECONDS` | `30` | the kiosk logoff countdown (own-badge scan → “log off?”): the server-enforced deadline on the session token; clamped ≥ 1, read at import time |
+| `HCRM_LOGOFF_GRACE_SECONDS` | `60` | the kiosk logoff countdown (own-badge scan → “log off?”): the server-enforced deadline on the session token; clamped ≥ 1, read at import time |
 | `HCRM_BADGE_SECRET` | unset | the QR-badge derivation master secret (32+ chars). Unset ⇒ a 32-byte key is auto-generated to `data/badge.key` (0600, announced at boot). **Back the key file up with the database** (`scripts/backup_db.sh` copies it) — losing it disables badge re-viewing (logins unaffected). A set-but-too-short value refuses to boot |
 | `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` for production |
 | `FASTEMBED_CACHE_PATH` | `$TMPDIR/fastembed_cache` | where the embedding model is cached — note this is `/tmp` by default, so a tmp-cleaner wipes it and the next boot re-downloads ~80 MB |
@@ -132,7 +132,7 @@ that adds SIMD-accelerated vector search:
   on the page and it is looked up by exact identity and added to your
   purchase list; an unknown code opens a name+price intake screen with
   closest-match suggestions (members file a request for staff); scanning
-  your own QR badge offers a 30-second logoff countdown, another user's
+  your own QR badge offers a 60-second logoff countdown, another user's
   badge saves your list and switches accounts; anonymous scans are staged
   and assigned to whoever logs in next (see `docs/opticon-m10.md` §10)
 

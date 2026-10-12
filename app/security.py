@@ -164,7 +164,7 @@ def is_well_known_password(password: str) -> bool:
 # (app.security.LOGOFF_GRACE_SECONDS) at call time instead — the router
 # reads the module attribute precisely so that override works.
 LOGOFF_GRACE_SECONDS = max(
-    1, int(os.environ.get("HCRM_LOGOFF_GRACE_SECONDS", "30"))
+    1, int(os.environ.get("HCRM_LOGOFF_GRACE_SECONDS", "60"))
 )
 
 # A syntactically valid hash that never matches. Login verifies against this
