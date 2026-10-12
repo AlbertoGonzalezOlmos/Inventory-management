@@ -88,6 +88,42 @@ def format_session_token(token, show_token):
     return (token[:8] + "\u2026 (redacted — --show-token or --json "
             "for the full value)")
 
+
+def format_record_lines(record, show_token=False):
+    """The human-readable text lines for one scan record — the ONE place
+    text-mode output is shaped, so redaction cannot drift between branches
+    (Task 6 finding: the catalogue-match branch was the lone path printing
+    the code raw; a bare 43-char badge token routed as an opaque code CAN
+    reach it when it exact-matches an item SKU — pathological, but the
+    doctrine is "badge payloads redacted in EVERY print path"). Errors go
+    to stderr; that routing stays with the caller (emit)."""
+    code = redact_code(record.get("code", ""))
+    if record.get("error"):
+        return [f"[{code}] ERROR {record['error']}"]
+    if record.get("badge_login") is not None:
+        if record["badge_login"]:
+            u = record["user"]
+            return [f"[badge] logged in: {u['name']} <{u['email']}> ({u['role']})",
+                    f"        session token: "
+                    f"{format_session_token(record['token'], show_token)}"]
+        return [f"[badge] login failed: {record['error']}"]
+    if record.get("found"):
+        item = record["item"]
+        # The SKU echoes through redact_code too: in the pathological case
+        # (an item whose SKU is exactly a badge token) the SKU IS the
+        # credential — normal SKUs (not token-shaped) pass through as-is.
+        line = (f"[{code}] {item['name']} "
+                f"(SKU {redact_code(item['sku'])}, stock {item['stock']}, "
+                f"{item['price_cents'] / 100:.2f})"
+                f"  [match: {record['match']}]")
+        if record.get("new_stock") is not None:
+            line += f"  → stock {record['old_stock']} → {record['new_stock']}"
+        if record.get("clamped"):
+            line += "  (clamped at 0 — a sale beyond available stock)"
+        return [line]
+    verdict = record.get("verdict") or "no catalogue match"
+    return [f"[{code}] {verdict}"]
+
 # urllib's default is no timeout at all: a server that accepts the connection
 # and then stalls would block the scanner's reader thread forever (scans stop
 # being read, so the OS buffer overflows and they are lost). Bounded so a
@@ -377,32 +413,11 @@ def main():
                 safe["code"] = redact_code(safe["code"])
             print(json.dumps(safe), flush=True)
             return
-        if record.get("error"):
-            print(f"[{redact_code(record['code'])}] ERROR {record['error']}",
-                  file=sys.stderr, flush=True)
-        elif record.get("badge_login") is not None:
-            if record["badge_login"]:
-                u = record["user"]
-                print(f"[badge] logged in: {u['name']} <{u['email']}> ({u['role']})\n"
-                      f"        session token: "
-                      f"{format_session_token(record['token'], args.show_token)}",
-                      flush=True)
-            else:
-                print(f"[badge] login failed: {record['error']}", flush=True)
-        elif record["found"]:
-            item = record["item"]
-            line = (f"[{record['code']}] {item['name']} "
-                    f"(SKU {item['sku']}, stock {item['stock']}, "
-                    f"{item['price_cents'] / 100:.2f})"
-                    f"  [match: {record['match']}]")
-            if record.get("new_stock") is not None:
-                line += f"  → stock {record['old_stock']} → {record['new_stock']}"
-            if record.get("clamped"):
-                line += "  (clamped at 0 — a sale beyond available stock)"
-            print(line, flush=True)
-        else:
-            verdict = record.get("verdict") or "no catalogue match"
-            print(f"[{redact_code(record['code'])}] {verdict}", flush=True)
+        # Text mode: one module-level formatter owns every branch, so the
+        # redaction cannot drift (errors → stderr, as before).
+        stream = sys.stderr if record.get("error") else sys.stdout
+        for line in format_record_lines(record, show_token=args.show_token):
+            print(line, file=stream, flush=True)
 
     def call(path, method="GET", body=None):
         """api() with the P2 contract: one loud retry on 401 when --relogin."""

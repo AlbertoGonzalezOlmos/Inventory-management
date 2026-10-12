@@ -18,6 +18,12 @@ from app.qrbadge import badge_svg, new_badge_for
 from app.schemas import (MemberCreatedOut, MemberIn, MemberPatch, PurchaseOut,
                          QrBadgeOut, QrBadgeViewOut, UserOut)
 from app.security import hash_password, is_well_known_password
+# Cross-router helpers (function-local before the follow-up pass — hoisted:
+# no import cycle, auth/orders never import members):
+# - badge_view_response: the shared re-view envelope mapper (Task A)
+# - _history: the purchase-history assembler (Task C)
+from app.routers.auth import badge_view_response
+from app.routers.orders import _history
 
 router = APIRouter(prefix="/api/members", tags=["members"])
 
@@ -236,8 +242,6 @@ def view_member_badge(
     repeatable; a legacy badge auto-migrates on first view (migrated: true,
     the previously printed card dies). Regeneration stays the POST beside
     this endpoint; same privilege rule as account edits."""
-    from app.routers.auth import badge_view_response
-
     user = _get_manageable_member(session, user_id, staff)
     return badge_view_response(session, user)
 
@@ -253,8 +257,6 @@ def member_orders(
     """A member's purchase history (staff view) — same shape as
     GET /api/orders/mine, same privilege rule as account edits (staff never
     read an admin's history)."""
-    from app.routers.orders import _history
-
     user = _get_manageable_member(session, user_id, staff)
     return _history(session, user.id, limit, offset)
 
