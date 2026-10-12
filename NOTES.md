@@ -29,6 +29,21 @@
   snapshots, clamp-and-report stock (a sale beyond stock sells what is
   available — the receipt records both amounts), the cart cleared. The
   login page auto-detects badge scans anywhere (no click).
+- **Round 3 (scanner & counter UX)**: the global scan capture was rewritten
+  as a **pure, node-tested reducer** (`static/scancapture.js`, tests in
+  `tests/js/` + `tests/test_frontend_contract.py`): a scanner-speed burst is
+  held keystroke-by-keystroke and routed — the payload never lands in a
+  focused field — while human typing passes through natively after the
+  first character of a run (a 60 ms defer + a 400 ms warm window with
+  retract-on-burst-confirm; `SCAN_DEFER_MS > SCAN_MAX_GAP_MS` is the
+  load-bearing inequality, pinned twice). The own-badge logoff countdown
+  became 60 s. Login shows a “Hi &lt;name&gt;” banner then routes to the
+  catalogue. “Complete purchase” now goes to a `#/checkout` **review screen**
+  (the server cart in edit mode — no `confirm()`; the receipt modal is
+  exception-only, for skipped/clamped lines). The purchases tab gained a
+  **spend calendar** (per-UTC-day aggregates from
+  `GET /api/orders/calendar`, dots ramped green→red by the month's min/max,
+  month total below).
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.

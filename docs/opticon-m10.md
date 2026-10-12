@@ -490,11 +490,23 @@ One document-level keydown listener, always on — every view, behind
 modals, logged in or out:
 
 - **Timing**: a scan is a burst with < 50 ms inter-key gaps, ≥ 4
-  characters, terminated by Enter. Human typing pauses break the burst;
-  nothing is ever *eaten* — there is no `preventDefault` on buffered
-  characters, and a burst landing in a focused field is **restored** to
-  its pre-scan value when the Enter turns out to be a scan (held-key
-  repeats in inputs are therefore safe too).
+  characters, terminated by Enter. Since round 3 the burst is **fully
+  intercepted**: every scanner-speed keystroke is `preventDefault`-ed and
+  held the moment it arrives, so the payload never lands in a focused
+  field — a confirmed scan is routed and dropped, an aborted run is
+  **replayed** into the field (caret-preserving `setRangeText` for text
+  inputs, value-append for number/email, `selectedIndex`+`change` for
+  selects). Human typing is native after the first character of a run:
+  the first key is held for 60 ms (`SCAN_DEFER_MS`, re-armed on every
+  held key so a dead scanner cannot hang the state), and once a run is
+  proven human the element is **WARM** for 400 ms — keys land natively,
+  with a snapshot so a burst starting inside the window is retracted
+  (the one bounded artifact: one character, one frame). Guards: key
+  auto-repeat, IME composition, modifier shortcuts, non-printables,
+  pointer/focus/paste all flush-and-pass. The decision logic is a pure
+  reducer (`static/scancapture.js`, node-tested in `tests/js/`);
+  `SCAN_DEFER_MS (60) > SCAN_MAX_GAP_MS (50)` is the load-bearing
+  inequality, pinned in both test worlds. Nothing human is ever eaten.
 - **Shape gate** (routing only — the server classifies): `HCRM1:` +
   43 chars, or a bare 43-char token → badge; 4–14 digits or an
   opaque code containing a digit → barcode; anything else is ignored
