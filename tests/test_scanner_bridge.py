@@ -402,3 +402,30 @@ def test_session_token_is_redacted_by_default_and_full_with_show_token():
     assert "--show-token" in redacted and "--json" in redacted
     assert redacted.startswith(SESSION_TOKEN[:8])
     assert format_session_token(SESSION_TOKEN, show_token=True) == SESSION_TOKEN
+
+
+def test_found_branch_masks_a_badge_shaped_sku_match():
+    """Task-6 follow-up finding: the catalogue-match ("found") branch was the
+    lone text path printing the code RAW. A bare 43-char badge token (prefix
+    stripped by a scanner) routed as an opaque code CAN reach it when it
+    exact-matches an item's SKU — pathological, but the doctrine is "badge
+    payloads redacted in EVERY print path". The one module-level formatter
+    (format_record_lines) now owns every branch; this pins the found one."""
+    from scripts.scanner_bridge import format_record_lines
+
+    pathological = dict(LABEL, sku=BARE_TOKEN)   # SKU == a badge token, exactly
+    record = {"code": BARE_TOKEN, "found": True, "match": "sku",
+              "item": pathological}
+    lines = "\n".join(format_record_lines(record))
+    assert BARE_TOKEN not in lines          # never the raw credential
+    assert "badge token" in lines           # the masked form, like every branch
+    assert LABEL["name"] in lines           # the rest of the line is intact
+
+
+def test_found_branch_leaves_normal_barcodes_readable():
+    from scripts.scanner_bridge import format_record_lines
+    record = {"code": "8412345678905", "found": True, "match": "barcode",
+              "item": BOTTLE}
+    lines = "\n".join(format_record_lines(record))
+    assert "8412345678905" in lines         # barcodes are not secrets
+    assert "Insulated Water Bottle" in lines

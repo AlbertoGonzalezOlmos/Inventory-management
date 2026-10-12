@@ -483,6 +483,23 @@ Vue.createApp({
       this.badgeSvg = "";
       this.badgePayload = "";
       this.myRequests = [];
+      // Purchase history is the PREVIOUS user's data (follow-up finding 1):
+      // a shared-kiosk logout/switch must never show it, not even as a
+      // flash before the tab's lazy load.
+      this.myOrders = [];
+      this.lastCheckout = null;
+      this.expandedOrders = [];
+      this.ordersLimit = 10;
+      // Sensitive form fields die with the session too (follow-up finding
+      // 5): a password typed into the email-change form must not survive a
+      // logout for the next kiosk user to submit.
+      this.emailForm = { new_email: "", current_password: "" };
+      this.emailError = "";
+      this.emailOk = false;
+      this.phoneForm = { phone: "" };
+      this.phoneError = "";
+      this.pwForm = { current_password: "", new_password: "" };
+      this.loginForm = { email: "", password: "" };
     },
 
     async logout() {
@@ -790,14 +807,24 @@ Vue.createApp({
       }
     },
 
-    _handleBadgeView(r, title, subtitle) {
+    _handleBadgeView(r, title, subtitle, isSelf = true) {
       /* ONE envelope handler for the self re-view and the staff view
        * (Task A's status convention — raw mode, branch on the
-       * discriminator). Returns true when the modal was shown. */
+       * discriminator). Returns true when the modal was shown. The messages
+       * are parameterised for self vs staff (follow-up finding 4): "you"
+       * guidance would be wrong when staff are looking at a member. */
       if (r.status === 401) {
         // Raw mode skips the wrapper's global 401 cleanup by design — the
         // caller owns it (the Task-5 contract every raw site follows).
         this.handleSessionExpired();
+        return false;
+      }
+      if (r.status === 403) {
+        // Self: the flagged-account gate (change the password first).
+        // Staff: the manage rule (staff never view an admin's badge).
+        this.showToast(isSelf
+          ? "Change your password before using the scanner"
+          : "Cannot view this member's badge");
         return false;
       }
       if (r.status === 200 && r.data) {
@@ -814,7 +841,9 @@ Vue.createApp({
       }
       const s = r.data && r.data.detail && r.data.detail.status;
       if (r.status === 404 || s === "none") {
-        this.showToast("You have no badge yet — generate one below");
+        this.showToast(isSelf
+          ? "You have no badge yet — generate one below"
+          : "This member has no badge yet — they can generate one from their profile");
       } else if (s === "no_key") {
         this.showToast("Badge viewing is unavailable (no key) — logins are " +
                        "unaffected; ask an admin to restore the badge key");
@@ -834,11 +863,14 @@ Vue.createApp({
 
     async viewMemberBadge(member) {
       const r = await api("/members/" + member.id + "/qr-badge", { raw: true });
-      this._handleBadgeView(r, "QR badge — " + member.name, member.email);
+      this._handleBadgeView(r, "QR badge — " + member.name, member.email, false);
     },
 
     async loadMyOrders() {
-      if (!this.user || this.user.must_change_password) return;
+      if (!this.user || this.user.must_change_password) {
+        this.myOrders = [];   // never the previous user's history, even briefly
+        return;
+      }
       try {
         this.myOrders = await api("/orders/mine?limit=" + this.ordersLimit);
       } catch (_) { /* non-critical */ }
@@ -868,18 +900,25 @@ Vue.createApp({
                    `${this.formatPrice(this.purchaseTotalCents)})?`)) return;
       this.busy = true;   // also drives the button's :disabled binding —
       try {               // without it a double-click fires a second POST
-        const r = await api("/orders", { method: "POST", raw: true });
-        if (r.status === 401) { this.handleSessionExpired(); return; }
-        if (r.status === 201 && r.data) {
-          this.cart = r.data.cart;                    // the emptied cart, one payload
-          this.lastReceipt = r.data;                  // the result modal (§ _closeOverlays)
-          this.lastCheckout = r.data.purchase.id;     // "new" chip in history
-          await this.loadMyOrders();
-          this.expandedOrders = [r.data.purchase.id]; // pre-expand the receipt
-          return;
-        }
-        if (r.status === 400) { this.showToast("Cart is empty"); return; }
-        this.showToast("Checkout failed (" + r.status + ")");
+        // Serialized with every other cart mutation (the _cartOp chain —
+        // follow-up finding 3): a rapid add/scan racing the checkout can
+        // no longer land between the checkout's server-side read and the
+        // cart clear, desyncing the display (or worse, charging for a
+        // line the receipt never saw).
+        await this._cartOp(async () => {
+          const r = await api("/orders", { method: "POST", raw: true });
+          if (r.status === 401) { this.handleSessionExpired(); return; }
+          if (r.status === 201 && r.data) {
+            this.cart = r.data.cart;                    // the emptied cart, one payload
+            this.lastReceipt = r.data;                  // the result modal (§ _closeOverlays)
+            this.lastCheckout = r.data.purchase.id;     // "new" chip in history
+            await this.loadMyOrders();
+            this.expandedOrders = [r.data.purchase.id]; // pre-expand the receipt
+            return;
+          }
+          if (r.status === 400) { this.showToast("Cart is empty"); return; }
+          this.showToast("Checkout failed (" + r.status + ")");
+        });
       } finally {
         this.busy = false;
       }
