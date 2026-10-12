@@ -50,6 +50,13 @@ jobs:
           # forward-order run (or worse, a vacuous pass).
           test -n "$TESTS"
           uv run pytest -q $TESTS
+      # Round 3, Task B: the scan-capture reducer is pure JS, driven by
+      # node:test with an injected clock (no DOM, no sleeps). ubuntu-latest
+      # ships Node; a missing node fails the step (a gate that cannot run
+      # must fail, never skip). The glob form matters: `node --test <dir>` on
+      # current Node tries to load the directory as a module.
+      - name: scan-capture reducer (node --test)
+        run: node --test tests/js/*.test.mjs
       - name: repo hygiene (no runtime DB, no *copy* artifacts)
         run: |
           git status --porcelain
