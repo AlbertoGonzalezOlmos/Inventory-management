@@ -21,6 +21,7 @@ available and the receipt records the ordered amount (``qty``) alongside
 """
 
 import sqlite3
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
@@ -29,8 +30,10 @@ from app.database import engine, get_session
 from app.deps import get_current_user
 from app.models import CartItem, Item, Purchase, PurchaseLine, User, utcnow
 from app.schemas import (
+    CalendarDayOut,
     CartOut,
     CheckoutOut,
+    OrderCalendarOut,
     PurchaseLineOut,
     PurchaseOut,
 )
@@ -212,3 +215,72 @@ def my_orders(
 ):
     """The caller's purchase history, newest first, with lines embedded."""
     return _history(session, user.id, limit, offset)
+
+
+@router.get("/calendar", response_model=OrderCalendarOut)
+def order_calendar(
+    year: int | None = Query(default=None, ge=1, le=9999),
+    month: int | None = Query(default=None, ge=1, le=12),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """The caller's purchases for one month, aggregated per UTC day (the
+    purchase-history calendar).
+
+    `days` maps "YYYY-MM-DD" → {cents, count}: the PAID amount that day
+    (Σ price_cents × applied_qty over the day's receipt lines — the
+    clamp-not-veto rule: a shortfall sells what is available, and the
+    calendar shows what was paid, never what was requested) and the number
+    of orders that landed on it. Only days with at least one purchase
+    appear; an empty month is `days == {}` + `total_cents == 0`, not a 404.
+
+    Both parameters are optional and default to the current UTC month;
+    nonsense (month=0/13, a non-int) is a 422 before any query runs.
+    Member-self only — the same `get_current_user` gate as /mine, so the
+    requesting user sees their history and nobody else's.
+    """
+    now = utcnow()
+    y = now.year if year is None else year
+    m = now.month if month is None else month
+    # Half-open [first of month, first of next month) over the naive-UTC
+    # stored created_at — the same clock the receipts were written with.
+    start = datetime(y, m, 1)
+    # …except December of year 9999 (the validated max): "first of next
+    # month" would be year 10000, which datetime cannot represent — a
+    # validated input must never 500, so cap the half-open range at
+    # datetime.max there.
+    end = (datetime.max if (y, m) == (9999, 12)
+           else datetime(y + (m == 12), m % 12 + 1, 1))
+
+    rows = session.exec(
+        select(
+            Purchase.created_at,
+            Purchase.id,
+            PurchaseLine.price_cents,
+            PurchaseLine.applied_qty,
+        )
+        .join(PurchaseLine, PurchaseLine.purchase_id == Purchase.id)
+        .where(
+            Purchase.user_id == user.id,
+            Purchase.created_at >= start,
+            Purchase.created_at < end,
+        )
+    ).all()
+
+    days: dict[str, dict] = {}
+    total = 0
+    for created_at, purchase_id, price_cents, applied_qty in rows:
+        key = created_at.strftime("%Y-%m-%d")
+        bucket = days.setdefault(key, {"cents": 0, "ids": set()})
+        bucket["cents"] += price_cents * applied_qty
+        bucket["ids"].add(purchase_id)
+        total += price_cents * applied_qty
+    return OrderCalendarOut(
+        year=y,
+        month=m,
+        days={
+            key: CalendarDayOut(cents=bucket["cents"], count=len(bucket["ids"]))
+            for key, bucket in days.items()
+        },
+        total_cents=total,
+    )

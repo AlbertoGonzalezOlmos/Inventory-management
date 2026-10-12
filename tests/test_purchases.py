@@ -15,6 +15,7 @@ whole cart). Pinned here:
 """
 
 import threading
+from datetime import datetime
 
 from sqlmodel import Session, select
 
@@ -342,3 +343,128 @@ def test_gates(client, admin_token):
     flagged = _flagged_token(client, admin_token)
     assert _checkout(client, flagged).status_code == 403
     assert client.get("/api/orders/mine").status_code == 401
+    assert client.get("/api/orders/calendar").status_code == 401
+    assert client.get("/api/orders/calendar", headers=auth(flagged)).status_code == 403
+
+
+# --- the purchase-history calendar (round 3, Task A) ---------------------------
+# GET /api/orders/calendar: per-UTC-day aggregation of the caller's month —
+# the calendar's data source. Pinned here: the default month, UTC-day
+# bucketing with same-day summing, count = orders per day, per-user isolation,
+# the empty month, and the clamp rule (paid, not requested).
+
+
+def _calendar(client, token, **params):
+    qs = "&".join(f"{k}={v}" for k, v in params.items())
+    return client.get("/api/orders/calendar" + (("?" + qs) if qs else ""),
+                      headers=auth(token))
+
+
+def _set_purchase_time(purchase_id, when):
+    """Rewrite a receipt's created_at directly (the checkout endpoint only
+    ever writes utcnow) — the same write-into-the-row trick test_logoff
+    uses for deadlines. The stored value is naive UTC, like every
+    created_at in the schema."""
+    with Session(engine) as session:
+        purchase = session.get(Purchase, purchase_id)
+        purchase.created_at = when
+        session.add(purchase)
+        session.commit()
+
+
+def _buy(client, token, admin_token, sku, *, price_cents=100, stock=5, qty=1):
+    item = _create_item(client, admin_token, sku,
+                        price_cents=price_cents, stock=stock)
+    _add(client, token, item["id"], qty=qty)
+    return _checkout(client, token).json()["purchase"]
+
+
+def test_calendar_defaults_to_current_utc_month(client, admin_token):
+    user, token = create_user(client, admin_token)
+    purchase = _buy(client, token, admin_token, "CAL-NOW", price_cents=250)
+    # The checkout response's created_at is the SAME instant the row stores
+    # (one clock read, the checkout's own doctrine) — derive the expected
+    # bucket from it, not from a second now().
+    created = datetime.fromisoformat(purchase["created_at"])
+    today = created.strftime("%Y-%m-%d")
+
+    r = _calendar(client, token)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) == {"year", "month", "days", "total_cents"}
+    assert body["year"] == created.year and body["month"] == created.month
+    assert set(body["days"].keys()) == {today}
+    assert body["days"][today] == {"cents": 250, "count": 1}
+    assert body["total_cents"] == 250
+
+
+def test_calendar_buckets_by_utc_day_and_counts_orders(client, admin_token):
+    user, token = create_user(client, admin_token)
+    a = _buy(client, token, admin_token, "CAL-A", price_cents=250)
+    b = _buy(client, token, admin_token, "CAL-B", price_cents=99)
+    c = _buy(client, token, admin_token, "CAL-C", price_cents=400)
+    d = _buy(client, token, admin_token, "CAL-D", price_cents=777)
+    # The month's first and last instants are IN (half-open [1st, next 1st));
+    # the next month's first instant is OUT.
+    _set_purchase_time(a["id"], datetime(2026, 3, 1, 0, 0, 0))
+    _set_purchase_time(b["id"], datetime(2026, 3, 1, 15, 30, 0))  # same day
+    _set_purchase_time(c["id"], datetime(2026, 3, 31, 23, 59, 59))
+    _set_purchase_time(d["id"], datetime(2026, 4, 1, 0, 0, 0))    # excluded
+
+    r = _calendar(client, token, year=2026, month=3)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["year"] == 2026 and body["month"] == 3
+    assert set(body["days"].keys()) == {"2026-03-01", "2026-03-31"}
+    # Two orders on the 1st: cents summed, count 2 — not two keys, not 1.
+    assert body["days"]["2026-03-01"] == {"cents": 349, "count": 2}
+    assert body["days"]["2026-03-31"] == {"cents": 400, "count": 1}
+    assert body["total_cents"] == 749
+
+
+def test_calendar_validates_params(client, admin_token):
+    user, token = create_user(client, admin_token)
+    for qs in ("month=0", "month=13", "month=abc",
+               "year=0", "year=10000", "year=abc"):
+        r = client.get(f"/api/orders/calendar?{qs}", headers=auth(token))
+        assert r.status_code == 422, (qs, r.status_code, r.text)
+    # December of the validated max year: "first of next month" is year
+    # 10000, which datetime cannot represent. Must be a 200 (empty), never a 500.
+    r = _calendar(client, token, year=9999, month=12)
+    assert r.status_code == 200, r.text
+    assert r.json()["days"] == {}
+
+
+def test_calendar_is_per_user_and_empty_months_are_empty(client, admin_token):
+    a, a_token = create_user(client, admin_token)
+    b, b_token = create_user(client, admin_token)
+    _buy(client, a_token, admin_token, "CAL-ISO", price_cents=123)
+
+    # Another user's calendar never shows the purchase (current month,
+    # default params — the same read path the SPA uses)…
+    r = _calendar(client, b_token)
+    assert r.status_code == 200, r.text
+    assert r.json()["days"] == {}
+    assert r.json()["total_cents"] == 0
+    # …and a month with no purchases is {} + 0, not a 404.
+    r = _calendar(client, a_token, year=1999, month=1)
+    assert r.status_code == 200, r.text
+    assert r.json()["days"] == {}
+    assert r.json()["total_cents"] == 0
+
+
+def test_calendar_sums_paid_amounts_not_requested(client, admin_token):
+    """Clamp-not-veto reaches the calendar: a clamped line contributes
+    price × applied (what was paid), never price × qty (what was asked)."""
+    user, token = create_user(client, admin_token)
+    # Stock 1, qty 3, price 250 → the receipt records qty 3, applied 1.
+    purchase = _buy(client, token, admin_token, "CAL-CLAMP",
+                    price_cents=250, stock=1, qty=3)
+    assert purchase["total_cents"] == 250  # the premise: the sale clamped
+    assert purchase["lines"][0]["clamped"] is True
+
+    created = datetime.fromisoformat(purchase["created_at"])
+    today = created.strftime("%Y-%m-%d")
+    body = _calendar(client, token).json()
+    assert body["days"][today] == {"cents": 250, "count": 1}
+    assert body["total_cents"] == 250

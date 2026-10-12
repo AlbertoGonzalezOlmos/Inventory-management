@@ -18,7 +18,7 @@
   server-side, per-account purchase list — and at the counter can scan item
   barcodes (Opticon M-10) straight into it, take unknown codes through a
   name+price intake screen, and log in / switch accounts / log off with a
-  30-second countdown by scanning their QR badge (see
+  60-second countdown by scanning their QR badge (see
   `docs/opticon-m10.md` §10).
 - **Profiles & checkout (2026-10 round)**: each member has a tabbed profile
   (`#/account`): email change (password-gated, signs out other devices),
@@ -276,7 +276,7 @@ Inventory-management/
   localStorage list is imported once on first login). Quantities may exceed
   stock (a UI warning, never a clamp — coordinator decision); total at the
   bottom follows live prices. Checkout is a placeholder toast. Scans at the
-  counter (M-10 USB-HID) add to it; own-badge scans arm a 30 s logoff
+  counter (M-10 USB-HID) add to it; own-badge scans arm a 60 s logoff
   countdown, another badge saves-and-switches accounts
   (docs/opticon-m10.md §10).
 - Table view: click/Shift/Ctrl selection of rows *and* columns, CSV export

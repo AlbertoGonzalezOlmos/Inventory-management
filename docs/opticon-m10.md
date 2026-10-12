@@ -471,7 +471,7 @@ and warns that the backup is credential-bearing — restore both together.**
 ## 10. Counter & kiosk flows (the SPA's scan bus)
 
 Everything in §9 logs *in*; this section is what the M-10 does at the
-counter once somebody **is** logged in — scan-to-cart, the 30-second
+counter once somebody **is** logged in — scan-to-cart, the 60-second
 logoff countdown, and the badge-driven account switch. Transport: the
 unit's **USB-HID personality** (how it is configured today — no udev rule,
 no bridge; the SPA captures scans itself). The USB-COM bridge keeps its
@@ -516,7 +516,7 @@ Scanning a badge calls `POST /api/auth/qr-identify` — a pure predicate
 - **Own badge → the logoff countdown.** The SPA arms
   `POST /api/auth/logoff-schedule` and shows a full-screen overlay —
   “Log off *name*?” with a per-second countdown computed **from the
-  returned server deadline** (never a client-side `now + 30`). Buttons:
+  returned server deadline** (never a client-side `now + 60`). Buttons:
   *Stay logged in* (`/logoff-cancel`) and *Log off now* (logout). When
   the countdown reaches zero, the session is logged out — and this is
   **server-enforced**: the token carries `logoff_deadline`, and
@@ -524,7 +524,7 @@ Scanning a badge calls `POST /api/auth/qr-identify` — a pure predicate
   mid-countdown (close the tab, wait the grace period, and the token is
   dead on its next use anywhere). Re-scanning the same badge restarts
   the countdown (re-schedule); scanning a *different* badge cancels it
-  and switches. The grace is `HCRM_LOGOFF_GRACE_SECONDS` (default 30,
+  and switches. The grace is `HCRM_LOGOFF_GRACE_SECONDS` (default 60,
   clamped ≥ 1). No backdrop-click dismiss: leaving is deliberate.
 - **Different badge → save-then-switch.** The cart is server-side and
   per-account, so “save whatever had been done” is durable by

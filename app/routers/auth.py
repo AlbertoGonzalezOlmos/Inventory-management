@@ -263,12 +263,12 @@ def logoff_schedule(
 
     Per-presented-token, exactly like logout: the user's other sessions are
     unaffected. The SPA calls this when the user scans their own badge
-    ("log off in 30 seconds?"); calling it again re-arms from now — that
+    ("log off in 60 seconds?"); calling it again re-arms from now — that
     overwrite IS the same-badge-rescan-restarts-the-countdown semantics, no
     special case. The deadline is clamped to the token's natural expiry so
     an absurd grace cannot arm a countdown past the token's life. The
     deadline is computed server-side and returned — the SPA counts down
-    from THIS timestamp, never from a client-side now+30 (clock skew and
+    from THIS timestamp, never from a client-side now+60 (clock skew and
     request latency stay away from the truth).
 
     Even if the browser dies mid-countdown, get_current_user enforces the
