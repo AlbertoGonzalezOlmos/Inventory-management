@@ -128,9 +128,14 @@ that adds SIMD-accelerated vector search:
   of the same item (+ / − buttons), remove items, and the **total amount
   shown at the bottom** of the panel. The list is durable across browsers
   and survives the badge-driven account switch ("save then switch")
-- **Scan-to-cart (Opticon M-10, USB-HID)**: scan an item barcode anywhere
-  on the page and it is looked up by exact identity and added to your
-  purchase list; an unknown code opens a name+price intake screen with
+- **Scan-to-cart (Opticon M-10, USB-HID)**: scans are **fully intercepted
+  by the SPA's global capture** — a scanner-speed burst is held and routed
+  without the payload ever being typed into a focused field, while
+  human-speed typing passes through untouched (the decision logic is a
+  pure, node-tested reducer in `static/scancapture.js`; see
+  `docs/opticon-m10.md` §10.1). Scan an item barcode anywhere on the page
+  and it is looked up by exact identity and added to your purchase list;
+  an unknown code opens a name+price intake screen with
   closest-match suggestions (members file a request for staff); scanning
   your own QR badge offers a 60-second logoff countdown, another user's
   badge saves your list and switches accounts; anonymous scans are staged
@@ -183,14 +188,24 @@ that adds SIMD-accelerated vector search:
   are re-viewable forever from the profile tab and by staff — rotating the
   badge revokes the previous one, and only the SHA-256 hash is stored in
   the database.
+- **Login greeting**: every successful login — password, badge, register,
+  or the badge-driven account switch — shows a transient **“Hi &lt;name&gt;”**
+  banner and then lands on the catalogue.
 - **Member profile**: each member has a tabbed profile (`#/account`) —
   email change (password-gated, signs out other devices), phone, password,
   their re-viewable QR badge, **purchase history** (immutable receipts with
-  per-line applied/clamped), and their scan requests.
-- **Checkout**: "Complete purchase" turns the cart into an immutable order
+  per-line applied/clamped, plus a **spend calendar** of the month: one
+  coloured dot per purchase day, ramped light-green→red by that month's
+  min/max spend, with the month's total below —
+  `GET /api/orders/calendar`), and their scan requests.
+- **Checkout**: “Complete purchase” opens the **review screen**
+  (`#/checkout`) — no confirm dialog: quantities, removals and additions
+  are still possible there, and “Done” turns the cart into an immutable order
   (`POST /api/orders`): line snapshots at checkout-time prices, stock
   decremented with clamp-and-report (a sale beyond stock sells what is
-  available and the receipt says so), the cart cleared atomically.
+  available and the receipt says so), the cart cleared atomically — then
+  the receipt lands pre-expanded in purchase history (a receipt dialog
+  appears only when lines were skipped or clamped).
 - **Badge-security trade-off, stated plainly**: badge payloads are derived
   from a server-side secret, so a **leaked database alone still yields no
   printable badges** — but a **full server compromise (database *and* key
