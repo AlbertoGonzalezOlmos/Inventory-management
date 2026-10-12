@@ -883,6 +883,10 @@
 <script src="/vendor/vue.global.prod.js"></script>
 <script src="/vendor/jspdf.umd.min.js"></script>
 <script src="/vendor/jspdf.plugin.autotable.min.js"></script>
+<!-- scancapture.js MUST load before app.js: the adapter references the
+     HcrmScanCapture global at install time (a reversed order is a dead
+     scan bus — pinned in tests/test_frontend_contract.py). -->
+<script src="/scancapture.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

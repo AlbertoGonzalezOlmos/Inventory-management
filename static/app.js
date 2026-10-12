@@ -7,19 +7,10 @@ const PURCHASE_KEY = "hcrm_purchase";      // legacy: consumed once into the ser
 const STAGING_KEY = "hcrm_staged_scans";   // anonymous scans awaiting attribution (codes only)
 const PAGE_SIZE = 24;
 
-// Global HID scan capture (Task 5): the M-10 in USB-HID mode types a burst
-// of characters far faster than a human and ends with Enter.
-const SCAN_MAX_GAP_MS = 50;   // scanner inter-key is ~10-20 ms; humans sustain 80 ms+
-const SCAN_MIN_LEN = 4;
-// Routing-only shape gates (the SERVER classifies authoritatively — these
-// just pick the flow and keep garbage bursts from opening modals).
-const BADGE_FULL_RE = /^HCRM1:[A-Za-z0-9_-]{43}$/;
-const BADGE_RAW_RE = /^[A-Za-z0-9_-]{43}$/;          // prefix stripped by a bridge/scanner
-// Barcode-ish: GTIN digits, or an opaque label — which always carries at
-// least one digit (SKUs, internal codes). A digit-free word is typing, not
-// a scan: ignored before any server call.
-const BARCODE_DIGITS_RE = /^[0-9]{4,14}$/;
-const BARCODE_OPAQUE_RE = /^(?=.*\d)[A-Za-z0-9._/-]{4,64}$/;
+// Global HID scan capture (round 3, Task B): the decision logic — shape
+// gates, timing constants and the HOLD/ARMED/WARM state machine — lives in
+// static/scancapture.js (HcrmScanCapture, loaded BEFORE this file; pure,
+// node-tested in tests/js/). This file keeps only the staging cap.
 const STAGING_CAP = 50;
 
 /** Minimal fetch wrapper with token + error handling.
@@ -924,89 +915,207 @@ Vue.createApp({
       }
     },
 
-    /* ---------- global HID scan capture + the handleScan bus ---------- */
+    /* ---------- global HID scan capture + the handleScan bus ----------
+     * The DECISIONS live in the pure reducer (HcrmScanCapture.burstStep,
+     * static/scancapture.js — node-tested). This adapter owns everything
+     * DOM: preventDefault, the SCAN_DEFER_MS timer (re-armed on every held
+     * key), the per-type snapshots, the splice/replay write paths, and the
+     * routing bus (enqueueScan — completely unchanged). Invariants: a
+     * shape-gated burst never writes to any field; human typing is native
+     * after the first char of a run; sinks are untouched; unshaped bursts
+     * are inert; no keystroke is ever lost (prevented chars are routed or
+     * replayed). */
 
     installScanCapture() {
-      this._scanBuf = "";
-      this._scanLast = 0;
-      this._scanFieldRestore = null;   // {el, value} while a burst lands in a field
+      this._scanState = HcrmScanCapture.initialState();
+      this._scanSnap = null;       // the live per-type snapshot (retract/restore)
+      this._scanHeldEl = null;     // the element a prevented run must write back into
+      this._scanTimer = null;      // the SCAN_DEFER_MS human-verdict timer
       document.addEventListener("keydown", this._onScanKey, true);
-      this.scanCapture = true;         // renders data-scan-capture="on" (ui_check pin)
+      // A pointer, a focus change or a paste is a verifiable human signal:
+      // anything still held is human text and must be written before the
+      // world moves on (the reducer treats these like the timer).
+      document.addEventListener("pointerdown", this._onScanExternal, true);
+      document.addEventListener("focusin", this._onScanExternal, true);
+      document.addEventListener("paste", this._onScanExternal, true);
+      this.scanCapture = true;     // renders data-scan-capture="on" (ui_check pin)
     },
 
-    _scanReset() {
-      this._scanBuf = "";
-      this._scanFieldRestore = null;
+    _scanNow() {
+      return performance.now();
+    },
+
+    /** The adapter's target classification — decides the write path.
+     * "text": selection-API inputs + textarea (setRangeText splice).
+     * "value": number/email/date inputs — selectionStart THROWS there, so
+     *          writes are value-only (append + coercion check).
+     * "select": typeahead must never be prevented for humans — pass
+     *           through, snapshot selectedIndex, restore on armed runs.
+     * "plain": non-editable targets and contentEditable — pass-through,
+     *           never hijacked (nothing spliceable; nothing to protect). */
+    _scanClass(target) {
+      const t = target;
+      if (!t || !t.tagName) return "plain";
+      const tag = t.tagName;
+      if (tag === "TEXTAREA") return "text";
+      if (tag === "INPUT") {
+        const type = (t.getAttribute("type") || "text").toLowerCase();
+        if (["text", "search", "tel", "url", "password", ""].includes(type)) return "text";
+        if (["email", "number", "date", "time", "month", "week", "datetime-local"].includes(type)) {
+          return "value";
+        }
+        return "plain";   // checkbox, radio, file, button, submit, color, range…
+      }
+      if (tag === "SELECT") return "select";
+      return "plain";
     },
 
     _onScanKey(e) {
       // Sinks own their keys entirely (the login badge field and the visible
-      // scan field keep their dedicated Enter handlers — no double-fire).
+      // scan field keep their dedicated Enter handlers — no double-fire;
+      // focus changes into them flush via the focusin listener).
       if (e.target && e.target.closest && e.target.closest("[data-scan-sink]")) {
-        this._scanReset();
         return;
       }
-      if (e.ctrlKey || e.metaKey || e.altKey) { this._scanReset(); return; }
-      const now = performance.now();
-      const fast = (now - this._scanLast) < SCAN_MAX_GAP_MS;
-      this._scanLast = now;
-
-      if (e.key === "Enter") {
-        const buf = this._scanBuf;
-        const restore = this._scanFieldRestore;
-        this._scanReset();
-        if (buf.length >= SCAN_MIN_LEN) {
-          const kind = this._scanShape(buf);
-          if (kind) {
-            // A scan landed inside an editable field: restore the field's
-            // pre-burst value (no character eating — the burst was never
-            // the user's typing) and keep the Enter from doing anything else.
-            if (restore && restore.el) {
-              restore.el.value = restore.value;
-              restore.el.dispatchEvent(new Event("input", { bubbles: true }));
-            }
-            e.preventDefault();
-            this.enqueueScan(buf, kind);
-            return;
-          }
-        }
-        return; // unshaped burst: Enter keeps its default behaviour
-      }
-
-      if (e.key.length !== 1) { this._scanReset(); return; }
-
-      if (this._scanBuf.length === 0 || !fast) {
-        // Start a burst with THIS character. A scan's first key always
-        // arrives "slow" (the gap before a scan is unbounded), and a slow
-        // key mid-buffer is a human pause that ends the old burst — so the
-        // buffer surviving to Enter is exactly [first char] + [chars at
-        // <50 ms gaps]: the scanner signature. The first character MUST be
-        // buffered: an earlier revision skipped it ("ordinary first
-        // keystroke") and thereby corrupted EVERY global capture — a GTIN
-        // lost its first digit (a 422 misread, or worse, a different valid
-        // code) and a badge lost the 'H' of HCRM1: (no shape gate matched,
-        // so badge scans were silently ignored everywhere).
-        const t = e.target;
-        const editable = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"
-          || t.tagName === "SELECT" || t.isContentEditable);
-        this._scanReset();
-        // Snapshot BEFORE the character lands (keydown precedes input), so a
-        // shape-gated scan can restore the field to its exact pre-burst value.
-        if (editable) this._scanFieldRestore = { el: t, value: t.value };
-        this._scanBuf = e.key;
-        return;
-      }
-      this._scanBuf += e.key;
-      // Deliberately NO preventDefault: buffered characters behave normally
-      // (they land in a focused field if any); a shape-gated Enter restores
-      // the field afterwards. Nothing is ever eaten — not even held-key
-      // repeats in inputs.
+      this._scanEvent({
+        type: "key",
+        key: e.key,
+        t: this._scanNow(),
+        cls: this._scanClass(e.target),
+        repeat: e.repeat === true,
+        composing: e.isComposing === true || e.keyCode === 229,
+        mod: e.ctrlKey || e.metaKey || e.altKey,
+      }, e);
     },
 
-    _scanShape(code) {
-      if (BADGE_FULL_RE.test(code) || BADGE_RAW_RE.test(code)) return "badge";
-      if (BARCODE_DIGITS_RE.test(code) || BARCODE_OPAQUE_RE.test(code)) return "barcode";
-      return null; // not scan-shaped: ignore, no server call
+    _onScanExternal() {
+      this._scanEvent({ type: "external", t: this._scanNow() });
+    },
+
+    _scanEvent(ev, e) {
+      const result = HcrmScanCapture.burstStep(this._scanState, ev);
+      this._scanState = result.state;
+      for (const action of result.actions) this._applyScanAction(action, e);
+      // The defer timer: armed exactly while a run is pending, RE-ARMED on
+      // every key (a burst whose source dies mid-payload cannot hang the
+      // held chars) — and it can never fire mid-scan, because
+      // SCAN_DEFER_MS (60) > SCAN_MAX_GAP_MS (50) > scanner inter-key.
+      if (this._scanTimer) { clearTimeout(this._scanTimer); this._scanTimer = null; }
+      if (result.state.mode === "hold" || result.state.mode === "armed") {
+        this._scanTimer = setTimeout(
+          () => this._scanEvent({ type: "timer", t: this._scanNow() }),
+          HcrmScanCapture.SCAN_DEFER_MS);
+      }
+    },
+
+    _applyScanAction(action, e) {
+      switch (action.type) {
+        case "prevent":
+          if (e) {
+            e.preventDefault();
+            // The write-back target of the run being prevented (the focus
+            // cannot move mid-run without a focusin flush first).
+            this._scanHeldEl = e.target;
+          }
+          break;
+        case "native":
+          // No preventDefault: the key lands. The snapshot must be taken
+          // NOW — keydown precedes the input event it causes.
+          if (action.snap && e) this._scanTakeSnapshot(e.target);
+          break;
+        case "replay":
+        case "flush":
+          this._scanWriteBack(action.buffer, action.cls);
+          break;
+        case "restore":
+          this._scanRestoreSelect();
+          break;
+        case "retract":
+          this._scanRetract();
+          break;
+        case "route": {
+          if (e) e.preventDefault();
+          if (action.restore) this._scanRestoreSelect();
+          this._scanSnap = null;
+          this._scanHeldEl = null;
+          this.enqueueScan(action.code, action.kind);   // the unchanged bus
+          break;
+        }
+      }
+    },
+
+    _scanTakeSnapshot(target) {
+      // The pre-key state a retract/restore returns to.
+      const cls = this._scanClass(target);
+      if (cls === "text") {
+        let start = null, end = null;
+        try { start = target.selectionStart; end = target.selectionEnd; } catch (_) { /* not reachable for the text class */ }
+        this._scanSnap = { el: target, value: target.value, start, end };
+      } else if (cls === "value") {
+        this._scanSnap = { el: target, value: target.value };
+      } else if (cls === "select") {
+        this._scanSnap = { el: target, selectedIndex: target.selectedIndex };
+      }
+    },
+
+    _scanRetract() {
+      // A burst confirmed inside a warm window: undo the char(s) that
+      // landed natively since the snapshot (the bounded 1-char/1-frame
+      // artifact — the price of zero-latency human typing).
+      const snap = this._scanSnap;
+      this._scanSnap = null;
+      if (!snap || !snap.el || !snap.el.isConnected) return;
+      if (snap.start !== null && snap.start !== undefined) {
+        snap.el.value = snap.value;
+        try { snap.el.setSelectionRange(snap.start, snap.end === null ? snap.start : snap.end); } catch (_) { /* keep the value restore */ }
+        snap.el.dispatchEvent(new Event("input", { bubbles: true }));
+      } else if (snap.selectedIndex !== undefined) {
+        snap.el.selectedIndex = snap.selectedIndex;
+        snap.el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        snap.el.value = snap.value;
+        snap.el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    },
+
+    _scanRestoreSelect() {
+      // The select's undo path: v-model on <select> listens to `change`,
+      // not `input` — dispatching the wrong one leaves Vue's model desynced
+      // (a latent defect of the old restore code, fixed here).
+      const snap = this._scanSnap;
+      if (!snap || !snap.el || !snap.el.isConnected || snap.selectedIndex === undefined) return;
+      snap.el.selectedIndex = snap.selectedIndex;
+      snap.el.dispatchEvent(new Event("change", { bubbles: true }));
+    },
+
+    _scanWriteBack(buffer, cls) {
+      // The abort path: the held chars were never allowed to land — write
+      // them back now, caret-preserving and v-model-safe. The caret is
+      // RE-READ at replay time (the stale-snapshot fallback): if the
+      // element is gone, the buffer is dropped, never thrown elsewhere.
+      const el = this._scanHeldEl;
+      this._scanHeldEl = null;
+      if (!el || !el.isConnected) return;
+      if (cls === "text") {
+        let start = null, end = null;
+        try { start = el.selectionStart; end = el.selectionEnd; } catch (_) { /* not reachable for the text class */ }
+        if (start === null) {
+          el.value = (el.value || "") + buffer;
+        } else {
+          el.setRangeText(buffer, start, end === null ? start : end, "end");
+        }
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      } else if (cls === "value") {
+        // Value-only splice: no selection API on these inputs, so append —
+        // with the coercion check ("validate"): a browser rejects a value
+        // it cannot represent for the type (number/date) by emptying it.
+        const base = el.value || "";
+        el.value = base + buffer;
+        if (el.value === "" && (base + buffer) !== "") el.value = base;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      // select/plain: nothing to splice (the select's undo is the restore;
+      // plain targets never had their keys prevented)
     },
 
     scanFieldSubmit() {
@@ -1018,8 +1127,7 @@ Vue.createApp({
       const code = (this.scanFieldCode || "").trim();
       this.scanFieldCode = "";
       if (!code) return;
-      const kind = (BADGE_FULL_RE.test(code) || BADGE_RAW_RE.test(code))
-        ? "badge" : "barcode";
+      const kind = HcrmScanCapture.isBadgeShape(code) ? "badge" : "barcode";
       this.enqueueScan(code, kind);
     },
 
