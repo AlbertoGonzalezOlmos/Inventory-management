@@ -19,12 +19,22 @@
        must be observable at a counter) -->
   <div class="scan-pill" v-if="scanFlash">⌁ {{ scanFlash }}</div>
 
+  <!-- The login greeting (round 3, Task C): "Hi <name>" after every
+       session entry (password, badge, register, switch), then the catalogue
+       route. A dedicated banner, NOT a toast — afterLogin's legacy-cart
+       import and staged-scan replay TOAST and would clobber it within
+       milliseconds on the returning-kiosk paths. Auto-dismisses after a
+       few seconds; a click dismisses it early. -->
+  <div class="greeting" v-if="greeting" role="status" @click="dismissGreeting">
+    {{ greeting }}
+  </div>
+
   <!-- ================= Header / navigation ================= -->
   <header class="topbar">
     <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">HCRM <span>Shop</span></a>
 
     <nav v-if="user" class="nav">
-      <a href="#/catalogue" :class="{active: currentView === 'catalogue'}">Catalogue</a>
+      <a href="#/catalogue" :class="{active: currentView === 'catalogue' || currentView === 'checkout'}">Catalogue</a>
       <a v-if="isStaff" href="#/table" :class="{active: currentView === 'table'}">Table</a>
       <a v-if="isStaff" href="#/admin" :class="{active: currentView === 'admin'}">Admin</a>
       <a href="#/account" :class="{active: currentView === 'account'}">My profile</a>
@@ -120,8 +130,13 @@
       <p class="muted">Already a member? <a href="#/login">Log in</a></p>
     </section>
 
-    <!-- ================= Catalogue (browse + select) ================= -->
-    <section v-else-if="currentView === 'catalogue'" class="catalogue-layout">
+    <!-- ============ Catalogue (browse + select) / Checkout review ============
+         Round 3, item 4: #/checkout renders the SAME section with the aside
+         swapped to the review panel — one grid, one sentinel, the
+         IntersectionObserver wiring untouched, and "add" stays the literal
+         click-a-catalogue-item path (plus global scan-to-add). -->
+    <section v-else-if="currentView === 'catalogue' || currentView === 'checkout'"
+             class="catalogue-layout">
       <div class="catalogue-main">
         <!-- The visible scan field: explicit operator intent, no heuristics —
              also the deterministic path for payloads the global capture
@@ -198,8 +213,51 @@
         <p v-if="loading" class="muted loading-note">Loading…</p>
       </div>
 
-        <!-- Purchase list sidebar (the server-side cart: durable per user) -->
-      <aside class="selection-panel">
+        <!-- The checkout review panel (round 3, item 4): the cart in edit
+             mode. The SERVER cart is the review state — every control is an
+             existing committed mutation (plus setLineQty's absolute PATCH),
+             so edits here are exactly as durable as in the sidebar. -->
+      <aside class="selection-panel review-panel" v-if="currentView === 'checkout'">
+        <h2>Review your purchase</h2>
+        <p v-if="purchase.length === 0" class="muted">
+          Your purchase list is empty — add items from the catalogue or by
+          scanning them.
+        </p>
+        <ul class="selection-list">
+          <li v-for="entry in purchase" :key="entry.item.id">
+            <div class="sel-info">
+              <span>{{ entry.item.name }}</span>
+              <small :class="{ 'stock-warn': entry.qty > entry.item.stock }">
+                {{ formatPrice(entry.item.price_cents) }} each
+                <template v-if="entry.qty > entry.item.stock">— only {{ entry.item.stock }} in stock</template>
+              </small>
+              <small>{{ formatPrice(entry.line_total_cents) }}</small>
+            </div>
+            <div class="sel-controls">
+              <button class="btn tiny" @click="decPurchase(entry.item.id)" :disabled="entry.qty <= 1">−</button>
+              <input class="qty-input" type="number" min="1" :value="entry.qty"
+                     title="Set the quantity (0 removes the line)"
+                     @change="setLineQty(entry.item.id, $event)" />
+              <button class="btn tiny" @click="incPurchase(entry.item.id)">+</button>
+              <button class="btn tiny danger" @click="removeFromPurchase(entry.item.id)">✕</button>
+            </div>
+          </li>
+        </ul>
+        <div class="selection-total" v-if="purchase.length">
+          <span>Total</span>
+          <strong>{{ formatPrice(purchaseTotalCents) }}</strong>
+        </div>
+        <div class="selection-actions">
+          <button class="btn ghost block" @click="keepShopping">Keep shopping</button>
+          <button class="btn block" :disabled="busy || purchase.length === 0"
+                  @click="donePurchase">Done — complete purchase</button>
+        </div>
+        <p class="muted scan-hint">You can still scan items to add them —
+          quantity changes here are saved as you make them.</p>
+      </aside>
+
+      <!-- Purchase list sidebar (the server-side cart: durable per user) -->
+      <aside class="selection-panel" v-else>
         <h2>Purchase list</h2>
         <p v-if="purchase.length === 0" class="muted">
           Click items in the catalogue to add them to your purchase list.
@@ -224,7 +282,7 @@
         </ul>
         <div class="selection-actions" v-if="purchase.length">
           <button class="btn ghost block" @click="clearPurchase">Clear list</button>
-          <button class="btn block" :disabled="busy" @click="completePurchase">Complete purchase</button>
+          <button class="btn block" :disabled="busy" @click="goToCheckout">Complete purchase</button>
         </div>
         <div class="selection-total" v-if="purchase.length">
           <span>Total</span>
@@ -325,42 +383,79 @@
         <div v-if="badgeSvg" class="qr-badge" v-html="badgeSvg"></div>
       </div>
 
-      <!-- Purchase history -->
+      <!-- Purchase history (round 3, item 5: list left, spend calendar
+           right — the two-column layout collapses under 900 px) -->
       <div v-else-if="profileTab === 'purchases'">
         <h2>Purchase history</h2>
-        <p class="muted" v-if="myOrders.length === 0">
-          Nothing purchased yet — complete a purchase from your list in the catalogue.
-        </p>
-        <div v-for="order in myOrders" :key="order.id" class="order-card">
-          <div class="order-head" @click="toggleOrder(order.id)">
-            <span><strong>#{{ order.id }}</strong> · {{ formatDate(order.created_at) }}
-              · {{ order.lines.length }} item(s)</span>
-            <span>
-              <span v-if="order.id === lastCheckout" class="status-chip resolved">new</span>
-              <strong>{{ formatPrice(order.total_cents) }}</strong>
-            </span>
+        <div class="history-layout">
+          <div class="history-list">
+            <p class="muted" v-if="myOrders.length === 0">
+              Nothing purchased yet — complete a purchase from your list in the catalogue.
+            </p>
+            <div v-for="order in myOrders" :key="order.id" class="order-card">
+              <div class="order-head" @click="toggleOrder(order.id)">
+                <span><strong>#{{ order.id }}</strong> · {{ formatDate(order.created_at) }}
+                  · {{ order.lines.length }} item(s)</span>
+                <span>
+                  <span v-if="order.id === lastCheckout" class="status-chip resolved">new</span>
+                  <strong>{{ formatPrice(order.total_cents) }}</strong>
+                </span>
+              </div>
+              <table class="table" v-if="expandedOrders.includes(order.id)">
+                <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+                <tbody>
+                  <tr v-for="line in order.lines" :key="line.item_id">
+                    <td>{{ line.name }}<br /><small class="muted">SKU {{ line.sku }}</small></td>
+                    <td>
+                      <template v-if="line.clamped">
+                        <span class="status-chip open" :title="'requested ' + line.qty + ', only ' + line.applied_qty + ' in stock'">
+                          {{ line.applied_qty }} of {{ line.qty }}
+                        </span>
+                      </template>
+                      <template v-else>{{ line.qty }}</template>
+                    </td>
+                    <td>{{ formatPrice(line.price_cents) }}</td>
+                    <td>{{ formatPrice(line.line_total_cents) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <button v-if="myOrders.length >= ordersLimit && ordersLimit < 100" class="btn ghost block"
+                    @click="loadMoreOrders">Load more</button>
           </div>
-          <table class="table" v-if="expandedOrders.includes(order.id)">
-            <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>
-              <tr v-for="line in order.lines" :key="line.item_id">
-                <td>{{ line.name }}<br /><small class="muted">SKU {{ line.sku }}</small></td>
-                <td>
-                  <template v-if="line.clamped">
-                    <span class="status-chip open" :title="'requested ' + line.qty + ', only ' + line.applied_qty + ' in stock'">
-                      {{ line.applied_qty }} of {{ line.qty }}
-                    </span>
-                  </template>
-                  <template v-else>{{ line.qty }}</template>
-                </td>
-                <td>{{ formatPrice(line.price_cents) }}</td>
-                <td>{{ formatPrice(line.line_total_cents) }}</td>
-              </tr>
-            </tbody>
-          </table>
+
+          <!-- The spend calendar (round 3, item 5): one coloured dot per
+               purchase day, ramped by that month's min/max spend (the
+               min-spend day — the first purchase — is light green); the
+               month's total below. UTC days throughout, matching the
+               endpoint's bucketing and the list's date labels. -->
+          <aside class="calendar-card">
+            <div class="cal-head">
+              <button class="btn tiny" :disabled="calLoading || !calYear"
+                      @click="shiftCalendarMonth(-1)" title="Previous month">‹</button>
+              <strong>{{ calendarMonthLabel || "Calendar" }}</strong>
+              <button class="btn tiny" :disabled="calLoading || !calYear"
+                      @click="shiftCalendarMonth(1)" title="Next month">›</button>
+            </div>
+            <div class="cal-grid cal-weekdays">
+              <span v-for="w in calendarWeekdays" :key="w">{{ w }}</span>
+            </div>
+            <div class="cal-grid">
+              <div v-for="(cell, i) in calendarCells" :key="i"
+                   class="cal-day" :class="{ 'cal-today': cell && isCalendarToday(cell.key) }">
+                <template v-if="cell">
+                  <span class="cal-num">{{ cell.day }}</span>
+                  <span v-if="calendarDay(cell.key)" class="cal-dot"
+                        :style="{ background: dayColor(calendarDay(cell.key).cents) }"
+                        :title="calendarDay(cell.key).count + ' purchase(s) · ' + formatPrice(calendarDay(cell.key).cents)"></span>
+                </template>
+              </div>
+            </div>
+            <div class="cal-total">
+              {{ calendarTotalLabel }}: <strong>{{ formatPrice(calTotalCents) }}</strong>
+            </div>
+          </aside>
         </div>
-        <button v-if="myOrders.length >= ordersLimit && ordersLimit < 100" class="btn ghost block"
-                @click="loadMoreOrders">Load more</button>
       </div>
 
       <!-- My scan requests: existing block, moved -->

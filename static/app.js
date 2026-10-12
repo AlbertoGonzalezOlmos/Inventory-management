@@ -107,6 +107,7 @@ Vue.createApp({
       // auth forms
       loginForm: { email: "", password: "" },
       loginError: "",
+      greeting: "",   // the "Hi <name>" login banner (round 3, Task C)
       badgeCode: "",  // the collapsed manual fallback field (Task E: the
                        // global capture is the primary no-click path)
       showBadgeField: false,  // "Use a badge code instead" toggle
@@ -186,6 +187,16 @@ Vue.createApp({
       lastCheckout: null,  // the just-completed order id ("new" chip + pre-expand)
       lastReceipt: null,   // the checkout result modal { purchase, skipped }
 
+      // Round 3, Task C — the purchase-history calendar (purchases tab):
+      // per-UTC-day aggregates from GET /api/orders/calendar. year/month are
+      // the ENDPOINT's truth (it defaults to the current UTC month); 0 = not
+      // loaded. days maps "YYYY-MM-DD" → {cents, count}; only purchase days.
+      calYear: 0,
+      calMonth: 0,
+      calDays: {},
+      calTotalCents: 0,
+      calLoading: false,
+
       // members: badge being displayed for printing
       memberBadge: null,  // { id, name, email, svg }
 
@@ -218,6 +229,9 @@ Vue.createApp({
       if (this.route.startsWith("#/admin") && this.isStaff) return "admin";
       if (this.route.startsWith("#/account")) return "account";
       if (this.route.startsWith("#/table") && this.isStaff) return "table";
+      // The checkout review screen (round 3, item 4): the catalogue section
+      // with the aside swapped to the review panel.
+      if (this.route.startsWith("#/checkout")) return "checkout";
       return "catalogue";
     },
     purchaseTotalCents() {
@@ -231,6 +245,52 @@ Vue.createApp({
     },
     purchaseCount() {
       return this.cart.total_qty;
+    },
+
+    /* ---------- Round 3, Task C: the purchase-history calendar ---------- */
+    calendarCells() {
+      // A Date.UTC month matrix, Monday-first, with leading blanks — the
+      // keys are UTC dates ("YYYY-MM-DD") so they can never drift from the
+      // endpoint's UTC-day bucketing (a local-midnight construction shifts
+      // keys for users west of UTC).
+      if (!this.calYear || !this.calMonth) return [];
+      const y = this.calYear, m = this.calMonth - 1;
+      const daysInMonth = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+      let lead = new Date(Date.UTC(y, m, 1)).getUTCDay() - 1;   // Monday = 0
+      if (lead < 0) lead += 7;
+      const cells = [];
+      for (let i = 0; i < lead; i++) cells.push(null);
+      const pad = (n) => String(n).padStart(2, "0");
+      for (let d = 1; d <= daysInMonth; d++) {
+        cells.push({ day: d, key: y + "-" + pad(m + 1) + "-" + pad(d) });
+      }
+      return cells;
+    },
+    calendarWeekdays() {
+      // 2024-01-01 was a Monday: UTC-stable short labels, Monday-first.
+      return Array.from({ length: 7 }, (_, i) =>
+        new Date(Date.UTC(2024, 0, 1 + i))
+          .toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }));
+    },
+    calendarMinMax() {
+      // min/max over the month's PER-DAY totals (one dot = one value).
+      const vals = Object.values(this.calDays).map((d) => d.cents);
+      if (!vals.length) return { min: 0, max: 0 };
+      return { min: Math.min(...vals), max: Math.max(...vals) };
+    },
+    calIsCurrent() {
+      if (!this.calYear) return false;
+      const now = new Date();
+      return this.calYear === now.getUTCFullYear()
+        && this.calMonth === now.getUTCMonth() + 1;
+    },
+    calendarMonthLabel() {
+      if (!this.calYear) return "";
+      return new Date(Date.UTC(this.calYear, this.calMonth - 1, 1))
+        .toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+    },
+    calendarTotalLabel() {
+      return this.calIsCurrent ? "Spent this month" : "Spent in " + this.calendarMonthLabel;
     },
     // The intake modal's suggestion groups (labelled pick-lists).
     intakeGroups() {
@@ -309,7 +369,7 @@ Vue.createApp({
     badgePrint(on) { this._printBadge(!!on); },
     memberBadge(on) { this._printBadge(!!on); },
     currentView(view) {
-      if (view === "catalogue") {
+      if (view === "catalogue" || view === "checkout") {
         if (this.items.length === 0) this.reloadItems();
         // The sentinel is recreated when the catalogue section re-mounts,
         // so the observer must be (re)attached every time we come back.
@@ -444,7 +504,8 @@ Vue.createApp({
                      "private. Print it now while you have it.",
           };
         }
-        this.showToast("Welcome, " + data.user.name + "!");
+        // No "Welcome" toast here: the greeting banner from saveSession
+        // (via afterLogin) carries it — a second toast would overwrite it.
       } catch (e) {
         this.registerError = e.message;
       } finally {
@@ -456,6 +517,23 @@ Vue.createApp({
       localStorage.setItem(TOKEN_KEY, token);
       localStorage.setItem(USER_KEY, JSON.stringify(user));
       this.user = user;
+      // The login greeting (round 3, Task C): set at the ONE funnel every
+      // session entry passes through (password, badge, register, switch).
+      // Deliberately a banner, not a toast — afterLogin's legacy-cart import
+      // and staged-scan replay TOAST, and would clobber it within
+      // milliseconds on exactly the returning-kiosk paths where it matters.
+      // It is NOT cleared in _closeOverlays (switchAccount calls saveSession
+      // and _closeOverlays on adjacent lines — clearing there would kill it
+      // on the one path that most needs it); logout and session-expiry clear
+      // it explicitly, and the next saveSession overwrites it.
+      this.greeting = "Hi " + user.name;
+      clearTimeout(this._greetingTimer);
+      this._greetingTimer = setTimeout(() => (this.greeting = ""), 4000);
+    },
+
+    dismissGreeting() {
+      clearTimeout(this._greetingTimer);
+      this.greeting = "";
     },
 
     _closeOverlays() {
@@ -481,6 +559,12 @@ Vue.createApp({
       this.lastCheckout = null;
       this.expandedOrders = [];
       this.ordersLimit = 10;
+      // The calendar is the previous user's data too (the myOrders rule):
+      // never let one user's spend dots survive into the next session's tab.
+      this.calYear = 0;
+      this.calMonth = 0;
+      this.calDays = {};
+      this.calTotalCents = 0;
       // Sensitive form fields die with the session too (follow-up finding
       // 5): a password typed into the email-change form must not survive a
       // logout for the next kiosk user to submit.
@@ -495,6 +579,7 @@ Vue.createApp({
 
     async logout() {
       this.clearLogoff();
+      this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
       try { await api("/auth/logout", { method: "POST" }); } catch (_) { /* ignore */ }
       localStorage.removeItem(TOKEN_KEY);
@@ -753,7 +838,10 @@ Vue.createApp({
 
     selectProfileTab(tab) {
       this.profileTab = tab;
-      if (tab === "purchases") this.loadMyOrders();
+      if (tab === "purchases") {
+        this.loadMyOrders();
+        this.loadCalendar();   // round 3, Task C: the spend calendar's data
+      }
       if (tab === "requests") this.loadMyRequests();
       if (tab === "profile")
         this.phoneForm.phone = (this.user && this.user.phone) || "";
@@ -867,6 +955,63 @@ Vue.createApp({
       } catch (_) { /* non-critical */ }
     },
 
+    /* ---------- Round 3, Task C: the spend calendar's data ---------- */
+
+    async loadCalendar(year, month) {
+      // Bare call = the endpoint's default (the current UTC month), and the
+      // RESPONSE's year/month is the truth the grid renders — the keys and
+      // the bucketing can never disagree.
+      if (!this.user || this.user.must_change_password) {
+        this.calYear = 0; this.calMonth = 0;
+        this.calDays = {}; this.calTotalCents = 0;
+        return;
+      }
+      this.calLoading = true;
+      try {
+        const params = new URLSearchParams();
+        if (year !== undefined) { params.set("year", year); params.set("month", month); }
+        const qs = params.toString();
+        const data = await api("/orders/calendar" + (qs ? "?" + qs : ""));
+        this.calYear = data.year;
+        this.calMonth = data.month;
+        this.calDays = data.days || {};
+        this.calTotalCents = data.total_cents || 0;
+      } catch (_) {
+        // non-critical: an empty calendar, never a broken tab
+        this.calDays = {};
+        this.calTotalCents = 0;
+      } finally {
+        this.calLoading = false;
+      }
+    },
+
+    shiftCalendarMonth(delta) {
+      let y = this.calYear, m = this.calMonth + delta;
+      if (m < 1) { m = 12; y -= 1; }
+      if (m > 12) { m = 1; y += 1; }
+      this.loadCalendar(y, m);
+    },
+
+    calendarDay(key) {
+      return this.calDays[key] || null;
+    },
+
+    dayColor(cents) {
+      // The month's min-max ramp: t=0 (the min-spend day — the first
+      // purchase of a single-purchase month included) is light green,
+      // t=1 is red; the hue path runs through yellow/orange, which reads
+      // as a heat ramp (a 2-stop RGB lerp goes muddy brown in the middle).
+      const { min, max } = this.calendarMinMax;
+      const t = max > min ? (cents - min) / (max - min) : 0;
+      return "hsl(" + Math.round(120 * (1 - t)) + ", 73%, " +
+        Math.round(75 - 25 * t) + "%)";
+    },
+
+    isCalendarToday(key) {
+      // UTC today — the same clock the endpoint buckets by.
+      return key === new Date().toISOString().slice(0, 10);
+    },
+
     async loadMoreOrders() {
       // The single pagination knob (Task D spec): one method, one bound —
       // capped at the backend's Query(le=100): asking for more would 422
@@ -882,29 +1027,86 @@ Vue.createApp({
         : this.expandedOrders.concat([id]);
     },
 
-    async completePurchase() {
+    /* ---------- Round 3, Task C: the checkout review screen ----------
+     * No confirm() anywhere: the review screen IS the confirmation. The
+     * server cart is the review state — every edit is an ordinary committed
+     * _cartOp mutation, exactly as durable as in the sidebar. */
+
+    goToCheckout() {
+      // Both assignments in one synchronous turn so the hashchange handler's
+      // `navigated` guard stays false and does not fire _closeOverlays.
+      this.route = "#/checkout";
+      location.hash = "#/checkout";
+    },
+
+    keepShopping() {
+      // The cart is durable server-side — leaving needs no save, no prompt.
+      this.route = "#/catalogue";
+      location.hash = "#/catalogue";
+    },
+
+    setLineQty(id, ev) {
+      // The review screen's direct quantity box: an ABSOLUTE set via PATCH
+      // (qty 0 removes the line — the endpoint's semantics). Invalid input
+      // or a rejected edit reverts the field to the server truth.
+      const el = ev && ev.target;
+      const raw = el ? el.value : ev;
+      return this._cartOp(async () => {
+        const n = parseInt(raw, 10);
+        if (!Number.isFinite(n) || !Number.isInteger(Number(raw)) || n < 0) {
+          this.showToast("Enter a whole number of units (0 removes the line)");
+          await this.loadCart();
+        } else {
+          try {
+            this.cart = await api("/cart/items/" + id, {
+              method: "PATCH", body: { qty: n },
+            });
+            if (n > 0) this._stockWarn(this.cart.lines.find(l => l.item.id === id));
+          } catch (e) {
+            this.showToast(e.message);   // 422 (qty > 10000), 404 (line gone)
+            await this.loadCart();
+          }
+        }
+        // Re-sync the box explicitly: Vue's :value binding only re-patches
+        // when the qty CHANGED, so a rejected edit that leaves the server
+        // qty as displayed would keep the typed garbage visible.
+        const line = this.cart.lines.find(l => l.item.id === id);
+        if (el && el.isConnected && line) el.value = line.qty;
+      });
+    },
+
+    async donePurchase() {
       if (this.busy) return;
-      // Checkout is consequential (stock decrements, the cart empties, the
-      // receipt is immutable) — confirm, like every other consequential
-      // action in this SPA (deleteItem, deleteMember, revoke badge).
-      if (!confirm(`Complete this purchase (${this.cart.total_qty} item(s), ` +
-                   `${this.formatPrice(this.purchaseTotalCents)})?`)) return;
+      if (!this.purchase.length) { this.showToast("Your purchase list is empty"); return; }
       this.busy = true;   // also drives the button's :disabled binding —
       try {               // without it a double-click fires a second POST
-        // Serialized with every other cart mutation (the _cartOp chain —
-        // follow-up finding 3): a rapid add/scan racing the checkout can
-        // no longer land between the checkout's server-side read and the
-        // cart clear, desyncing the display (or worse, charging for a
-        // line the receipt never saw).
+        // Serialized with every other cart mutation (the _cartOp chain):
+        // a scan landing mid-checkout cannot interleave between the
+        // server-side cart read and the cart clear.
         await this._cartOp(async () => {
           const r = await api("/orders", { method: "POST", raw: true });
           if (r.status === 401) { this.handleSessionExpired(); return; }
           if (r.status === 201 && r.data) {
             this.cart = r.data.cart;                    // the emptied cart, one payload
-            this.lastReceipt = r.data;                  // the result modal (§ _closeOverlays)
-            this.lastCheckout = r.data.purchase.id;     // "new" chip in history
-            await this.loadMyOrders();
-            this.expandedOrders = [r.data.purchase.id]; // pre-expand the receipt
+            const pid = r.data.purchase.id;
+            this.lastCheckout = pid;                    // "new" chip in history
+            // Land on the purchases tab. route + hash in one synchronous
+            // turn (the hashchange `navigated` guard); the currentView
+            // watcher then fires selectProfileTab("purchases"), which loads
+            // the orders AND the calendar (today's dot appears at once).
+            this.profileTab = "purchases";
+            this.route = "#/account";
+            location.hash = "#/account";
+            this.expandedOrders = [pid];                 // pre-expand the receipt
+            this.showToast("Purchase complete — " +
+              this.formatPrice(r.data.purchase.total_cents));
+            // The receipt modal is EXCEPTION-ONLY (clamp-not-veto must stay
+            // reportable, but a clean checkout gets no blocking dialog):
+            // skipped orphans and clamped lines are the cases the history
+            // row alone does not surface loudly enough.
+            const skipped = r.data.skipped || [];
+            const clamped = r.data.purchase.lines.some((l) => l.clamped);
+            if (skipped.length || clamped) this.lastReceipt = r.data;
             return;
           }
           if (r.status === 400) { this.showToast("Cart is empty"); return; }
@@ -1238,6 +1440,7 @@ Vue.createApp({
       localStorage.removeItem(USER_KEY);
       this.user = null;
       this.clearLogoff();
+      this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
       location.hash = "#/login";
       this.route = "#/login";
@@ -1988,6 +2191,7 @@ Vue.createApp({
     window.addEventListener("hcrm-session-expired", () => {
       this.user = null;
       this.clearLogoff();   // a pending countdown's timer must die here
+      this.dismissGreeting();  // the banner names a user whose session is dead
       this._closeOverlays();  // ...and the dead session's modals with it
       this.route = "#/login";
     });
@@ -2012,7 +2216,10 @@ Vue.createApp({
 
     // Infinite scroll: load more items when the sentinel becomes visible.
     this._observer = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting) && this.currentView === "catalogue") {
+      // The checkout review screen renders the same grid — "add" there
+      // needs the same infinite scroll (round 3, Task C).
+      const gridView = this.currentView === "catalogue" || this.currentView === "checkout";
+      if (entries.some((e) => e.isIntersecting) && gridView) {
         this.loadMore();
       }
     });
