@@ -572,3 +572,72 @@ class OrderCalendarOut(BaseModel):
     month: int
     days: dict[str, CalendarDayOut]
     total_cents: int
+
+
+# --- Scanner feed (round 4, T4) -------------------------------------------------
+
+class TerminalRegisterIn(_Stripped):
+    """The daemon registers a terminal: a routing id plus its WRITE
+    credential (the secret), generated client-side and stored as a hash.
+    The 32-char floor keeps a trivial secret from weakening every later
+    ingest-auth; token_urlsafe(32) (43 chars) is the shape the daemon
+    sends."""
+
+    terminal_id: str = Field(min_length=1, max_length=64,
+                             pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    secret: str = Field(min_length=32, max_length=128)
+
+
+class TerminalRegisterOut(BaseModel):
+    """The single-use pairing code, shown ONCE to the loopback registerer
+    (the daemon prints it; the operator types it into the kiosk browser
+    once). Stored only as its hash."""
+
+    pairing_code: str
+
+
+class TerminalPairIn(_Stripped):
+    """The browser's half of pairing: the terminal it binds to plus the
+    8-char code the daemon printed."""
+
+    terminal_id: str = Field(min_length=1, max_length=64)
+    code: str = Field(min_length=8, max_length=8)
+
+
+class TerminalPairOut(BaseModel):
+    """The browser's READ credential, shown ONCE (stored as token_hash)."""
+
+    token: str
+
+
+class TerminalScanIn(_Stripped):
+    """One scanned code for the queue. The kind is NOT on the wire — the
+    server derives it (app.scanshapes.classify_scan). ``secret`` is the
+    body fallback for the ``X-Scanner-Secret`` header. An empty/whitespace
+    code is accepted and classifies as ``unshaped`` (the queue carries what
+    was scanned, verbatim — the SPA decides what to ignore)."""
+
+    code: str = Field(max_length=128)
+    secret: str | None = Field(default=None, max_length=128)
+
+
+class TerminalScanOut(BaseModel):
+    seq: int
+
+
+class ScanEventOut(BaseModel):
+    """One queued scan: its cursor position, the raw code (a badge payload
+    is a bearer credential — see the router's TTL doctrine), and the
+    SERVER-derived kind."""
+
+    seq: int
+    code: str
+    kind: str
+
+
+class ScanEventsOut(BaseModel):
+    """One poll: unconsumed events with seq > after (at-most-once), plus
+    the terminal's latest seq (the cursor high-water mark)."""
+
+    events: list[ScanEventOut]
+    latest_seq: int
