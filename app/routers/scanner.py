@@ -109,6 +109,32 @@ def _mint_pairing_code() -> str:
                    for _ in range(_PAIRING_CODE_LEN))
 
 
+def _presented_credential(request: Request, header_name: str,
+                           fallback: str | None = None) -> str | None:
+    """The credential a request presents, in either accepted form.
+
+    Primary: the dedicated ``X-Scanner-Secret`` / ``X-Scanner-Token``
+    headers. Alternative: ``Authorization: Bearer <credential>`` — the
+    SPA's shared ``api()`` helper can only attach foreign credentials via
+    the Authorization header (its ``{token, raw}`` form, round 4, T6), and
+    that form deliberately bypasses the global 401-logout cleanup, so the
+    browser MUST use it for the feed (a feed 401 is "terminal deleted",
+    never "user session expired"). Both presentations are the same
+    credential; a USER bearer token simply matches no secret/token hash
+    and 401s like any other unknown credential.
+    """
+    header = request.headers.get(header_name)
+    if header:
+        return header
+    authorization = request.headers.get("Authorization", "")
+    if authorization[:7].lower() == "bearer ":
+        # An EMPTY bearer ("Authorization: Bearer ") is no credential at
+        # all — fall through to the body fallback rather than 401ing a
+        # request that presented a valid one elsewhere.
+        return authorization[7:].strip() or fallback
+    return fallback
+
+
 def _terminal_by_credential(session: Session, column, presented: str | None) -> Terminal:
     """The terminal a presented secret/token belongs to, or 401.
 
@@ -263,8 +289,11 @@ def ingest_scan(
     The kind is NEVER taken from the wire — there is no kind field to
     trust: ``classify_scan`` runs here, the scan_requests doctrine. The
     response is the new event's seq (the polling cursor's next value).
+    The secret may ride the ``X-Scanner-Secret`` header, the body, or
+    ``Authorization: Bearer`` (the last so the SPA can reuse its ``api()``
+    helper, T6 — see :func:`_presented_credential`).
     """
-    secret = request.headers.get("X-Scanner-Secret") or payload.secret
+    secret = _presented_credential(request, "X-Scanner-Secret", payload.secret)
     terminal = _terminal_by_credential(session, Terminal.secret_hash, secret)
     _prune(session, terminal.terminal_id)
     event = ScanEvent(terminal_id=terminal.terminal_id,
@@ -290,9 +319,11 @@ def poll_events(
     consumed in the same commit, and reports ``latest_seq`` (computed
     before pruning, so it reflects everything that existed when the poll
     started). An empty poll is ``{events: [], latest_seq}``, never an
-    error. Terminal-auth, not user-auth: the logged-out login screen polls.
+    error. Terminal-auth, not user-auth: the logged-out login screen polls
+    (the credential may also ride ``Authorization: Bearer`` — T6's adapter
+    form; see :func:`_presented_credential`).
     """
-    token = request.headers.get("X-Scanner-Token")
+    token = _presented_credential(request, "X-Scanner-Token")
     terminal = _terminal_by_credential(session, Terminal.token_hash, token)
 
     latest_row = session.exec(

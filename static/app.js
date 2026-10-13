@@ -5,6 +5,9 @@ const TOKEN_KEY = "hcrm_token";
 const USER_KEY = "hcrm_user";
 const PURCHASE_KEY = "hcrm_purchase";      // legacy: consumed once into the server cart
 const STAGING_KEY = "hcrm_staged_scans";   // anonymous scans awaiting attribution (codes only)
+const TERMINAL_TOKEN_KEY = "hcrm_terminal_token";  // round 4: the kiosk's
+// scanner-feed READ credential — per-TERMINAL, not per-user: it survives
+// logins/logouts (clearing it on logout would unpair the whole kiosk).
 const PAGE_SIZE = 24;
 
 // Global HID scan capture (round 3, Task B): the decision logic — shape
@@ -140,6 +143,16 @@ Vue.createApp({
 
       // kiosk logoff countdown (Task 4's server deadline, rendered)
       logoff: null,              // {name, deadline, remaining}
+
+      // Round 4, T6 — the scanner-feed channel (daemon-forwarded scans):
+      // "live" | "off" | "unpaired", rendered as data-scanner-feed. The
+      // wedge capture above stays installed in EVERY mode — it is the
+      // fallback whenever no daemon holds the grab.
+      scannerFeed: "unpaired",
+      pairForm: { terminal_id: "", code: "" },   // login-screen pairing
+      pairError: "",
+      pairOk: false,
+      pairBusy: false,
 
       // data explorer
       allColumns: DATA_COLUMNS,
@@ -1521,6 +1534,137 @@ Vue.createApp({
       this.showToast("Session expired — please log in again.");
     },
 
+    /* ---------- scanner feed (round 4, T6): the daemon-forwarded queue ----
+     * The decisions live in the pure reducer (HcrmScanFeed.feedStep,
+     * static/scanfeed.js — node-tested). This adapter owns everything
+     * async/DOM: the terminal token's localStorage, the paced 1 s poll
+     * (api()'s foreign-token form — the terminal token is NOT a user
+     * bearer, so a feed 401 can never trip the global logout cleanup),
+     * and the header pill. The feed's ONLY sink is the unchanged
+     * enqueueScan bus — the same router the wedge capture feeds — so
+     * badge login / logoff / save-then-switch / cart-scan / intake run
+     * identically whichever path delivered the scan. The two paths are
+     * mutually exclusive by construction: while the daemon holds the
+     * EVIOCGRAB, the browser receives no wedge keystrokes at all; when
+     * it doesn't, the queue is empty and stale. */
+
+    installScanFeed() {
+      this._feedState = HcrmScanFeed.initialFeedState();
+      this._feedTimer = null;
+      this._feedBusy = false;
+      this.scannerFeed = "unpaired";
+      const token = localStorage.getItem(TERMINAL_TOKEN_KEY);
+      if (token) this._feedDispatch({ type: "paired", token });
+    },
+
+    _feedDispatch(action) {
+      const result = HcrmScanFeed.feedStep(this._feedState, action);
+      this._feedState = result.state;
+      for (const effect of result.effects) this._applyFeedEffect(effect);
+    },
+
+    _applyFeedEffect(effect) {
+      switch (effect.type) {
+        case "startPoll":
+          if (this._feedTimer) break;   // idempotent: re-pair never stacks timers
+          this._feedPoll();            // immediate first poll, then paced
+          this._feedTimer = setInterval(
+            () => this._feedPoll(), HcrmScanFeed.POLL_INTERVAL_MS);
+          break;
+        case "stopPoll":
+          if (this._feedTimer) {
+            clearInterval(this._feedTimer);
+            this._feedTimer = null;
+          }
+          break;
+        case "emitEvent":
+          // "unshaped" (the server's classification for empty/whitespace)
+          // is not a user-visible scan — and the daemon never sends one.
+          if (effect.kind === "badge" || effect.kind === "barcode") {
+            this.enqueueScan(effect.code, effect.kind);
+          }
+          break;
+        case "setPill":
+          this.scannerFeed = effect.mode;   // renders data-scanner-feed
+          break;
+      }
+    },
+
+    async _feedPoll() {
+      if (this._feedBusy || this._feedState.mode === "unpaired") return;
+      this._feedBusy = true;
+      try {
+        const { status, data } = await api(
+          "/scanner/events?after=" + this._feedState.cursor,
+          { token: this._feedState.token, raw: true });
+        if (status === 401) {
+          // The terminal was deleted server-side: forget the binding — the
+          // wedge capture is the scan path again (and the pill says so).
+          localStorage.removeItem(TERMINAL_TOKEN_KEY);
+          this._feedDispatch({ type: "unpair" });
+          return;
+        }
+        if (status === 200 && data) {
+          this._feedDispatch({ type: "events",
+                               events: data.events || [],
+                               latest_seq: data.latest_seq || 0 });
+          return;
+        }
+        this._feedDispatch({ type: "pollError" });
+      } catch (_) {
+        this._feedDispatch({ type: "pollError" });
+      } finally {
+        this._feedBusy = false;
+      }
+    },
+
+    async pairTerminal() {
+      // The login-screen pairing panel: the operator types the terminal id
+      // and the 8-char single-use code the daemon printed (round 4, T5).
+      // raw: true — a 401 here is a WRONG CODE, not a user-session expiry,
+      // and must not run api()'s global logout cleanup.
+      this.pairError = "";
+      this.pairOk = false;
+      const terminal_id = (this.pairForm.terminal_id || "").trim();
+      // The server mints UPPERCASE Crockford codes and hash-compares
+      // exactly; an operator typing lowercase at the kiosk must not get a
+      // misleading "wrong code" — normalise (safe: codes never contain
+      // lowercase).
+      const code = (this.pairForm.code || "").trim().toUpperCase();
+      if (!terminal_id || !/^[A-Z0-9]{8}$/.test(code)) {
+        this.pairError = "Enter the terminal id and the 8-character code the daemon printed";
+        return;
+      }
+      this.pairBusy = true;
+      try {
+        const { status, data } = await api("/scanner/pair", {
+          method: "POST", body: { terminal_id, code }, raw: true,
+        });
+        if (status === 200 && data && data.token) {
+          localStorage.setItem(TERMINAL_TOKEN_KEY, data.token);
+          this.pairForm = { terminal_id: "", code: "" };
+          this.pairOk = true;
+          this._feedDispatch({ type: "paired", token: data.token });
+        } else if (status === 401) {
+          this.pairError = "Unknown terminal or wrong pairing code";
+        } else if (status === 409) {
+          this.pairError = "This terminal is already paired — a staff member " +
+            "must delete it, then re-register the daemon";
+        } else {
+          this.pairError = "Pairing failed (" + status + ")";
+        }
+      } catch (e) {
+        this.pairError = e.message;
+      } finally {
+        this.pairBusy = false;
+      }
+    },
+
+    unpairTerminal() {
+      localStorage.removeItem(TERMINAL_TOKEN_KEY);
+      this._feedDispatch({ type: "unpair" });
+    },
+
     /* ---------- kiosk logoff countdown (Task 4's server deadline) ---------- */
 
     async armLogoff() {
@@ -2271,8 +2415,11 @@ Vue.createApp({
     });
 
     // The global HID scan capture: one document-level listener, always on
-    // (works on every view, behind modals, logged in or out).
+    // (works on every view, behind modals, logged in or out). Round 4: the
+    // scanner FEED installs beside it — the capture is the fallback path
+    // for whenever no daemon holds the grab, and must never be removed.
     this.installScanCapture();
+    this.installScanFeed();
 
     // Anonymous scans staged on a previous page load (codes only, no secrets).
     try {

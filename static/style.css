@@ -799,3 +799,44 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
   margin: 0;
   border-radius: 0;
 }
+
+/* ============ Round 4: the scanner-feed pill + pairing panel ============ */
+/* The pill says which scan path is live (data-scanner-feed binds the mode):
+   live   = the grab daemon is paired and the queue poll succeeds;
+   off    = paired but the server is unreachable (the poll keeps retrying);
+   unpaired = the round-3 wedge capture is the scan path (the fallback). */
+.feed-pill {
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .02em;
+  padding: .15rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  cursor: help;
+}
+.feed-pill[data-scanner-feed="live"] {
+  background: #e6f6ea;
+  border-color: #9fd8ac;
+  color: #1d6b33;
+}
+.feed-pill[data-scanner-feed="off"] {
+  background: #fdf1e0;
+  border-color: #e8c98a;
+  color: #8a5b12;
+}
+.feed-pill[data-scanner-feed="unpaired"] {
+  background: transparent;
+  border-style: dashed;
+  color: var(--muted);
+}
+
+/* The login-screen pairing form (terminal id + the daemon's 8-char code). */
+.pair-form label { display: block; margin-bottom: .7rem; }
+.pair-form input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: .3rem;
+}
+.pair-actions { display: flex; gap: .6rem; flex-wrap: wrap; }
+.pair-ok { color: #1d6b33; }

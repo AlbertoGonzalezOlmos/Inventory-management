@@ -50,6 +50,18 @@
     </nav>
 
     <div class="userbox">
+      <!-- Round 4: which scan path is live. "live" = the grab daemon is
+           paired and the queue poll succeeds; "off" = paired but the
+           server is unreachable (polling continues); "unpaired" = the
+           round-3 wedge capture is the scan path. -->
+      <span class="feed-pill" :data-scanner-feed="scannerFeed"
+            :title="scannerFeed === 'live'
+              ? 'Scans arrive via the grab daemon (no window focus needed)'
+              : scannerFeed === 'off'
+                ? 'Paired, but the server is unreachable — retrying'
+                : 'Not paired to a scanner daemon — scans go to the focused window'">
+        {{ scannerFeed === 'live' ? 'scanner' : scannerFeed === 'off' ? 'scanner offline' : 'no scanner' }}
+      </span>
       <template v-if="user">
         <span class="user-name">{{ user.name }} <small>({{ user.role }})</small></span>
         <button class="btn ghost" @click="logout">Log out</button>
@@ -116,6 +128,30 @@
         scan your QR badge or log in to add them to your list.
         <button class="btn tiny ghost" @click="discardStagedScans">Discard</button>
       </div>
+      <!-- Round 4, T6: pair this kiosk browser to a scanner terminal, once
+           per install. The operator types the terminal id + the 8-char
+           single-use code the daemon printed (scripts/scanner_daemon.py
+           --register). The stored token is per-TERMINAL: it survives
+           logins and logouts and is NOT cleared on logout. -->
+      <hr class="divider" />
+      <form @submit.prevent="pairTerminal" class="pair-form">
+        <label>Terminal id
+          <input type="text" v-model="pairForm.terminal_id"
+                 placeholder="counter-1" autocomplete="off" />
+        </label>
+        <label>Pairing code
+          <input type="text" v-model="pairForm.code" maxlength="8"
+                 placeholder="8 characters" autocomplete="off" />
+        </label>
+        <p v-if="pairError" class="error">{{ pairError }}</p>
+        <p v-if="pairOk" class="muted pair-ok">Paired — scans from this terminal
+          now arrive here, even with this window unfocused.</p>
+        <div class="pair-actions">
+          <button class="btn ghost" :disabled="pairBusy">Pair this terminal</button>
+          <button type="button" class="btn ghost" v-if="scannerFeed !== 'unpaired'"
+                  @click="unpairTerminal">Unpair</button>
+        </div>
+      </form>
       <p class="muted">No account yet? <a href="#/register">Create a member account</a></p>
     </section>
 
@@ -991,6 +1027,7 @@
      HcrmScanCapture global at install time (a reversed order is a dead
      scan bus — pinned in tests/test_frontend_contract.py). -->
 <script src="/scancapture.js"></script>
+<script src="/scanfeed.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
