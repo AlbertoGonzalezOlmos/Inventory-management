@@ -17,6 +17,11 @@
 #  * usb subsystem    — /dev/bus/usb/... nodes so a raw-libusb backend (pyusb)
 #                       can claim the device without root — needed on hosts
 #                       whose kernel has no driver for the personality in use
+#  * input subsystem  — /dev/input/eventN for HID-keyboard-mode scanners'
+#                       evdev node (scripts/scanner_daemon.py, round 4: the
+#                       EVIOCGRAB grab daemon needs to OPEN the node, and the
+#                       stock node is root:input 0660 — without this line the
+#                       daemon needs root or `usermod -aG input`)
 #
 # One vendor-wide file on purpose: it is installed by hand with sudo, so a
 # second file would mean a second install step and two rules that can drift.
@@ -26,3 +31,4 @@
 SUBSYSTEM=="tty",    ATTRS{idVendor}=="065a", MODE="0660", GROUP="plugdev"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="065a", MODE="0660", GROUP="plugdev"
 SUBSYSTEM=="usb",    ATTRS{idVendor}=="065a", MODE="0664", GROUP="plugdev"
+SUBSYSTEM=="input",  ATTRS{idVendor}=="065a", MODE="0660", GROUP="plugdev"

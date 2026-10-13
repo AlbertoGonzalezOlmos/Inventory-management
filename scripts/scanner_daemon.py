@@ -2,12 +2,16 @@
 
 The M-10 in USB-HID keyboard mode (065a:a001) "types" each scan into
 whatever window has OS focus. Round 4 grabs the scanner at the OS level:
-this module is the DECODE-ONLY slice (docs/plans/r4t2-FINAL.md) —
 
-* ``discover_event_device`` — find the scanner's ``/dev/input/eventN`` by
-  VID/PID in sysfs (the grab itself is T3; T5 adds HTTP forwarding),
-* ``parse_input_event`` — unpack the Linux ``struct input_event``,
-* ``EvdevDecoder`` / ``read_scans`` — turn EV_KEY events into scan strings.
+* T2 (docs/plans/r4t2-FINAL.md), the decode core — ``discover_event_device``
+  (find ``/dev/input/eventN`` by VID/PID in sysfs), ``parse_input_event``
+  (unpack ``struct input_event``), ``EvdevDecoder`` / ``read_scans``
+  (EV_KEY events → scan strings),
+* T3 (docs/plans/r4t3-FINAL.md), the grab + lifecycle — ``GrabbedDevice``
+  (EVIOCGRAB context manager with the human-keyboard guard), the
+  re-discovery ``run_loop``, and the ``DaemonLock`` single-instance
+  lockfile,
+* T5 will add the forwarding entrypoint (HTTP, pairing, config).
 
 **The reuse bridge (do not duplicate the assembler).** evdev delivers Linux
 keycodes (``KEY_A`` = 30), not HID usages ('a' = 4) — and the keycode space
@@ -26,7 +30,7 @@ path, shifted and unshifted.
 
 **No timing heuristics.** Round 3's browser capture had to distinguish
 scanner bursts from human typing from timing alone; the daemon does not —
-with an exclusive grab (T3), every key from this device is a scan key, and
+with an exclusive grab, every key from this device is a scan key, and
 the device identity is the classifier.
 
 **Unmapped keys reset, never guess** (the misread doctrine): a keycode with
@@ -55,9 +59,13 @@ host today — qwen M1).
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import os
 import struct
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 # scripts.* imports work from the repo root (namespace package), exactly as
@@ -274,9 +282,10 @@ def read_scans(fd, tv_size: int | None = None, on_unmapped=None):
     e.g. for a stream captured on another arch), decodes presses, and
     yields each completed scan. Handles records split across reads (a
     partial record is held until its remainder arrives) and ends cleanly
-    on EOF. The open/EVIOCGRAB/lifecycle is T3 — this takes an already
-    open fd (int or file object with ``fileno()``), so tests can drive it
-    from an ``os.pipe`` with synthetic events and no hardware.
+    on EOF. The open/EVIOCGRAB/lifecycle is :class:`GrabbedDevice` below —
+    this takes an already open fd (int or file object with ``fileno()``),
+    so tests can drive it from an ``os.pipe`` with synthetic events and no
+    hardware.
     """
     tv = NATIVE_TV_SIZE if tv_size is None else tv_size
     size = event_size(tv)
@@ -293,3 +302,307 @@ def read_scans(fd, tv_size: int | None = None, on_unmapped=None):
             scan = decoder.feed(*parse_input_event(record, tv_size=tv))
             if scan is not None:
                 yield scan
+
+
+# --- T3: the exclusive grab ----------------------------------------------------
+
+# EVIOCGRAB = _IOW('E', 0x90, int):
+#   (IOC_WRITE << 30) | (sizeof(int) << 16) | ('E' << 8) | 0x90
+#   = 0x40044590 — pinned by tests/test_scanner_daemon_grab.py.
+EVIOCGRAB = 0x40044590
+
+# evdev read errors that mean "the device is gone" (unplug, usbipd detach,
+# the xHCI controller dying again — docs/m10-unreachable-2026-10-10.md):
+# transient by policy; the re-discovery loop retries, never exits.
+_LOST_ERRNOS = frozenset({errno.ENODEV, errno.EIO, errno.ENOENT, errno.ENXIO})
+
+
+class GrabError(RuntimeError):
+    """Base of the grab contract's failures (loud, actionable messages)."""
+
+
+class WrongDeviceError(GrabError):
+    """The node is not (or cannot be verified as) the scanner.
+
+    The human-keyboard guard: EVIOCGRAB on the wrong node would silently
+    disable typing system-wide, so a node is grabbed only after sysfs
+    confirms its VID/PID — including at RE-grab time, because event node
+    numbers are recycled across replugs (r4rev M2).
+    """
+
+
+class GrabBusyError(GrabError):
+    """Another process already holds the grab (EBUSY)."""
+
+
+class GrabPermissionError(GrabError):
+    """No permission to open/grab the node (EACCES/EPERM)."""
+
+
+class DeviceLostError(GrabError):
+    """The device disappeared (ENODEV/EIO/EOF) — transient: re-discover."""
+
+
+class InstanceAlreadyRunning(GrabError):
+    """A second daemon instance (the lockfile is held)."""
+
+
+def _verify_node(node: str, vid_pid: tuple[int, int],
+                 sysfs_root: str | Path) -> None:
+    """Raise WrongDeviceError unless sysfs proves `node` is the scanner.
+
+    Accepts a full ``/dev/input/eventN`` path or a bare ``eventN`` name.
+    An unreadable/absent id (device vanished, garbage sysfs) is ALSO a
+    refusal — an unverifiable device is never grabbed. ENOENT-style
+    absence is indistinguishable from a recycled node here, so the safe
+    direction is always "refuse".
+    """
+    name = os.path.basename(node.rstrip("/"))
+    ident = Path(sysfs_root) / name / "device" / "id"
+    vid, pid = vid_pid
+    found = (_read_sysfs_int(ident / "vendor"), _read_sysfs_int(ident / "product"))
+    if found != vid_pid:
+        seen = "unreadable" if found[0] is None else f"{found[0]:04x}:{found[1]:04x}"
+        raise WrongDeviceError(
+            f"refusing to grab {node}: sysfs does not verify it as "
+            f"{vid:04x}:{pid:04x} (says: {seen}) — the human-keyboard guard; "
+            "never grab an unverified device"
+        )
+
+
+def _open_readonly(node: str) -> int:
+    """The default opener: O_RDONLY is sufficient for EVIOCGRAB (the ioctl
+    path checks no write permission) and for reading the grabbed stream."""
+    return os.open(node, os.O_RDONLY)
+
+
+class GrabbedDevice:
+    """Open + exclusively grab one event device (context manager).
+
+    Contract (docs/plans/r4t3-FINAL.md):
+
+    1. open the node ``O_RDONLY``;
+    2. VERIFY it is the scanner (VID/PID via sysfs) — never grab an
+       unverified node; the ioctl is not even attempted otherwise;
+    3. ``ioctl(fd, EVIOCGRAB, 1)`` — from here the kernel delivers this
+       device's events to us ONLY: nothing is typed into any window.
+
+    Failure mapping: ``EACCES``/``EPERM`` → :class:`GrabPermissionError`;
+    ``EBUSY`` → :class:`GrabBusyError` (another grabber holds it);
+    ``ENODEV``/``EIO``/``ENOENT`` → :class:`DeviceLostError` (transient —
+    the re-discovery loop handles those, everything else is loud).
+    Exiting the context — normally, on exception, on crash — closes the fd,
+    and closing the fd RELEASES the grab (kernel guarantee), so the
+    scanner reverts to keyboard-wedge with zero operator action.
+
+    ``opener``/``ioctl``/``closer`` are injected per the T2 doctrine
+    (offline tests, no hardware): the defaults are ``os.open`` (O_RDONLY),
+    ``fcntl.ioctl`` and ``os.close``.
+    """
+
+    def __init__(self, node, *, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
+                 sysfs_root: str | Path = _SYSFS_INPUT_CLASS,
+                 opener=None, ioctl=None, closer=None) -> None:
+        self.node = node
+        self.vid_pid = vid_pid
+        self._sysfs_root = sysfs_root
+        self._open = _open_readonly if opener is None else opener
+        self._ioctl = fcntl.ioctl if ioctl is None else ioctl
+        self._close = os.close if closer is None else closer
+        self.fd = None
+        self._grabbed = False
+
+    def __enter__(self) -> "GrabbedDevice":
+        try:
+            self.fd = self._open(self.node)
+        except OSError as exc:
+            raise self._map_open_error(exc) from exc
+        try:
+            # Verify BEFORE grabbing: the ioctl must never touch an
+            # unverified node (node numbers are recycled across replugs).
+            _verify_node(self.node, self.vid_pid, self._sysfs_root)
+            self._ioctl(self.fd, EVIOCGRAB, 1)
+            self._grabbed = True
+        except GrabError:
+            self._release()
+            raise
+        except OSError as exc:
+            self._release()
+            raise self._map_grab_error(exc) from exc
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._release()
+        return False  # never swallow
+
+    def _release(self) -> None:
+        """Un-grab (best-effort, only if the grab was taken) and close —
+        the close itself releases the grab even if the ioctl is refused,
+        which is why it is unconditional."""
+        fd, self.fd = self.fd, None
+        if fd is None:
+            return
+        if self._grabbed:
+            try:
+                self._ioctl(fd, EVIOCGRAB, 0)
+            except OSError:
+                pass  # the close below releases the grab regardless
+        self._close(fd)
+
+    def _map_open_error(self, exc: OSError) -> GrabError | OSError:
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            return GrabPermissionError(self._permission_message(exc))
+        if exc.errno in _LOST_ERRNOS:
+            return DeviceLostError(f"{self.node} disappeared before open: {exc}")
+        return exc
+
+    def _map_grab_error(self, exc: OSError) -> GrabError | OSError:
+        if exc.errno == errno.EBUSY:
+            return GrabBusyError(
+                f"another process holds the scanner grab on {self.node} — "
+                "a second scanner_daemon, evtest, or an input remapper?"
+            )
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            return GrabPermissionError(self._permission_message(exc))
+        if exc.errno in _LOST_ERRNOS:
+            return DeviceLostError(f"{self.node} disappeared during grab: {exc}")
+        return exc
+
+    def _permission_message(self, exc: OSError) -> str:
+        return (
+            f"no permission to open/grab {self.node} ({exc}) — install the "
+            "udev rule (scripts/udev/99-opticon-scanner.rules), or run in "
+            "the input/plugdev group, or use the systemd unit "
+            "(scripts/systemd/scanner-daemon.service)"
+        )
+
+
+# --- T3: the single-instance lockfile -------------------------------------------
+
+def _default_lockfile_path() -> Path:
+    """XDG_RUNTIME_DIR (``/run/user/$UID`` under systemd) or a tempdir
+    fallback — a per-user default, so two users' daemons do not fight over
+    one lockfile while the kernel grab (EBUSY) remains the real interlock."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    return Path(base) / "hcrm-scanner-daemon.lock"
+
+
+class DaemonLock:
+    """flock-based single-instance lock (one daemon per user).
+
+    flock is held by the open file description and RELEASED BY THE KERNEL
+    when the process dies — there is no stale-lockfile recovery problem,
+    which is why it is used instead of O_EXCL. A held lock raises
+    :class:`InstanceAlreadyRunning`; the holder's PID is written into the
+    file for diagnostics only.
+    """
+
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else _default_lockfile_path()
+        self._fd: int | None = None
+
+    def acquire(self) -> "DaemonLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                raise InstanceAlreadyRunning(
+                    f"another scanner_daemon instance is already running "
+                    f"(lockfile: {self.path})"
+                ) from exc
+            raise
+        self._fd = fd
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        return self
+
+    def release(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)  # releases the flock
+            self._fd = None
+
+    def __enter__(self) -> "DaemonLock":
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.release()
+        return False
+
+
+# --- T3: the re-discovery run loop ----------------------------------------------
+
+def _log(message: str) -> None:
+    """The default lifecycle log: stderr, one line (journald picks it up)."""
+    print(f"scanner_daemon: {message}", file=sys.stderr)
+
+
+def _pump(dev: GrabbedDevice, on_scan, scan_reader, on_unmapped) -> None:
+    """Consume the grabbed stream until the device is lost.
+
+    EOF and ENODEV/EIO both mean "gone" (evdev signals removal either way);
+    anything else from the reader propagates (a callback bug must not look
+    like a device loss).
+    """
+    iterator = scan_reader(dev.fd, on_unmapped=on_unmapped)
+    while True:
+        try:
+            scan = next(iterator)
+        except StopIteration:
+            raise DeviceLostError(f"{dev.node}: event stream ended (EOF)")
+        except OSError as exc:
+            if exc.errno in (errno.ENODEV, errno.EIO):
+                raise DeviceLostError(f"{dev.node}: read failed: {exc}") from exc
+            raise
+        on_scan(scan)
+
+
+def run_loop(on_scan, *, node=None, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
+             sysfs_root: str | Path = _SYSFS_INPUT_CLASS,
+             opener=None, ioctl=None, closer=None,
+             scan_reader=read_scans, on_unmapped=None,
+             regrab_delay: float = 2.0, sleep=time.sleep,
+             stop=None, log=_log) -> None:
+    """The daemon's device lifecycle: discover → grab → decode → on_scan.
+
+    On device loss (unplug, controller death, EOF) the loop closes
+    (releasing the grab), sleeps, and re-discovers by VID/PID — never a
+    remembered ``eventN`` (node numbers are recycled, r4rev M2) and never
+    an exit: a transient unplug must not turn an always-on daemon off. A
+    pinned ``node`` is used for the FIRST attempt only; after any loss the
+    loop trusts discovery. When no device is found at all it keeps retrying
+    (the scanner may not be attached yet — qwen M1).
+
+    The loud failures — :class:`GrabBusyError`, :class:`GrabPermissionError`,
+    :class:`WrongDeviceError` — PROPAGATE: they are operator problems, not
+    transients, and T5's entrypoint turns them into a loud exit. ``stop()``
+    is polled after sleeps and scans and ends the loop cleanly (T5 wires it
+    to SIGTERM); ``sleep``/``scan_reader``/the grab injectables keep the
+    whole loop offline-testable.
+    """
+    first = True
+    while True:
+        target = node if (node is not None and first) else \
+            discover_event_device(vid_pid, sysfs_root)
+        first = False
+        if target is None:
+            vid, pid = vid_pid
+            log(f"no {vid:04x}:{pid:04x} event device — retrying in "
+                f"{regrab_delay:g}s")
+            sleep(regrab_delay)
+            if stop is not None and stop():
+                return
+            continue
+        try:
+            with GrabbedDevice(target, vid_pid=vid_pid, sysfs_root=sysfs_root,
+                               opener=opener, ioctl=ioctl, closer=closer) as dev:
+                log(f"grabbed {target}")
+                _pump(dev, on_scan, scan_reader, on_unmapped)
+        except DeviceLostError as exc:
+            log(f"device lost ({exc}); re-discovering in {regrab_delay:g}s")
+            sleep(regrab_delay)
+            if stop is not None and stop():
+                return
+            continue
