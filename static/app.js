@@ -1140,6 +1140,15 @@ Vue.createApp({
       document.addEventListener("pointerdown", this._onScanExternal, true);
       document.addEventListener("focusin", this._onScanExternal, true);
       document.addEventListener("paste", this._onScanExternal, true);
+      // An IME composition is the one human signal the keydown guard can miss:
+      // some platforms do not set isComposing/keyCode 229 on the FIRST composing
+      // keydown, and Vue's v-model ignores an `input` event while the element is
+      // composing (vModelText's handler opens with `if (target.composing)
+      // return`) — so a replay landing mid-composition would update the DOM and
+      // NOT the model. This listener is on `document` in the CAPTURE phase while
+      // Vue's is on the element, so the flush always runs first, before
+      // `composing` is ever set. (Round-3 audit fix 1, r3rev-qwen.md §9.4.)
+      document.addEventListener("compositionstart", this._onScanExternal, true);
       this.scanCapture = true;     // renders data-scan-capture="on" (ui_check pin)
     },
 
@@ -1172,6 +1181,57 @@ Vue.createApp({
       return "plain";
     },
 
+    /** The credential targets of _scanStrictPre: any password field, or the
+     * username field of a login form — in this SPA that is the autofocused
+     * `type="text" autocomplete="username"` input on the login screen
+     * (index.html:55-56), i.e. exactly the field a badge scan lands in when
+     * nobody has clicked anywhere. A selector test, so extending the rule is a
+     * selector edit and not a code edit. */
+    _scanSecretField(el) {
+      return !!(el && el.matches &&
+        el.matches('input[type="password"], input[autocomplete="username"]'));
+    },
+
+    /** Credential fields never enter WARM (round-3 audit fix 2 —
+     * r3rev-qwen.md §9.4; plan D1c).
+     *
+     * WARM lets printable keys land natively and relies on a retract at
+     * burst-confirm, which bounds a scan's visible artifact to ONE character
+     * for ≤1 frame. Everywhere else that is a non-event; in a password field or
+     * in the login username field that character is a fragment of a bearer
+     * credential, and the bus's own doctrine is "NEVER render the raw badge
+     * payload on screen" (enqueueScan). These targets therefore always take the
+     * held path — SCAN_STRICT_DEFER scoped to the two fields where it matters,
+     * with no latency cost anywhere else.
+     *
+     * The reducer cannot know this (it is element-agnostic and node-tested with
+     * no DOM), so instead of reimplementing any of its branches the adapter
+     * arranges for it to take its OWN strict path:
+     *   1. a warm window inherited from ANOTHER field is dropped first — the
+     *      reducer's WARM carries no element identity, so without this a key
+     *      here could take the `inWarm && !fast` branch and land natively;
+     *   2. a pending run is flushed BEFORE a slow printable key, so the reducer
+     *      sees IDLE and holds the key. Its `runActive && !fast` branch would
+     *      otherwise replay the run and let THIS key land natively — painting
+     *      it, and dropping it from the logical buffer, which is precisely how
+     *      a scan loses its first character (the failure mode the reducer's own
+     *      "Run start" comment warns about).
+     * `_scanEvent` then demotes any WARM verdict these two cannot prevent. */
+    _scanStrictPre(ev, e) {
+      if (!this._scanSecretField(e && e.target)) return;
+      const s = this._scanState;
+      if (s.mode === "warm") this._scanState = HcrmScanCapture.initialState(ev.t);
+      const pending = s.mode === "hold" || s.mode === "armed";
+      const printable = typeof ev.key === "string" && ev.key.length === 1;
+      const slow = ev.t - s.lastT >= HcrmScanCapture.SCAN_MAX_GAP_MS;
+      if (pending && printable && !ev.repeat && !ev.composing && !ev.mod
+          && (slow || s.cls !== ev.cls)) {
+        // The human verdict, early: identical to the SCAN_DEFER_MS timer firing
+        // now (replay what is held, no WARM — see the demotion in _scanEvent).
+        this._scanEvent({ type: "timer", t: ev.t }, null);
+      }
+    },
+
     _onScanKey(e) {
       // Sinks own their keys entirely (the login badge field and the visible
       // scan field keep their dedicated Enter handlers — no double-fire;
@@ -1179,7 +1239,7 @@ Vue.createApp({
       if (e.target && e.target.closest && e.target.closest("[data-scan-sink]")) {
         return;
       }
-      this._scanEvent({
+      const ev = {
         type: "key",
         key: e.key,
         t: this._scanNow(),
@@ -1187,7 +1247,9 @@ Vue.createApp({
         repeat: e.repeat === true,
         composing: e.isComposing === true || e.keyCode === 229,
         mod: e.ctrlKey || e.metaKey || e.altKey,
-      }, e);
+      };
+      this._scanStrictPre(ev, e);
+      this._scanEvent(ev, e);
     },
 
     _onScanExternal() {
@@ -1196,14 +1258,26 @@ Vue.createApp({
 
     _scanEvent(ev, e) {
       const result = HcrmScanCapture.burstStep(this._scanState, ev);
-      this._scanState = result.state;
+      // Credential-field strict mode, step 2 of 2 (_scanStrictPre is step 1):
+      // the reducer's WARM verdict is element-agnostic, so demote it to idle
+      // here — the next printable key in this field is then held instead of
+      // landing natively. A timer/external event carries no target, so the
+      // pending run's own element decides (it is still set: the write-back
+      // below is what clears it).
+      const secret = ev.type === "key"
+        ? this._scanSecretField(e && e.target)
+        : this._scanSecretField(this._scanHeldEl);
+      this._scanState = (secret && result.state.mode === "warm")
+        ? HcrmScanCapture.initialState(ev.t)
+        : result.state;
       for (const action of result.actions) this._applyScanAction(action, e);
       // The defer timer: armed exactly while a run is pending, RE-ARMED on
       // every key (a burst whose source dies mid-payload cannot hang the
       // held chars) — and it can never fire mid-scan, because
       // SCAN_DEFER_MS (60) > SCAN_MAX_GAP_MS (50) > scanner inter-key.
+      // Read the DEMOTED state: the timer must agree with what we stored.
       if (this._scanTimer) { clearTimeout(this._scanTimer); this._scanTimer = null; }
-      if (result.state.mode === "hold" || result.state.mode === "armed") {
+      if (this._scanState.mode === "hold" || this._scanState.mode === "armed") {
         this._scanTimer = setTimeout(
           () => this._scanEvent({ type: "timer", t: this._scanNow() }),
           HcrmScanCapture.SCAN_DEFER_MS);

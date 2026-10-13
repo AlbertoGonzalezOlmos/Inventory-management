@@ -24,9 +24,18 @@
        route. A dedicated banner, NOT a toast — afterLogin's legacy-cart
        import and staged-scan replay TOAST and would clobber it within
        milliseconds on the returning-kiosk paths. Auto-dismisses after a
-       few seconds; a click dismisses it early. -->
-  <div class="greeting" v-if="greeting" role="status" @click="dismissGreeting">
-    {{ greeting }}
+       few seconds; a click dismisses it early.
+       Round-3 audit fix 3 (r3rev-qwen.md §9.4): a PERSISTENT live region whose
+       TEXT is conditional — not a region inserted with its text already in it,
+       which screen readers announce inconsistently (that is what `v-if` +
+       role="status" did). The empty state must stay in the accessibility tree,
+       so display:none / visibility:hidden are both off the table (either would
+       remove it and silence the region); it is collapsed to a zero box and made
+       click-through instead. Inline styles because the collapsed state has no
+       stylesheet rule of its own. -->
+  <div class="greeting" aria-live="polite" @click="dismissGreeting"
+       :style="greeting ? null : { margin: '0', padding: '0', border: '0', background: 'none', boxShadow: 'none', height: '0', overflow: 'hidden', pointerEvents: 'none', cursor: 'default' }">
+    <template v-if="greeting">{{ greeting }}</template>
   </div>
 
   <!-- ================= Header / navigation ================= -->
