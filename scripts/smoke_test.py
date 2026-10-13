@@ -34,6 +34,7 @@ Exit codes: 0 pass · 1 checks failed · 2 target unreachable · 3 usage.
 import argparse
 import json
 import os
+import secrets
 import sys
 import time
 
@@ -380,6 +381,76 @@ def run_checks(report: Reporter, base: str, token: str, degraded: bool,
     for m in (as_list(payload) or []):
         if isinstance(m, dict) and m.get("email") == kiosk_email:
             kiosk_member_id = m.get("id")
+
+    # --- Round 4, T7: the scanner feed channel, hardware-free. The same
+    # round trip the daemon (secret) and the kiosk SPA (token) perform,
+    # against the live HTTP surface — including the Authorization-Bearer
+    # credential form the SPA's api() helper uses. Registration is
+    # loopback-gated, so a --base run from a remote host SKIPs cleanly.
+    report.section("Scanner feed channel (round 4, hardware-free)")
+    terminal_id = "smoke-counter-1"
+    terminal_secret = secrets.token_urlsafe(32)
+    status, payload, _ = req("/api/scanner/terminals", "POST",
+                             {"terminal_id": terminal_id,
+                              "secret": terminal_secret})
+    gate = as_dict((as_dict(payload) or {}).get("detail")) or {}
+    if status == 403 and gate.get("status") == "loopback_only":
+        report.skip("the scanner feed channel",
+                    "terminal registration is loopback-gated and this "
+                    "target is remote (--base without HCRM_SCANNER_REGISTER_ANY)")
+    elif report.check("POST /api/scanner/terminals -> 201 with a pairing code",
+                      status == 201 and bool((as_dict(payload) or {}).get("pairing_code")),
+                      f"(HTTP {status} {detail_of(payload)})"):
+        pairing_code = (as_dict(payload) or {}).get("pairing_code")
+        status, payload, _ = call(base, "/api/scanner/pair", "POST",
+                                  body={"terminal_id": terminal_id,
+                                        "code": pairing_code})
+        paired = as_dict(payload) or {}
+        if report.check("pair with the single-use code -> 200 read token",
+                        status == 200 and bool(paired.get("token")),
+                        f"(HTTP {status} {detail_of(payload)})"):
+            feed_token = paired["token"]
+            badge = "HCRM1:" + "S" * 43
+            status, payload, _ = call(base, "/api/scanner/events", "POST",
+                                      token=terminal_secret, body={"code": badge})
+            report.check("ingest a badge scan with the SECRET -> 201 {seq}",
+                         status == 201
+                         and isinstance((as_dict(payload) or {}).get("seq"), int),
+                         f"(HTTP {status} {detail_of(payload)})")
+            status, payload, _ = call(base, "/api/scanner/events", "POST",
+                                      token=terminal_secret,
+                                      body={"code": "8412345678905"})
+            report.check("ingest a barcode scan -> 201 {seq}",
+                         status == 201
+                         and isinstance((as_dict(payload) or {}).get("seq"), int),
+                         f"(HTTP {status} {detail_of(payload)})")
+            status, payload, _ = call(base, "/api/scanner/events",
+                                      token=feed_token)
+            polled = as_dict(payload) or {}
+            events = [as_dict(e) or {} for e in as_list(polled.get("events")) or []]
+            report.check("poll with the TOKEN -> both scans, kinds SERVER-derived",
+                         status == 200
+                         and [(e.get("code"), e.get("kind")) for e in events]
+                             == [(badge, "badge"), ("8412345678905", "barcode")]
+                         and isinstance(polled.get("latest_seq"), int),
+                         f"(HTTP {status} {detail_of(payload)})")
+            status, payload, _ = call(base, "/api/scanner/events",
+                                      token=feed_token)
+            report.check("second poll -> empty (at-most-once delivery)",
+                         status == 200 and (as_dict(payload) or {}).get("events") == [],
+                         f"(HTTP {status} {detail_of(payload)})")
+            status, payload, _ = call(base, "/api/scanner/events", "POST",
+                                      token=feed_token, body={"code": "EX-007"})
+            report.check("the read TOKEN cannot ingest -> 401 (capability split)",
+                         status == 401, f"(HTTP {status} {detail_of(payload)})")
+            status, payload, _ = req(f"/api/scanner/terminals/{terminal_id}",
+                                     "DELETE")
+            report.check("DELETE the terminal (staff) -> 204", status == 204,
+                         f"(HTTP {status} {detail_of(payload)})")
+            status, payload, _ = call(base, "/api/scanner/events",
+                                      token=feed_token)
+            report.check("the token died with the terminal -> 401",
+                         status == 401, f"(HTTP {status} {detail_of(payload)})")
 
     report.section("Cleanup (only what this run created)")
     if scan_item_id is not None:

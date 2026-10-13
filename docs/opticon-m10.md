@@ -585,6 +585,52 @@ Scanning a badge calls `POST /api/auth/qr-identify` — a pure predicate
   exclude `/api/auth/*` and `/api/cart/scan` — request bodies carry
   credentials.
 
+## 10a. The grab daemon (round 4: OS-level scan capture)
+
+Round 3 (§10.1) intercepted the M-10's keystrokes *inside the browser* —
+which only works while the browser has focus. Round 4 moves the
+interception to the OS: `scripts/scanner_daemon.py` opens the scanner's
+Linux event device and takes an **exclusive grab**
+(`fcntl.ioctl(fd, EVIOCGRAB, 1)` — `0x40044590`), so the kernel stops
+delivering the scanner's keystrokes to X/Wayland/the console entirely.
+Nothing is typed into any window, focused or not; the daemon reads the
+same stream, decodes it (Linux keycodes → HID usages → the same tested
+`ScanAssembler` as `scanner_hid.py`), and POSTs each scan to the server's
+terminal queue (`POST /api/scanner/events`). The SPA polls that queue
+(`static/scanfeed.js` + the app.js adapter, 1 s paced) and feeds every
+scan into the **same `enqueueScan` bus** as the wedge capture — so badge
+login, the 60 s logoff overlay, save-then-switch and cart/intake flows
+behave identically whichever path delivered the scan.
+
+Reading `/dev/hidraw*` does **not** stop the typing (hidraw and evdev are
+parallel streams) — the grab on `/dev/input/eventN` is the entire point.
+
+**Lifecycle & fallback.** The grab's lifetime is the fd's lifetime: the
+daemon exiting — normally, on error, or `kill -9` — closes the fd, and
+the kernel releases the grab instantly. The scanner then reverts to a
+plain keyboard wedge and round 3's browser capture (still installed, by
+pin) takes over; the SPA's status pill (`data-scanner-feed`) shows which
+path is live: **live** (daemon paired, queue polling), **off** (paired,
+server unreachable — polling continues), **unpaired** (the wedge path).
+On unplug the daemon re-discovers by VID/PID (`065a:a001` — never a
+remembered `eventN`: node numbers are recycled) with backoff and never
+exits on a transient loss. A server outage never stops the grab: scans
+spool (`<config>.spool`, 0600, bounded) and replay in order, each entry
+delivered exactly once. A human keyboard can never be grabbed: the
+node's VID/PID is re-verified from sysfs immediately before every grab.
+
+**Pairing (once per kiosk).** The daemon registers a terminal
+(`--register` prints a **single-use 8-char pairing code**); the operator
+types that code plus the terminal id into the login screen's "Pair this
+terminal" panel, and the browser stores its read token. Credentials are
+split: the daemon's **secret** writes to the queue, the browser's
+**token** only reads it — and neither works on the other's endpoint.
+
+**Install** (details in README's M-10 section): udev rule → `--register`
+→ pair in the browser → `systemctl enable --now scanner-daemon`.
+`--dry-run` decodes and prints (redacted) with zero HTTP — step 1 of the
+hardware checklist, `docs/plans/r4-checklist.md`.
+
 ## 11. References
 
 - M-10 product page — <https://wiki.opticonusa.com/techsupport/en/M-10>

@@ -44,6 +44,33 @@
   **spend calendar** (per-UTC-day aggregates from
   `GET /api/orders/calendar`, dots ramped green→red by the month's min/max,
   month total below).
+- **Round 4 (OS-level scanner grab + the counter-session)**: the M-10's
+  keystrokes are intercepted at the OS, not in the browser —
+  `scripts/scanner_daemon.py` holds an **exclusive EVIOCGRAB** on the
+  scanner's evdev node (stdlib `fcntl.ioctl`; the grab lives exactly as
+  long as the fd, so a dead daemon instantly reverts the scanner to the
+  round-3 wedge capture — the fallback is structural, and the SPA's
+  status pill shows which path is live). Decoding reuses the tested HID
+  assembler via a keycode→usage table pinned by a parity property test;
+  sysfs VID/PID re-verification before every grab makes a human-keyboard
+  grab impossible; replug triggers VID/PID re-discovery (node numbers are
+  recycled). Scans flow daemon → per-terminal server queue
+  (`app/routers/scanner.py`: terminal-secret writes, browser-token reads,
+  single-use 8-char pairing code, loopback-gated registration, kinds
+  always re-derived server-side, 300 s TTL, **at-most-once** delivery via
+  consume-on-poll) → the SPA's paced 1 s poll (`static/scanfeed.js`, a
+  pure node-tested reducer; deliberately NO server-side hold — a hold
+  freezes ui_check's virtual-time dump, measured in r4rev M9) → the
+  **unchanged `enqueueScan` bus**, so login/logoff/switch/cart/intake run
+  identically whichever path delivered the scan. The badge-shape rule
+  moved to ONE module (`app/scanshapes.py`, T1) shared by auth, the
+  bridge and the daemon, pinned by a cross-language parity test against
+  `scancapture.js`. Scan-event PKs needed `sqlite_autoincrement` — a
+  plain INTEGER PRIMARY KEY restarts at 1 once pruning empties the table,
+  and a new scan would land at/below a live cursor and never be delivered
+  (caught by the at-most-once test). The full live checklist is
+  `docs/plans/r4-checklist.md`; the plan record is
+  `docs/plans/COORDINATOR4.md` + `r4t1`…`r4t7`-FINAL.
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.
