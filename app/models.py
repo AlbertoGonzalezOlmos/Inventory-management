@@ -237,3 +237,74 @@ class AppMeta(SQLModel, table=True):
     key: str = Field(primary_key=True)
     value: str = ""
     updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+
+
+class Terminal(SQLModel, table=True):
+    """A scanner kiosk: one grab daemon + one browser (round 4, T4).
+
+    The counter-session binding of the scan queue: the daemon (T2/T3,
+    scripts/scanner_daemon.py) holds the terminal SECRET (write credential
+    — it ingests scans), the kiosk browser holds the TOKEN (read credential
+    — it polls the queue, logged out included, so badge login works from
+    the login screen). Terminal-auth, not user-auth, is what lets the
+    logged-out screen receive scans.
+
+    Every credential is stored as its SHA-256 only (app.security.token_hash,
+    the session-token doctrine): a leaked database yields no usable secret,
+    token or pairing code. The 8-char pairing code is minted at
+    registration, verified constant-time at pairing, and is single-use by
+    construction: once the terminal has a token, pairing answers 409.
+
+    ``last_seen_at`` tracks the DAEMON (register + every ingest) — the
+    browser's polls do not touch it, so "daemon online" stays truthful.
+    """
+
+    __tablename__ = "terminals"
+
+    id: int | None = Field(default=None, primary_key=True)
+    terminal_id: str = Field(index=True, unique=True)
+    # The daemon's write credential (presented at register, then per ingest).
+    secret_hash: str
+    # The browser's read credential (None until the pairing code is used).
+    token_hash: str | None = Field(default=None)
+    # Single-use pairing code hash (minted at register; see class docstring).
+    pairing_code_hash: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+    last_seen_at: datetime | None = Field(default=None, sa_type=DateTime)
+
+
+class ScanEvent(SQLModel, table=True):
+    """One scanned code in a terminal's queue (the daemon→SPA channel).
+
+    ``seq`` is a global autoincrement and therefore strictly increasing —
+    it IS the polling cursor (``?after=``), scoped per terminal by the
+    terminal_id filter. ``kind`` is ALWAYS derived server-side
+    (app.scanshapes.classify_scan) — a client-supplied kind is never
+    accepted, the scan_requests doctrine: the wire carries codes, the
+    server decides what they are.
+
+    Lifetime is bounded because badge payloads are bearer credentials:
+    consumed rows are pruned on the next touch, everything older than
+    SCANNER_EVENT_TTL_SECONDS (app/routers/scanner.py) on every touch —
+    a scan nobody consumed must never replay into a later session.
+    """
+
+    __tablename__ = "scan_events"
+    # sqlite_autoincrement: the PK must be monotonic FOREVER. A plain
+    # INTEGER PRIMARY KEY restarts at 1 once pruning empties the table —
+    # a new event would then get seq <= a live client's cursor and never
+    # be delivered (caught by the at-most-once test). AUTOINCREMENT makes
+    # SQLite track the high-water mark in sqlite_sequence instead.
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    seq: int | None = Field(default=None, primary_key=True)
+    terminal_id: str = Field(index=True)
+    code: str
+    # "badge" | "barcode" | "unshaped" — server-derived (see class docstring).
+    kind: str
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+    # Set in the same commit that returns the event to a poller: at-most-once
+    # delivery (two browser tabs can never double-add one scan), and the
+    # prune marker (consumed rows are deleted on the next touch).
+    consumed_at: datetime | None = Field(default=None, sa_type=DateTime,
+                                         index=True)
