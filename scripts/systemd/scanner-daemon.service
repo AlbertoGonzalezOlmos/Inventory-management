@@ -20,10 +20,24 @@
 #     has processed the plug event; the daemon tolerates its absence
 #     (re-discovery loop), but this ordering removes the first-boot race.
 #
-# NOTE: ExecStart points at the T5 entrypoint (--forward --config …). The
-# flags finalise in T5 (forwarding target, pairing, state file); until then
-# this unit fixes the deployment shape only. Adjust WorkingDirectory to the
-# checkout/deployment the daemon runs from.
+# NOTE: the ExecStart below is the REAL T5 entrypoint. One-time setup,
+# in order:
+#   1. install the udev rule (see above) and re-plug the scanner;
+#   2. register the terminal once — it prints the single-use pairing code:
+#        uv run python scripts/scanner_daemon.py \
+#             --config /etc/hcrm/scanner.json --register
+#      (that run also starts forwarding; Ctrl-C once you have the code —
+#      SIGTERM/SIGINT are clean exits and the config is already saved);
+#   3. type the pairing code into the kiosk browser's login screen (once);
+#   4. systemctl start scanner-daemon — from here it forwards forever.
+# The unit itself never passes --register, but note the daemon's contract:
+# it registers itself whenever the config is ABSENT (spec: "no config →
+# register") — so a first `systemctl start` without step 2 still works and
+# prints the pairing code INTO THE JOURNAL (`journalctl -u scanner-daemon`,
+# root-only; the code is single-use). Once the config exists, restarts
+# never register again. Step 2 remains the recommended flow (the code never
+# touches a log). Adjust WorkingDirectory to the checkout/deployment being
+# run.
 
 [Unit]
 Description=HCRM scanner grab daemon (Opticon M-10, USB-HID keyboard mode 065a:a001)
@@ -34,8 +48,7 @@ Wants=systemd-udevd.service
 [Service]
 Type=simple
 WorkingDirectory=/opt/hcrm
-# T5 finalises the CLI; the shape (forward + config file) is fixed here.
-ExecStart=/usr/bin/env uv run python scripts/scanner_daemon.py --forward --config /etc/hcrm/scanner-daemon.json
+ExecStart=/usr/bin/env uv run python scripts/scanner_daemon.py --config /etc/hcrm/scanner.json --forward http://127.0.0.1:8000
 Restart=always
 RestartSec=2
 SupplementaryGroups=input plugdev
