@@ -11,7 +11,11 @@ whatever window has OS focus. Round 4 grabs the scanner at the OS level:
   (EVIOCGRAB context manager with the human-keyboard guard), the
   re-discovery ``run_loop``, and the ``DaemonLock`` single-instance
   lockfile,
-* T5 will add the forwarding entrypoint (HTTP, pairing, config).
+* T5 (docs/plans/r4t5-FINAL.md), forwarding + packaging — ``main()``
+  (``--config``/``--register``/``--forward``/``--dry-run``), the 0600
+  terminal config, the spooled :class:`Forwarder` (a server outage never
+  stops the grab and never drops a scan), redaction on every print path,
+  and SIGTERM/SIGINT clean exit.
 
 **The reuse bridge (do not duplicate the assembler).** evdev delivers Linux
 keycodes (``KEY_A`` = 30), not HID usages ('a' = 4) — and the keycode space
@@ -59,14 +63,24 @@ host today — qwen M1).
 
 from __future__ import annotations
 
+import argparse
 import errno
 import fcntl
+import json
 import os
+import secrets
+import signal
+import socket
 import struct
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+# Allow `python scripts/scanner_daemon.py` from anywhere (the
+# scanner_bridge bootstrap pattern): the repo root makes `scripts.*` and
+# `app.*` imports resolve.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # scripts.* imports work from the repo root (namespace package), exactly as
 # tests/test_scanner_hid.py imports scripts.scanner_hid.
@@ -606,3 +620,326 @@ def run_loop(on_scan, *, node=None, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
             if stop is not None and stop():
                 return
             continue
+
+
+# --- T5: forwarding, pairing, config, packaging ---------------------------------
+
+# Reused, not re-implemented: the bridge's redaction is the ONE masking rule
+# (T1 delegated it to the shared shapes), so badge payloads cannot be printed
+# raw here even by accident of a copied-but-stale table.
+from scripts.scanner_bridge import redact_code  # noqa: E402
+
+
+class PostError(Exception):
+    """One failed HTTP POST. ``status`` 0 = transport (unreachable/timeout);
+    anything else is the HTTP status. Transient failures (transport, 5xx,
+    429) are spooled and retried; permanent ones (401 = the terminal was
+    deleted / secret rotated, 409, …) are spooled and reported loudly — the
+    daemon keeps grabbing either way (stopping the typing is the product;
+    delivery is best-effort with a visible backlog)."""
+
+    def __init__(self, status: int, detail: str = ""):
+        super().__init__(f"POST failed ({status or 'network'}): {detail}")
+        self.status = status
+
+    @property
+    def transient(self) -> bool:
+        return self.status == 0 or self.status >= 500 or self.status == 429
+
+
+def _http_post(url, headers, body, timeout=10.0):
+    """The default transport: one JSON POST, stdlib only.
+
+    urllib is imported LAZILY so ``--dry-run`` (and the offline test suite)
+    touch no network code at all. Raises :class:`PostError`, never a raw
+    traceback (the bridge doctrine: no failure of the environment may look
+    like a crash).
+    """
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        url, method="POST", data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:200]
+        raise PostError(exc.code, detail) from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise PostError(0, str(exc)) from exc
+
+
+class Spool:
+    """The ordered delivery backlog (server down, daemon restarted mid-outage).
+
+    Entries are FIFO and per-physical-scan: two scans of the same barcode
+    are two entries (a re-scan is a quantity, not a duplicate) — "dedupe"
+    means the FORWARDER never delivers one entry twice, not that identical
+    codes collapse. Bounded (drop-oldest past ``cap``) and optionally
+    file-backed (``0600``; a spool can briefly hold badge payloads, the
+    same at-rest trade-off as the server's scan_events TTL, stated in
+    README's security notes). The whole file is rewritten on change —
+    spools are tiny and correctness beats cleverness here.
+    """
+
+    def __init__(self, path=None, cap=1000, log=None):
+        self.path = Path(path) if path is not None else None
+        self.cap = cap
+        self._log = log or (lambda message: None)
+        self._entries: list[str] = []
+        if self.path is not None and self.path.exists():
+            try:
+                self._entries = [line for line in
+                                 self.path.read_text().splitlines() if line]
+            except OSError as exc:
+                self._log(f"spool unreadable ({exc}) — starting empty")
+
+    def pending(self) -> list[str]:
+        return list(self._entries)
+
+    def add(self, code: str) -> None:
+        self._entries.append(code)
+        while len(self._entries) > self.cap:
+            dropped = self._entries.pop(0)
+            self._log(f"spool full — oldest scan dropped ({redact_code(dropped)})")
+        self._persist()
+
+    def remove_oldest(self) -> None:
+        self._entries.pop(0)
+        self._persist()
+
+    def _persist(self) -> None:
+        if self.path is None:
+            return
+        if not self._entries:
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, ("\n".join(self._entries) + "\n").encode())
+        finally:
+            os.close(fd)
+
+
+class Forwarder:
+    """Deliver scans to POST /api/scanner/events, in order, without ever
+    stopping the grab loop.
+
+    Every scan enters the spool FIRST and is then drained head-first: a
+    successful POST removes its entry before the next is tried, so a crash
+    can at worst re-POST the head (never skip or reorder), and a failed POST
+    leaves the backlog for the next scan/startup to retry — the loop keeps
+    listening the whole time. Permanent rejections (401: the terminal was
+    deleted server-side) are logged loudly and kept spooled; recovery is
+    DELETE + ``--register``.
+    """
+
+    def __init__(self, post, url, secret, spool, log=_log):
+        self._post = post
+        self._url = url
+        self._secret = secret
+        self.spool = spool
+        self._log = log
+
+    def handle(self, code: str) -> None:
+        """run_loop's on_scan: enqueue + one drain attempt."""
+        self.spool.add(code)
+        self.drain()
+
+    def drain(self) -> int:
+        """Deliver the backlog head-first; stop at the first failure.
+        Returns the number of entries delivered in this pass."""
+        delivered = 0
+        while self.spool.pending():
+            code = self.spool.pending()[0]
+            try:
+                self._post(self._url, {"X-Scanner-Secret": self._secret},
+                           {"code": code})
+            except PostError as exc:
+                if not exc.transient:
+                    self._log(f"forwarding REJECTED ({exc}) — scans spooled; "
+                              "if this persists, the terminal was deleted "
+                              "server-side: DELETE it and re-run --register")
+                else:
+                    self._log(f"server unreachable ({exc}) — scan spooled "
+                              f"({len(self.spool.pending())} waiting)")
+                return delivered
+            self.spool.remove_oldest()
+            delivered += 1
+            self._log(f"forwarded {redact_code(code)}")
+        return delivered
+
+
+# --- config (the daemon's identity: {terminal_id, secret}, 0600) ----------------
+
+def load_config(path) -> dict | None:
+    """Read {terminal_id, secret}, or None when absent/unparseable."""
+    try:
+        cfg = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cfg, dict) or "terminal_id" not in cfg or "secret" not in cfg:
+        return None
+    return cfg
+
+
+def save_config(path, terminal_id: str, secret: str) -> None:
+    """Write the config 0600 — it holds a write credential for the API."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps({"terminal_id": terminal_id,
+                                 "secret": secret}, indent=2).encode())
+    finally:
+        os.close(fd)
+
+
+def register_terminal(post, base_url: str, terminal_id: str, secret: str) -> str:
+    """POST /api/scanner/terminals → the single-use pairing code.
+
+    Raises PostError (409 already-registered etc.): main turns that into a
+    loud exit with the server's own recovery message.
+    """
+    body = post(base_url.rstrip("/") + "/api/scanner/terminals", {},
+                {"terminal_id": terminal_id, "secret": secret})
+    return body["pairing_code"]
+
+
+class _Stopped(Exception):
+    """Raised by the SIGTERM handler: unwinds the with-blocks (fd closes →
+    the grab auto-releases) for a clean exit 0."""
+
+
+def _stop_handler(signum, frame):  # pragma: no cover — signal plumbing
+    raise _Stopped()
+
+
+def _forward_events_url(base_url: str) -> str:
+    return base_url.rstrip("/") + "/api/scanner/events"
+
+
+def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
+         closer=None, scan_reader=None, lock_path=None,
+         sysfs_root=None) -> int:
+    """The daemon entrypoint (round 4, T5).
+
+    Modes:
+      scanner_daemon --config PATH [--register] [--forward URL]
+        Register (first run, or ``--register``): POST the terminal, print
+        the single-use pairing code, persist the 0600 config — then run.
+        Run: lock → grab (T3) → decode (T2) → forward each scan to
+        POST /api/scanner/events, spooled and retried so a server outage
+        never stops the grab and never drops a scan.
+      scanner_daemon --dry-run [--node N]
+        Decode and print (redacted), ZERO HTTP — the hardware-checklist
+        mode; no config, no lock, no network import.
+
+    Everything device/network-touching is injectable (``post``, the grab
+    triple, ``scan_reader``, ``sleep``, ``lock_path``) so the test suite
+    runs with no hardware and no network. SIGTERM/SIGINT stop the loop,
+    close the fd (the grab auto-releases) and exit 0.
+    """
+    parser = argparse.ArgumentParser(
+        description="Grab the Opticon M-10's evdev node (stop it typing "
+                    "into windows) and forward its scans to the HCRM "
+                    "scanner queue.")
+    parser.add_argument("--config", metavar="PATH",
+                        help="terminal config JSON {terminal_id, secret} "
+                             "(written 0600 on first register)")
+    parser.add_argument("--register", action="store_true",
+                        help="register the terminal (first run, or after a "
+                             "server-side DELETE) and print the pairing code")
+    parser.add_argument("--forward", metavar="URL", default="http://127.0.0.1:8000",
+                        help="HCRM base URL (default http://127.0.0.1:8000)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="decode and print scans, zero HTTP, no config")
+    parser.add_argument("--terminal-id", metavar="ID", default=None,
+                        help="terminal id at register time (default: hostname)")
+    parser.add_argument("--node", metavar="NODE", default=None,
+                        help="explicit event node for the FIRST grab "
+                             "(re-discovery is always by VID/PID)")
+    parser.add_argument("--spool", metavar="PATH", default=None,
+                        help="delivery backlog file (default: <config>.spool)")
+    args = parser.parse_args(argv)
+    post_fn = post or _http_post
+    nap = sleep if sleep is not None else time.sleep
+    grab_kwargs = {"node": args.node, "opener": opener, "ioctl": ioctl,
+                   "closer": closer, "scan_reader": scan_reader or read_scans,
+                   "sleep": nap}
+    if sysfs_root is not None:
+        grab_kwargs["sysfs_root"] = sysfs_root
+
+    previous = {}
+    installed = []
+    try:
+        # Signals: raise _Stopped from anywhere (including a blocking read)
+        # so the with-blocks unwind and the fd closes. Installed in BOTH
+        # modes — a dry-run must stop as cleanly as the real daemon.
+        for signum, handler in ((signal.SIGTERM, _stop_handler),):
+            try:
+                previous[signum] = signal.signal(signum, handler)
+                installed.append(signum)
+            except ValueError:  # not the main thread (embedded use)
+                pass
+
+        if args.dry_run:
+            # Zero HTTP by construction: no post is built, no config is
+            # read, and every decoded scan prints through redact_code.
+            try:
+                run_loop(lambda code: print(redact_code(code), flush=True),
+                         **grab_kwargs)
+            except (_Stopped, KeyboardInterrupt):
+                pass
+            return 0
+
+        if not args.config:
+            parser.error("--config is required (or pass --dry-run)")
+
+        with DaemonLock(lock_path):
+            config = load_config(args.config)
+            if config is None:
+                terminal_id = args.terminal_id or socket.gethostname()
+                secret = secrets.token_urlsafe(32)
+            else:
+                terminal_id, secret = config["terminal_id"], config["secret"]
+            if args.register or config is None:
+                code = register_terminal(post_fn, args.forward,
+                                         terminal_id, secret)
+                print(f"pair this terminal: enter {code} on the login screen",
+                      flush=True)
+                save_config(args.config, terminal_id, secret)
+                _log(f"registered terminal {terminal_id}")
+
+            spool = Spool(args.spool or (str(args.config) + ".spool"),
+                          log=_log)
+            forwarder = Forwarder(post_fn, _forward_events_url(args.forward),
+                                  secret, spool, log=_log)
+            if spool.pending():
+                _log(f"replaying {len(spool.pending())} spooled scan(s)")
+            forwarder.drain()  # a restart mid-outage replays the backlog
+            try:
+                run_loop(forwarder.handle, **grab_kwargs)
+            except (_Stopped, KeyboardInterrupt):
+                pass
+            forwarder.drain()  # best-effort: flush what a stop left behind
+        return 0
+    except GrabError as exc:
+        # The loud operator problems (EBUSY/EACCES/wrong device/409): one
+        # clear line, exit non-zero — never a traceback, never a wedge.
+        print(f"scanner_daemon: {exc}", file=sys.stderr)
+        return 1
+    except PostError as exc:
+        print(f"scanner_daemon: registration failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        for signum in installed:
+            signal.signal(signum, previous[signum])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

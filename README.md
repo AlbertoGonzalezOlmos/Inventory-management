@@ -171,6 +171,25 @@ that adds SIMD-accelerated vector search:
   **`docs/opticon-hardware.md`**.
 
 ### Barcode scanner (Opticon M-10)
+- **OS-level grab daemon (round 4)**: in USB-HID keyboard mode the M-10
+  "types" into whatever window has focus — `scripts/scanner_daemon.py`
+  exclusively grabs its evdev node (`EVIOCGRAB`, stdlib only) so the
+  kernel delivers its keystrokes to the daemon *as data* and to nothing
+  else, decodes them (reusing the tested HID assembler) and forwards each
+  scan to the server-side terminal queue; the SPA polls that queue (see
+  *Kiosk scan feed* in the API summary). Install, once per kiosk:
+  install the udev rule
+  (`sudo cp scripts/udev/99-opticon-scanner.rules /etc/udev/rules.d/` +
+  re-plug), register the terminal
+  (`uv run python scripts/scanner_daemon.py --config … --register` — it
+  prints a **single-use pairing code**; type it once into the kiosk
+  browser's login screen), then run
+  `scripts/systemd/scanner-daemon.service` (`Restart=always`). The daemon
+  exits → the kernel instantly releases the grab → the scanner reverts to
+  the browser capture of round 3 (no operator action); a server outage
+  never stops the grab — scans spool (`<config>.spool`, 0600, bounded) and
+  replay with per-entry dedupe. Badge payloads are redacted in every
+  daemon log line.
 - Hardware integration for the Opticon M-10 2D presentation scanner:
   stdlib-first serial driver (`app/scanner/`, pyserial optional — one reader
   thread owns the port, so a scan interleaved with a command ACK is delivered,
