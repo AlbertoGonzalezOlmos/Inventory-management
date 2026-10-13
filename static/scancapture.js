@@ -74,6 +74,8 @@ const SCAN_STRICT_DEFER = false;  // true = no WARM fast-path: every char held
 
 // Routing-only shape gates (the SERVER classifies authoritatively — these
 // just pick the flow and keep garbage bursts from opening modals).
+// Python source of truth: app/scanshapes.py (round 4, T1) — the badge
+// pattern TEXT is pinned equal on both sides by tests/test_scanshapes.py.
 const BADGE_FULL_RE = /^HCRM1:[A-Za-z0-9_-]{43}$/;
 const BADGE_RAW_RE = /^[A-Za-z0-9_-]{43}$/;          // prefix stripped by a bridge/scanner
 // Barcode-ish: GTIN digits, or an opaque label — which always carries at

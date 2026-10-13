@@ -59,9 +59,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.scanlookup import resolve_scan, verdict_message  # noqa: E402
 from app.scanner import OpticonM10, find_scanner_ports  # noqa: E402
 from app.scanner.transport import SerialOpenError  # noqa: E402
+from app.scanshapes import (  # noqa: E402
+    BADGE_PREFIX,
+    BADGE_RAW_RE,
+    BADGE_TOKEN_LEN,
+)
 
 BASE = os.environ.get("HCRM_BASE", "http://localhost:8000")
-BADGE_PREFIX = "HCRM1:"  # keep in sync with app.qrbadge.BADGE_PREFIX
 
 
 def redact_code(code):
@@ -70,10 +74,19 @@ def redact_code(code):
     printed in full: not the ``HCRM1:`` form, and not the bare 43-char
     token a scanner/bridge may send with the prefix stripped (that form
     reaches the catalogue path as an opaque code, and the verdict line
-    would otherwise print the secret). Barcodes pass through unchanged."""
-    if code.startswith(BADGE_PREFIX) and len(code) == len(BADGE_PREFIX) + 43:
+    would otherwise print the secret). Barcodes pass through unchanged.
+
+    The shapes come from app/scanshapes.py (round 4, T1 — the ONE
+    classification, shared with auth's badge acceptance), so the masking
+    rule cannot drift from the login rule. One deliberate asymmetry: the
+    full form is masked on prefix+length ALONE (charset not re-validated),
+    because a MISREAD badge token — one wrong character — still exposes 42
+    of the 43 secret chars, and 64 candidates for the missing one is not a
+    secret. The bare form has no marker and must be exactly token-shaped
+    before it is masked (a 43-char SKU is not a credential)."""
+    if code.startswith(BADGE_PREFIX) and len(code) == len(BADGE_PREFIX) + BADGE_TOKEN_LEN:
         return BADGE_PREFIX + "\u2022\u2022\u2022\u2022"  # HCRM1:••••
-    if len(code) == 43 and all(c.isalnum() or c in "-_" for c in code):
+    if BADGE_RAW_RE.fullmatch(code):
         return "\u2022\u2022\u2022\u2022 (badge token)"
     return code
 

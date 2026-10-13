@@ -34,10 +34,9 @@ import secrets
 from dataclasses import dataclass
 
 from app import security
+from app.scanshapes import BADGE_PREFIX, BADGE_TOKEN_LEN  # noqa: F401 — BADGE_PREFIX re-exported (its historical home; round 4, T1 made app/scanshapes.py the ONE definition)
 from app.security import token_hash
 from app.vendor.qrcodegen import QrCode
-
-BADGE_PREFIX = "HCRM1:"
 
 # Domain-separation prefix for the derivation message — FROZEN FOREVER: any
 # change to the derivation formula silently orphans every stored badge hash
@@ -69,7 +68,11 @@ def parse_badge_payload(scanned: str) -> str | None:
     token = scanned[len(BADGE_PREFIX):]
     # token_urlsafe(32) -> 43 chars of [A-Za-z0-9_-]; reject anything else so
     # a truncated/garbled scan fails cleanly instead of hitting the database.
-    if len(token) != 43 or not all(c.isalnum() or c in "-_" for c in token):
+    # The prefix and length come from app.scanshapes (the shared shape
+    # constants); the charset check below stays THIS function's own — it is
+    # deliberately unicode-lenient (str.isalnum), the DB-facing parse, and
+    # the ASCII-strict regex gate for acceptance lives in scanshapes.
+    if len(token) != BADGE_TOKEN_LEN or not all(c.isalnum() or c in "-_" for c in token):
         return None
     return scanned
 
