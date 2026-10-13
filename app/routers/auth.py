@@ -2,7 +2,6 @@
 whoami, password change, kiosk logoff scheduling, badge identification."""
 
 import hmac
-import re
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,12 +14,11 @@ from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
 from app.models import AuthToken, User, utcnow
 from app.qrbadge import (
-    BADGE_PREFIX,
     badge_svg,
     new_badge_for,
-    parse_badge_payload,
     view_badge,
 )
+from app.scanshapes import BADGE_PREFIX, classify_scan
 from app.schemas import (
     AuthOut,
     ChangeEmailIn,
@@ -123,8 +121,10 @@ def login(payload: LoginIn, session: Session = Depends(get_session)):
 
 
 # A raw badge token (without the HCRM1: prefix) is also accepted, so a badge
-# works even if a scanner/bridge strips the prefix.
-_RAW_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+# works even if a scanner/bridge strips the prefix. The shape itself lives
+# in app/scanshapes.py (round 4, T1) — the ONE rule, shared with the bridge's
+# redaction and (later) the daemon ingest; tests/test_scanshapes.py pins the
+# delegation so this site cannot re-grow a private regex.
 
 
 def _badge_from_scanned(scanned: str) -> str | None:
@@ -132,11 +132,21 @@ def _badge_from_scanned(scanned: str) -> str | None:
     the raw 43-char token — a scanner/bridge may strip the prefix. Shared by
     qr-login and qr-identify so the two endpoints cannot drift on what
     counts as a badge presentation (the same anti-drift doctrine as the
-    Task-3 scan-resolution core)."""
-    badge = parse_badge_payload(scanned)
-    if badge is None and _RAW_TOKEN_RE.fullmatch(scanned.strip()):
-        badge = BADGE_PREFIX + scanned.strip()
-    return badge
+    Task-3 scan-resolution core).
+
+    ``classify_scan``'s full-form match is exactly ``parse_badge_payload``'s
+    validation (prefix + 43 token chars, ASCII-strict here) applied to the
+    stripped input — the same acceptance as pre-T1 (``parse_badge_payload``
+    stripped too; the only residue is the unicode-lenient ``isalnum`` edge,
+    which can never be a real badge and 401s at the hash lookup either
+    way). The bare token gets its prefix back so the hash lookup sees the
+    form the badge was issued in. Shape acceptance is not authentication:
+    a well-shaped but unknown badge still 401s at the lookup.
+    """
+    stripped = scanned.strip()
+    if classify_scan(stripped) != "badge":
+        return None
+    return stripped if stripped.startswith(BADGE_PREFIX) else BADGE_PREFIX + stripped
 
 
 @router.post("/qr-login", response_model=AuthOut)
