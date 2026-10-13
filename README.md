@@ -171,25 +171,36 @@ that adds SIMD-accelerated vector search:
   **`docs/opticon-hardware.md`**.
 
 ### Barcode scanner (Opticon M-10)
-- **OS-level grab daemon (round 4)**: in USB-HID keyboard mode the M-10
-  "types" into whatever window has focus — `scripts/scanner_daemon.py`
-  exclusively grabs its evdev node (`EVIOCGRAB`, stdlib only) so the
-  kernel delivers its keystrokes to the daemon *as data* and to nothing
-  else, decodes them (reusing the tested HID assembler) and forwards each
-  scan to the server-side terminal queue; the SPA polls that queue (see
-  *Kiosk scan feed* in the API summary). Install, once per kiosk:
-  install the udev rule
-  (`sudo cp scripts/udev/99-opticon-scanner.rules /etc/udev/rules.d/` +
-  re-plug), register the terminal
-  (`uv run python scripts/scanner_daemon.py --config … --register` — it
-  prints a **single-use pairing code**; type it once into the kiosk
-  browser's login screen), then run
-  `scripts/systemd/scanner-daemon.service` (`Restart=always`). The daemon
-  exits → the kernel instantly releases the grab → the scanner reverts to
-  the browser capture of round 3 (no operator action); a server outage
+- **OS-level grab daemon (round 4, "option 2")**: in USB-HID keyboard mode
+  the M-10 "types" into whatever window has focus —
+  `scripts/scanner_daemon.py` exclusively grabs its evdev node
+  (`EVIOCGRAB`, stdlib only) so the kernel delivers its keystrokes to the
+  daemon *as data* and to nothing else, decodes them (reusing the tested
+  HID assembler) and forwards each scan to the server-side terminal queue;
+  the SPA polls that queue (see *Kiosk scan feed* in the API summary).
+  **Install, once per kiosk**:
+  1. `sudo cp scripts/udev/99-opticon-scanner.rules /etc/udev/rules.d/` +
+     re-plug the scanner (the event node is `root:input 0660` otherwise);
+  2. register the terminal and pair the browser:
+     `uv run python scripts/scanner_daemon.py --config /etc/hcrm/scanner.json
+     --register` — it prints a **single-use 8-char pairing code**; type it
+     (with the terminal id) once into the kiosk browser's login screen
+     ("Pair this terminal");
+  3. `sudo cp scripts/systemd/scanner-daemon.service /etc/systemd/system/ &&
+     sudo systemctl enable --now scanner-daemon`.
+  The daemon exits (even `kill -9`) → the kernel instantly releases the
+  grab → the scanner reverts to the round-3 browser capture (no operator
+  action — the status pill shows which path is live). A server outage
   never stops the grab — scans spool (`<config>.spool`, 0600, bounded) and
   replay with per-entry dedupe. Badge payloads are redacted in every
-  daemon log line.
+  daemon log line. **Config/env**: `--config` holds
+  `{terminal_id, secret}` (0600, written at register); `--forward URL`
+  (default `http://127.0.0.1:8000`) is the server base;
+  `HCRM_SCANNER_REGISTER_ANY=1` opens terminal registration to LAN clients
+  (loopback-only by default); queued scans rest at most
+  `HCRM_SCANNER_EVENT_TTL_SECONDS` (default 300) server-side; `--dry-run`
+  decodes and prints (redacted) with zero HTTP — the hardware-checklist
+  mode (`docs/plans/r4-checklist.md`).
 - Hardware integration for the Opticon M-10 2D presentation scanner:
   stdlib-first serial driver (`app/scanner/`, pyserial optional — one reader
   thread owns the port, so a scan interleaved with a command ACK is delivered,
@@ -269,6 +280,9 @@ that adds SIMD-accelerated vector search:
 │   │                     # reporting, no password restore
 │   ├── opticon_detect.py # the repo's one map of Opticon USB personalities
 │   ├── scanner_hid.py    # receive scans from a USB-HID (keyboard-mode) scanner
+│   ├── scanner_daemon.py # round 4: EVIOCGRAB the scanner's evdev node (it
+│   │                     # stops typing into windows) + forward to the queue
+│   ├── systemd/          # scanner-daemon.service (Restart=always kiosk unit)
 │   ├── udev/             # one-time sudo install: device-node permissions
 │   ├── ui_check.py       # browser gate: renders the SPA + /docs in headless
 │   │                     # Chrome and fails on console errors / missing DOM
@@ -299,6 +313,17 @@ that adds SIMD-accelerated vector search:
   `not_loaded`), `insecure_dev_admin` exposes the dev credential mode, and
   `pbkdf2_iterations` is there so a load test's latency budget can be read
   against the hashing cost it was measured at
+- **Kiosk scan feed (round 4)** — terminal-auth (not user-auth, so the
+  logged-out login screen can poll): `POST /api/scanner/terminals`
+  `{terminal_id, secret}` (loopback-gated; `HCRM_SCANNER_REGISTER_ANY=1`
+  for LAN) → single-use pairing code; `POST /api/scanner/pair
+  `{terminal_id, code}` → the browser's read token; `POST
+  /api/scanner/events` `{code}` (the daemon's secret; the `kind` is
+  always derived server-side via the shared scan classifier) → `{seq}`;
+  `GET /api/scanner/events?after=<seq>` (the browser's token) →
+  `{events: [{seq, code, kind}], latest_seq}` — **at-most-once** (delivered
+  events are consumed in the same commit) with a 300 s TTL; `DELETE
+  /api/scanner/terminals/{id}` (staff or loopback) un-registers a kiosk
 - `GET /api/items?q=&category=&limit=&offset=` — paginated keyword listing
   (LIKE wildcards `%`/`_` in `q` are escaped and matched literally)
 - `GET /api/items/vector-search?q=&category=&limit=&offset=` — **semantic
