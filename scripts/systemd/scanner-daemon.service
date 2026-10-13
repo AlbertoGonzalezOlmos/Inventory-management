@@ -1,0 +1,46 @@
+# HCRM scanner grab daemon — systemd system unit (round 4, T3).
+#
+# MANUAL INSTALL (deliberately not done by any script — the round-4 hardware
+# checklist, docs/plans/r4-checklist.md, is the live gate):
+#   sudo cp scripts/systemd/scanner-daemon.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now scanner-daemon
+#   journalctl -u scanner-daemon -f      # watch the grab/re-discovery log
+#
+# Why these settings:
+#   * Restart=always + RestartSec=2 — the daemon's exit releases the grab
+#     (kernel: grab lifetime == fd lifetime), and during any gap the scanner
+#     reverts to keyboard-wedge into whatever window has focus; a crashed
+#     daemon must come back within seconds, not at the next boot.
+#   * SupplementaryGroups=input — /dev/input/eventN is root:input 0660
+#     (measured, r4rev M4). With the udev rule installed
+#     (scripts/udev/99-opticon-scanner.rules, GROUP=plugdev) the group is
+#     redundant but harmless; keep whichever exists on this distro.
+#   * After=systemd-udevd.service — the device node only exists once udev
+#     has processed the plug event; the daemon tolerates its absence
+#     (re-discovery loop), but this ordering removes the first-boot race.
+#
+# NOTE: ExecStart points at the T5 entrypoint (--forward --config …). The
+# flags finalise in T5 (forwarding target, pairing, state file); until then
+# this unit fixes the deployment shape only. Adjust WorkingDirectory to the
+# checkout/deployment the daemon runs from.
+
+[Unit]
+Description=HCRM scanner grab daemon (Opticon M-10, USB-HID keyboard mode 065a:a001)
+Documentation=file:/opt/hcrm/docs/opticon-hardware.md
+After=systemd-udevd.service
+Wants=systemd-udevd.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hcrm
+# T5 finalises the CLI; the shape (forward + config file) is fixed here.
+ExecStart=/usr/bin/env uv run python scripts/scanner_daemon.py --forward --config /etc/hcrm/scanner-daemon.json
+Restart=always
+RestartSec=2
+SupplementaryGroups=input plugdev
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
