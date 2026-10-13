@@ -293,6 +293,14 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
     if count(r'data-scan-capture="on"', dom) < 1:
         failures.append(f"[{label}] data-scan-capture=\"on\" missing — "
                         "the global scan listener did not install")
+    # Round 4: the scan-feed pill must render on every view (it lives in
+    # the topbar) — a JS error in installScanFeed fails here even if Vue
+    # still mounted, and the operator loses the "which scan path is live"
+    # signal (live = daemon-forwarded, off = paired but unreachable,
+    # unpaired = the wedge capture is the path).
+    if count(r'data-scanner-feed="(?:live|off|unpaired)"', dom) < 1:
+        failures.append(f"[{label}] data-scanner-feed pill missing — "
+                        "the round-4 scan feed did not install")
     if copy == "Log in" and count(r'placeholder="Scan your QR badge here"', dom) < 1:
         failures.append(f"[{label}] badge login field missing — "
                         "scan capture regressed the dedicated badge path")

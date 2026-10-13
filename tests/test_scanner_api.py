@@ -18,7 +18,7 @@ import app.routers.scanner as scanner_router
 from app.database import engine
 from app.models import ScanEvent
 from app.scanshapes import BADGE_PREFIX
-from tests.conftest import auth, create_user
+from tests.conftest import ADMIN_PASSWORD_AFTER_CHANGE, auth, create_user
 
 BADGE = BADGE_PREFIX + "A" * 43
 RAW_TOKEN = "B" * 43
@@ -218,9 +218,45 @@ def test_secret_may_ride_in_the_body(client, loopback):
     assert r.status_code == 201
 
 
+def test_credentials_may_ride_authorization_bearer(client, loopback, admin_token):
+    # The SPA's shared api() helper attaches foreign credentials ONLY via
+    # Authorization: Bearer (its {token, raw} form, round 4 T6) — so both
+    # endpoints accept that presentation. A USER bearer token simply
+    # matches no terminal hash and 401s like any unknown credential.
+    secret, code = register(client)
+    token = pair(client, "counter-1", code).json()["token"]
+
+    r = client.post("/api/scanner/events", json={"code": "EX-007"},
+                    headers={"Authorization": f"Bearer {secret}"})
+    assert r.status_code == 201, r.text
+    r = client.get("/api/scanner/events?after=0",
+                   headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    assert [e["code"] for e in r.json()["events"]] == ["EX-007"]
+
+    # A member session token is NOT a terminal credential — same 401 as a
+    # garbage string (no leak, no accidental cross-auth).
+    r = client.post("/api/auth/login", json={
+        "email": "admin@shop.local",
+        "password": ADMIN_PASSWORD_AFTER_CHANGE})
+    member_token = r.json()["token"]
+    assert client.get("/api/scanner/events?after=0",
+                      headers={"Authorization": f"Bearer {member_token}"}).status_code == 401
+
+
 def test_overlong_codes_are_rejected(client, loopback):
     secret, _ = register(client)
     assert ingest(client, secret, "A" * 129).status_code == 422
+
+
+def test_empty_bearer_falls_back_to_the_body_secret(client, loopback):
+    # "Authorization: Bearer " (empty) is no credential — the body secret
+    # must still be honoured rather than 401ing a valid presentation.
+    secret, _ = register(client)
+    r = client.post("/api/scanner/events", json={"code": "EX-007",
+                                                 "secret": secret},
+                    headers={"Authorization": "Bearer "})
+    assert r.status_code == 201
 
 
 # --- polling: cursor, at-most-once, isolation ---------------------------------------
