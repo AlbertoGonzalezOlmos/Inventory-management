@@ -111,9 +111,6 @@ Vue.createApp({
       loginForm: { email: "", password: "" },
       loginError: "",
       greeting: "",   // the "Hi <name>" login banner (round 3, Task C)
-      badgeCode: "",  // the collapsed manual fallback field (Task E: the
-                       // global capture is the primary no-click path)
-      showBadgeField: false,  // "Use a badge code instead" toggle
       registerForm: { name: "", email: "", password: "" },
       registerError: "",
 
@@ -149,9 +146,9 @@ Vue.createApp({
       // wedge capture above stays installed in EVERY mode — it is the
       // fallback whenever no daemon holds the grab.
       scannerFeed: "unpaired",
-      pairForm: { terminal_id: "", code: "" },   // login-screen pairing
+      pairForm: { terminal_id: "", code: "" },   // the pill's pairing popover
+      pairOpen: false,      // the header pill button's popover
       pairError: "",
-      pairOk: false,
       pairBusy: false,
 
       // data explorer
@@ -381,6 +378,16 @@ Vue.createApp({
     // yields the badge card alone (the repo's first @media print block).
     badgePrint(on) { this._printBadge(!!on); },
     memberBadge(on) { this._printBadge(!!on); },
+    // Focus the pairing form's first field when the popover opens — the
+    // autofocus attribute only fires on initial page load, not on a
+    // v-if mount.
+    pairOpen(on) {
+      if (!on) return;
+      this.$nextTick(() => {
+        const el = document.querySelector(".pair-popover input");
+        if (el) el.focus();
+      });
+    },
     currentView(view) {
       if (view === "catalogue" || view === "checkout") {
         if (this.items.length === 0) this.reloadItems();
@@ -472,14 +479,6 @@ Vue.createApp({
       this.loadCategories();
     },
 
-    async doBadgeLogin() {
-      // QR badge login: the scanner (USB-HID mode) types the badge payload
-      // into the field and its CR suffix submits the form. The global scan
-      // bus (logged-out badge scans from anywhere) calls badgeLogin()
-      // directly — this field keeps its dedicated behaviour.
-      await this.badgeLogin(this.badgeCode.trim());
-    },
-
     async badgeLogin(code) {
       if (!code) return;
       // Busy double-fire guard (Task E): a fast double-Enter (the collapsed
@@ -492,7 +491,6 @@ Vue.createApp({
         const data = await api("/auth/qr-login", {
           method: "POST", body: { token: code },
         });
-        this.badgeCode = "";
         await this.afterLogin(data);
       } catch (e) {
         this.loginError = e.message;
@@ -559,8 +557,11 @@ Vue.createApp({
       // countdown expiry, account switch, session expiry), or to a view the
       // user just navigated away from: leaving them up strands a stale,
       // user-specific dialog over the login screen or the new account.
+      // The pairing popover is terminal-scoped, not user-scoped, but a
+      // dropdown that survives navigation is its own stranding class.
       // badgeSvg/badgePayload are the account view's rotated-badge display —
       // a credential, and the first thing to die with its session.
+      this.pairOpen = false;
       this.detailItem = null;
       this.scanIntake = null;
       this.memberBadge = null;
@@ -1671,12 +1672,11 @@ Vue.createApp({
     },
 
     async pairTerminal() {
-      // The login-screen pairing panel: the operator types the terminal id
+      // The pill-popover pairing form: the operator types the terminal id
       // and the 8-char single-use code the daemon printed (round 4, T5).
       // raw: true — a 401 here is a WRONG CODE, not a user-session expiry,
       // and must not run api()'s global logout cleanup.
       this.pairError = "";
-      this.pairOk = false;
       const terminal_id = (this.pairForm.terminal_id || "").trim();
       // The server mints UPPERCASE Crockford codes and hash-compares
       // exactly; an operator typing lowercase at the kiosk must not get a
@@ -1695,7 +1695,11 @@ Vue.createApp({
         if (status === 200 && data && data.token) {
           localStorage.setItem(TERMINAL_TOKEN_KEY, data.token);
           this.pairForm = { terminal_id: "", code: "" };
-          this.pairOk = true;
+          // The pill flipping to live/off IS the success feedback; close
+          // the popover and say it once as a toast.
+          this.pairOpen = false;
+          this.showToast("Scanner paired — scans from this terminal now " +
+                         "arrive here, even with this window unfocused");
           this._feedDispatch({ type: "paired", token: data.token });
         } else if (status === 401) {
           this.pairError = "Unknown terminal or wrong pairing code";
@@ -1715,6 +1719,8 @@ Vue.createApp({
     unpairTerminal() {
       localStorage.removeItem(TERMINAL_TOKEN_KEY);
       this._feedDispatch({ type: "unpair" });
+      // Keep the popover open: it flips to the pairing form (the recovery
+      // loop — Unpair, daemon --register, enter the new code — is one flow).
     },
 
     /* ---------- kiosk logoff countdown (Task 4's server deadline) ---------- */

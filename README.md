@@ -183,8 +183,9 @@ that adds SIMD-accelerated vector search:
      re-plug the scanner (the event node is `root:input 0660` otherwise);
   2. register the terminal and pair the browser:
      `uv run python scripts/scanner_daemon.py --config /etc/hcrm/scanner.json
-     --register` — it prints a **single-use 8-char pairing code**; type it
-     (with the terminal id) once into the kiosk browser's login screen
+     --register` — it prints a **single-use 8-char pairing code**; in the
+     kiosk browser, click the **"no scanner"** pill in the header and enter
+     it (with the terminal id) once in the popover that opens
      ("Pair this terminal");
   3. `sudo cp scripts/systemd/scanner-daemon.service /etc/systemd/system/ &&
      sudo systemctl enable --now scanner-daemon`.

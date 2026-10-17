@@ -13,8 +13,10 @@ one arithmetic the whole design stands on:
   references the HcrmScanCapture global at install time, so a reversed
   order is a silently dead scan bus (ui_check would only catch it as a
   console error, and only on a page that logs it).
-- the [data-scan-sink] field: the collapsed badge-code fallback must
-  keep its dedicated Enter path (the global capture must never regress it).
+- the badge-code field is GONE (owner decision, login-screen cleanup): the
+  global capture ("scan anywhere") is the one browser badge path, so no
+  data-scan-sink may reappear — a sink takes its keys OUT of the capture
+  bus and forks the badge flow.
 - no isTrusted check: the M-10's USB host is dead
   (docs/m10-unreachable-2026-10-10.md), so console-dispatched synthetic
   KeyboardEvents are the only capture-verification path — a handler that
@@ -81,22 +83,37 @@ def test_scancapture_loads_before_app_js():
         "HcrmScanCapture global at install time")
 
 
-def test_badge_fallback_sink_still_exists():
-    """The collapsed badge-code fallback owns its keys.
-
-    The global capture returns early for [data-scan-sink] targets; losing
-    the attribute would route the M-10's keystrokes into BOTH the fallback's
-    handler and the capture bus (double-fire) — or break the login fallback
-    entirely. (The visible catalogue scan field was removed: the global
-    capture is the primary path and the badge field is the only sink.)
-    """
+def _html_section(view: str) -> str:
+    """Extract one <section> block from index.html by its currentView guard
+    (from the guard to the next <section tag) — for pins that a view's own
+    markup must (not) carry."""
     html = _read("index.html")
-    # The attribute appears on the badge fallback input; an adjacent comment
-    # also mentions "data-scan-sink is", so count the attribute form only.
-    sinks = re.findall(r"data-scan-sink(?!\s+is)", html)
-    assert len(sinks) == 1, (
-        "expected exactly one data-scan-sink attribute (the collapsed badge "
-        "fallback on the login view)")
+    start = html.index(f"currentView === '{view}'")
+    nxt = html.find("<section", start)
+    assert nxt != -1, f"no closing <section> after view {view!r}"
+    return html[start:nxt]
+
+
+def test_badge_field_is_gone_scan_anywhere_is_the_path():
+    """The collapsed badge-code field and its toggle were removed (owner
+    decision, login-screen cleanup): the global capture is the ONE browser
+    badge path. The capture still honours [data-scan-sink] defensively
+    (app.js), but no such element may exist — a reintroduced sink would
+    take its keys out of the capture bus and fork the badge flow."""
+    html = _read("index.html")
+    # "data-scan-sink is" appears in prose; the attribute form must not.
+    assert not re.findall(r"data-scan-sink(?!\s+is)", html), (
+        "a data-scan-sink element came back — the global capture returns "
+        "early for sinks, so it would fork the badge flow")
+    assert "Use a badge code instead" not in html
+    assert "showBadgeField" not in html
+    assert "doBadgeLogin" not in html
+    app = _read("app.js")
+    assert "async badgeLogin(code)" in app, (
+        "the scan bus's badge login entry point must survive the field's "
+        "removal")
+    assert "logs you in automatically" in html, (
+        "the scan-anywhere copy is the only badge affordance left")
 
 
 def test_capture_never_checks_is_trusted():
@@ -186,15 +203,28 @@ def test_feed_sink_is_the_existing_scan_bus():
 
 def test_scanner_feed_pill_and_pairing_markup_present():
     """The pill (data-scanner-feed) renders on every view (the topbar), so
-    the operator can always see which scan path is live; the login screen
-    carries the pairing affordance (terminal id + 8-char code)."""
+    the operator can always see which scan path is live. It is a BUTTON
+    now: the pairing affordance (terminal id + 8-char code form, and the
+    Unpair recovery) opens from it in a popover — the login screen's
+    pairing panel is gone (owner decision, login-screen cleanup)."""
     html = _read("index.html")
     assert 'data-scanner-feed' in html, (
         "the data-scanner-feed pill binding is missing from index.html")
+    assert re.search(r'<button[^>]*class="feed-pill"', html), (
+        "the pill must be a button — it opens the pairing popover")
+    assert "pairOpen" in html, "the popover toggle binding is missing"
     assert "pairTerminal" in html, (
-        "the login-screen pairing form is missing its submit handler")
+        "the pairing form is missing its submit handler")
     assert "unpairTerminal" in html, (
         "the unpair affordance is missing (recovery for a stale binding)")
+    # the LOGIN section itself must no longer carry the pairing form nor
+    # the removed badge field — they moved to the pill / were deleted
+    login = _html_section("login")
+    for absent in ("Terminal id", "Pair this terminal", "Pairing code",
+                   "Scan your QR badge here", "Use a badge code instead"):
+        assert absent not in login, (
+            f"{absent!r} must not be on the login screen (moved to the "
+            "pill popover / removed)")
 
 
 def test_terminal_token_key_is_the_persisted_binding():

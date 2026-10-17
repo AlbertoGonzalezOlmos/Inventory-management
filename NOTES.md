@@ -77,6 +77,12 @@
   similarity (no threshold — `vector-search`'s `limit` is omitted); purchase
   history moved out of the profile's sub-tabs into its own top-level
   **Purchase history** tab (`#/purchases`), beside Catalogue and My profile.
+- **Login-screen cleanup**: the badge-code toggle + collapsed fallback
+  field are gone (the global capture — "scan anywhere" — is the one
+  browser badge path), and the terminal-pairing panel moved off the login
+  screen into the header pill: the pill is a button that opens the
+  pairing popover (terminal id + the daemon's single-use code, and the
+  Unpair recovery) on every view.
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.

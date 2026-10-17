@@ -621,8 +621,10 @@ node's VID/PID is re-verified from sysfs immediately before every grab.
 
 **Pairing (once per kiosk).** The daemon registers a terminal
 (`--register` prints a **single-use 8-char pairing code**); the operator
-types that code plus the terminal id into the login screen's "Pair this
-terminal" panel, and the browser stores its read token. Credentials are
+clicks the header's **"no scanner"** pill (it is a button) and enters that
+code plus the terminal id into the popover that opens — the browser stores
+its read token. The same popover carries the **Unpair** recovery for a
+stale binding. Credentials are
 split: the daemon's **secret** writes to the queue, the browser's
 **token** only reads it — and neither works on the other's endpoint.
 
