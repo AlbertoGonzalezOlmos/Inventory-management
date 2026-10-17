@@ -378,11 +378,19 @@ Vue.createApp({
     // yields the badge card alone (the repo's first @media print block).
     badgePrint(on) { this._printBadge(!!on); },
     memberBadge(on) { this._printBadge(!!on); },
-    // Focus the pairing form's first field when the popover opens — the
-    // autofocus attribute only fires on initial page load, not on a
-    // v-if mount.
+    // Disclosure focus management: opening focuses the pairing form's
+    // first field (the autofocus attribute only fires on initial page
+    // load, not on a v-if mount); closing returns focus to the pill.
     pairOpen(on) {
-      if (!on) return;
+      if (!on) {
+        // Disclosure return: the pill re-takes focus when its popover
+        // closes, so keyboard users are not dropped on <body>.
+        this.$nextTick(() => {
+          const pill = document.querySelector(".feed-pill");
+          if (pill) pill.focus();
+        });
+        return;
+      }
       this.$nextTick(() => {
         const el = document.querySelector(".pair-popover input");
         if (el) el.focus();
@@ -461,6 +469,11 @@ Vue.createApp({
      * session, load the server cart (+ one-time legacy import), replay any
      * anonymously staged scans, then route. */
     async afterLogin(data) {
+      // A badge scanned while the pairing popover was open logs in and
+      // navigates away programmatically (this.route is pre-set, so the
+      // hashchange's _closeOverlays never fires) — the popover must not
+      // strand over the new view.
+      this.pairOpen = false;
       this.saveSession(data);
       if (data.user.must_change_password) {
         // Server-side enforced: every other endpoint returns 403 until the
@@ -481,9 +494,9 @@ Vue.createApp({
 
     async badgeLogin(code) {
       if (!code) return;
-      // Busy double-fire guard (Task E): a fast double-Enter (the collapsed
-      // fallback + the global capture, or a shaky scan) must not fire two
-      // qr-login requests — the second would mint a throwaway session.
+      // Busy double-fire guard (Task E): a shaky scan (or a fast re-scan)
+      // must not fire two qr-login requests — the second would mint a
+      // throwaway session.
       if (this.busy) return;
       this.loginError = "";
       this.busy = true;
@@ -562,6 +575,7 @@ Vue.createApp({
       // badgeSvg/badgePayload are the account view's rotated-badge display —
       // a credential, and the first thing to die with its session.
       this.pairOpen = false;
+      this.pairError = "";
       this.detailItem = null;
       this.scanIntake = null;
       this.memberBadge = null;
@@ -600,6 +614,10 @@ Vue.createApp({
       this.clearLogoff();
       this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
+      // A half-typed pairing form must not survive the session boundary
+      // (the terminal token itself is per-terminal and deliberately
+      // persists across users — only the form state dies here).
+      this.pairForm = { terminal_id: "", code: "" };
       // P2: drain any in-flight cart mutation before tearing the session
       // down, so a late write can never repopulate the login screen with
       // the previous user's cart. The cart itself is already durable
@@ -1255,8 +1273,8 @@ Vue.createApp({
 
     /** The credential targets of _scanStrictPre: any password field, or the
      * username field of a login form — in this SPA that is the autofocused
-     * `type="text" autocomplete="username"` input on the login screen
-     * (index.html:55-56), i.e. exactly the field a badge scan lands in when
+     * `type="text" autocomplete="username"` input in the login section,
+     * i.e. exactly the field a badge scan lands in when
      * nobody has clicked anywhere. A selector test, so extending the rule is a
      * selector edit and not a code edit. */
     _scanSecretField(el) {
@@ -1305,9 +1323,10 @@ Vue.createApp({
     },
 
     _onScanKey(e) {
-      // Sinks own their keys entirely (the login badge field keeps its
-      // dedicated Enter handler — no double-fire; focus changes into it
-      // flush via the focusin listener).
+      // Sinks own their keys entirely. No sink element exists since the
+      // login-screen cleanup — the guard is defensive: a reintroduced
+      // sink must never double-fire with the capture bus (focus changes
+      // into a sink flush via the focusin listener).
       if (e.target && e.target.closest && e.target.closest("[data-scan-sink]")) {
         return;
       }
@@ -1498,8 +1517,14 @@ Vue.createApp({
     },
 
     _modalOpen() {
-      return !!(this.detailItem || this.memberBadge || this.badgePrint
-        || this.pwResetMember || this.scanIntake || this.lastReceipt);
+      // pairOpen counts as a dialog: the popover paints inside the
+      // topbar's stacking context, BELOW every modal — a barcode scanned
+      // while it is open must hit the "finish the current dialog" toast
+      // instead of opening a modal that strands the popover beneath it
+      // (badges always process, and their login/switch paths close it).
+      return !!(this.pairOpen || this.detailItem || this.memberBadge
+        || this.badgePrint || this.pwResetMember || this.scanIntake
+        || this.lastReceipt);
     },
 
     async handleBadgeScan(code) {
@@ -1576,6 +1601,9 @@ Vue.createApp({
       this.clearLogoff();
       this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
+      // Same session-boundary rule as logout(): a half-typed pairing
+      // form must not survive into the next kiosk user's session.
+      this.pairForm = { terminal_id: "", code: "" };
       // The previous user's cart must die with their session exactly as
       // in logout(): the next user can log in flagged (must_change_password
       // skips loadCart), so a lingering cart would both display AND be
@@ -1719,8 +1747,14 @@ Vue.createApp({
     unpairTerminal() {
       localStorage.removeItem(TERMINAL_TOKEN_KEY);
       this._feedDispatch({ type: "unpair" });
+      this.pairError = "";
       // Keep the popover open: it flips to the pairing form (the recovery
-      // loop — Unpair, daemon --register, enter the new code — is one flow).
+      // loop — Unpair, daemon --register, enter the new code — is one
+      // flow), so land the operator on the first field.
+      this.$nextTick(() => {
+        const el = document.querySelector(".pair-popover input");
+        if (el) el.focus();
+      });
     },
 
     /* ---------- kiosk logoff countdown (Task 4's server deadline) ---------- */
@@ -1740,6 +1774,11 @@ Vue.createApp({
       const iso = data.logoff_deadline;
       const deadline = new Date(/Z$|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z");
       this.clearLogoff();
+      // A badge re-scan can arm the countdown while the pairing popover
+      // is open; the overlay must not share the screen with it (the
+      // popover paints below the overlay in the topbar's stacking
+      // context, so an open popover would strand under it).
+      this.pairOpen = false;
       this.logoff = { name: this.user.name, deadline, remaining: data.grace_seconds };
       this._logoffTimer = setInterval(() => this.tickLogoff(), 250);
       this.tickLogoff();
@@ -1873,6 +1912,7 @@ Vue.createApp({
     /* ---------- unknown-item intake modal ---------- */
 
     openNextIntake() {
+      this.pairOpen = false;   // the intake modal must not strand the popover
       if (this.scanIntake || !this.intakeQueue.length) return;  // one at a time
       const detail = this.intakeQueue.shift();                  // skip = drop
       this.scanIntake = {

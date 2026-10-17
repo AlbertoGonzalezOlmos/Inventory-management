@@ -339,8 +339,8 @@ UPC/EAN/Code 39/Code 128).
 | Commands time out | Scanner is in USB-HID mode (no command channel), or the host opened the wrong port. |
 | Driver won't install on Windows | FIPS mode enabled blocks Opticon's USB driver (Opticon's own note on the wiki). |
 | `Z1`/`Z2` rejected (ESC) | Command not executable in current state — e.g. trigger disabled config; restore defaults and retry. |
-| Badge scan logs nobody in | Badge was revoked/rotated, or never generated → issue a fresh one (§9.2). A scan of an *item* barcode in the login field also fails — only `HCRM1:` payloads are badges. |
-| Badge scan opens a Google/search page | A phone camera or a scanner in HID mode typed the payload into the wrong window — the badge is not a URL by design; use the login-page badge field (§9.3). |
+| Badge scan logs nobody in | Badge was revoked/rotated, or never generated → issue a fresh one (§9.2). A scan of an *item* barcode on the login view also fails — only `HCRM1:` payloads are badges (an item code is staged as an anonymous scan instead). |
+| Badge scan opens a Google/search page | A phone camera or a scanner in HID mode typed the payload into the wrong window — the badge is not a URL by design; scan again with the browser focused — the capture intercepts it anywhere (§9.3). |
 
 ## 9. QR badge login (scan-to-login)
 
@@ -394,10 +394,11 @@ its badge with it.
 ### 9.3 Logging in with a badge
 
 **USB-HID mode (zero setup — how the dev machine's unit is configured):**
-the login page has a *QR badge* field under the password form. Click it
-(or tab to it), scan the badge: the scanner types `HCRM1:…` and its CR
-suffix submits the form. The frontend posts it to `POST /api/auth/qr-login`
-and stores the returned session exactly like a password login.
+the SPA installs a document-level capture — scan the badge anywhere on
+the login view (no field, no click): the capture reads the `HCRM1:…`
+payload off the keystroke burst. The frontend posts it to
+`POST /api/auth/qr-login` and stores the returned session exactly like a
+password login.
 
 **HID mode without a browser field** (kiosk, or capturing scans without window
 focus): `scripts/scanner_hid.py` reads the raw HID reports — see
@@ -479,8 +480,8 @@ back-office modes (§6/§6a); a browser-driving relay is **Phase B,
 deferred — not built, do not test for it**.
 
 Since Tasks D–E, the profile rounds this out: the login page's
-**auto-detect** (scan a badge anywhere — no click, no field; the collapsed
-"badge code" field is only the manual fallback), and the profile tab's
+**auto-detect** (scan a badge anywhere — no click, no field), and the
+profile tab's
 re-viewable QR badge (`Show my QR`, §9.1) — a member who forgot their
 printed card can pull it up and print it from any kiosk or phone browser.
 
@@ -511,9 +512,11 @@ modals, logged in or out:
   43 chars, or a bare 43-char token → badge; 4–14 digits or an
   opaque code containing a digit → barcode; anything else is ignored
   silently (no server call).
-- **Sinks**: the login-page badge field (§9.3) and the visible scan
-  field (catalogue header) own their keys — the deterministic,
-  no-heuristics path, including codes too short for the global gate.
+- **Sinks**: `[data-scan-sink]` (an element that owns its keys outright —
+  the deterministic, no-heuristics path, including codes too short for
+  the global gate) is honoured defensively, but no sink element exists
+  any more: the login-page badge field and the catalogue scan field were
+  both removed — the global capture is the one browser path.
 - **Discipline**: scans are queued and drained one at a time; while a
   modal is open, barcodes are dropped with a toast (“finish the current
   dialog first”) but **badges always process** — a second person at the

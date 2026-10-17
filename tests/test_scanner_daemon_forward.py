@@ -111,7 +111,9 @@ def test_register_prints_pairing_code_and_writes_0600_config(
     assert code == 0
     out = capsys.readouterr().out
     assert PAIRING_CODE in out
-    assert "login screen" in out
+    # The instruction must point at the header-pill flow (the login-screen
+    # pairing panel is gone — login-screen cleanup, PR #35).
+    assert "'no scanner' pill" in out
 
     assert cfg.exists()
     assert stat.S_IMODE(cfg.stat().st_mode) == 0o600

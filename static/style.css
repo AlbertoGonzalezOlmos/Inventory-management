@@ -788,7 +788,7 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
   border-radius: 0;
 }
 
-/* ============ Round 4: the scanner-feed pill + pairing panel ============ */
+/* ============ Round 4: the scanner-feed pill + pairing popover ============ */
 /* The pill says which scan path is live (data-scanner-feed binds the mode):
    live   = the grab daemon is paired and the queue poll succeeds;
    off    = paired but the server is unreachable (the poll keeps retrying);

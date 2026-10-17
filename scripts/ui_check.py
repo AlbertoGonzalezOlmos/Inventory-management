@@ -302,7 +302,7 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
     if count(r'data-scanner-feed="(?:live|off|unpaired)"', dom) < 1:
         failures.append(f"[{label}] data-scanner-feed pill missing — "
                         "the round-4 scan feed did not install")
-    if count(r'<button[^>]*class="feed-pill"', dom) < 1:
+    if count(r'<button[^>]*class="[^"]*\bfeed-pill\b', dom) < 1:
         failures.append(f"[{label}] feed pill is not a button — the "
                         "pairing affordance must open from the pill")
     if copy == "Log in" and count(r'placeholder="Scan your QR badge here"', dom) != 0:

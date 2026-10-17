@@ -61,6 +61,8 @@
            recovery when paired. -->
       <button type="button" class="feed-pill" :data-scanner-feed="scannerFeed"
               @click="pairOpen = !pairOpen"
+              :aria-expanded="pairOpen ? 'true' : 'false'"
+              aria-haspopup="dialog"
               :title="scannerFeed === 'live'
                 ? 'Scans arrive via the grab daemon (no window focus needed) — click to manage the pairing'
                 : scannerFeed === 'off'
@@ -70,10 +72,12 @@
       </button>
       <!-- The pairing popover (the old login-screen panel, consolidated
            into the pill). The backdrop closes it on any outside click;
-           z-order: backdrop under the popover, both above the page. -->
+           z-order: backdrop under the popover, both above the page
+           content but below the modals (the topbar is its own stacking
+           context — modal-opening paths close it instead). -->
       <template v-if="pairOpen">
         <div class="popover-backdrop" @click="pairOpen = false"></div>
-        <div class="pair-popover">
+        <div class="pair-popover" role="dialog" aria-label="Scanner pairing">
           <template v-if="scannerFeed === 'unpaired'">
             <p class="muted">Pair this kiosk with its scanner terminal —
               enter the terminal id and the single-use 8-character code the
@@ -100,6 +104,7 @@
             <p v-if="pairError" class="error">{{ pairError }}</p>
             <div class="pair-actions">
               <button type="button" class="btn ghost"
+                      v-if="!user || isStaff"
                       @click="unpairTerminal">Unpair</button>
             </div>
           </template>

@@ -910,7 +910,8 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
             if args.register or config is None:
                 code = register_terminal(post_fn, args.forward,
                                          terminal_id, secret)
-                print(f"pair this terminal: enter {code} on the login screen",
+                print(f"pair this terminal: in the kiosk browser, click "
+                      f"the 'no scanner' pill in the header and enter {code}",
                       flush=True)
                 save_config(args.config, terminal_id, secret)
                 _log(f"registered terminal {terminal_id}")
