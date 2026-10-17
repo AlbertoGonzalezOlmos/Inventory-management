@@ -28,8 +28,9 @@ machine contract, unchanged: full token in the JSON record) or pass
 --show-token for the full value in text mode. Badge payloads themselves
 are likewise masked in every printed scan code (the HCRM1: form and the
 bare 43-char token a scanner/bridge may send without the prefix). For
-interactive browser login, put the scanner in USB-HID mode and scan into
-the badge field on the login page instead (docs/opticon-m10.md §9.3).
+interactive browser login, put the scanner in USB-HID mode and scan
+anywhere on the login page instead — the SPA's global capture intercepts
+it (docs/opticon-m10.md §9.3).
 
 This is an always-on back-office process, so it is built to survive its own
 environment: an API error is reported per scan and the listener keeps going

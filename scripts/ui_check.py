@@ -287,9 +287,9 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
     # - the global scan bus must be LIVE (the keydown listener's installer
     #   flips the binding that renders this attribute — a JS error in the
     #   capture code fails here even if the app still mounts);
-    # - on the LOGIN view, the badge field must still render (the capture
-    #   feature must never regress the dedicated HID badge-login path;
-    #   the register view has no badge field by design).
+    # - the removed badge-code field must STAY removed: the global capture
+    #   ("scan anywhere") is the one browser badge path (owner decision,
+    #   login-screen cleanup) — a reintroduced field would fork it.
     if count(r'data-scan-capture="on"', dom) < 1:
         failures.append(f"[{label}] data-scan-capture=\"on\" missing — "
                         "the global scan listener did not install")
@@ -297,13 +297,18 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
     # the topbar) — a JS error in installScanFeed fails here even if Vue
     # still mounted, and the operator loses the "which scan path is live"
     # signal (live = daemon-forwarded, off = paired but unreachable,
-    # unpaired = the wedge capture is the path).
+    # unpaired = the wedge capture is the path). It is a BUTTON now: the
+    # pairing popover opens from it (the login-screen panel is gone).
     if count(r'data-scanner-feed="(?:live|off|unpaired)"', dom) < 1:
         failures.append(f"[{label}] data-scanner-feed pill missing — "
                         "the round-4 scan feed did not install")
-    if copy == "Log in" and count(r'placeholder="Scan your QR badge here"', dom) < 1:
-        failures.append(f"[{label}] badge login field missing — "
-                        "scan capture regressed the dedicated badge path")
+    if count(r'<button[^>]*class="[^"]*\bfeed-pill\b', dom) < 1:
+        failures.append(f"[{label}] feed pill is not a button — the "
+                        "pairing affordance must open from the pill")
+    if copy == "Log in" and count(r'placeholder="Scan your QR badge here"', dom) != 0:
+        failures.append(f"[{label}] badge login field rendered — the "
+                        "removed fallback must not come back (scan "
+                        "anywhere is the one badge path)")
     # Task E: auto-detect is the primary login path — the "scan anywhere"
     # copy must render on the login view (always-rendered, so a one-shot DOM
     # dump can pin it), and no click-to-scan language may remain.

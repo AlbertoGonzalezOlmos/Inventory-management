@@ -72,11 +72,20 @@
   `docs/plans/r4-checklist.md`; the plan record is
   `docs/plans/COORDINATOR4.md` + `r4t1`…`r4t7`-FINAL.
 - **Post-round-4 UX**: removed the catalogue's visible scan field (the
-  "Scan items or badges here" box — the global capture + the badge fallback
-  are the scan paths); semantic search now ranks **every** item by
+  "Scan items or badges here" box — the global capture is the scan path;
+  the typed-badge fallback field went too, later, in the login-screen
+  cleanup); semantic search now ranks **every** item by
   similarity (no threshold — `vector-search`'s `limit` is omitted); purchase
   history moved out of the profile's sub-tabs into its own top-level
   **Purchase history** tab (`#/purchases`), beside Catalogue and My profile.
+- **Login-screen cleanup**: the badge-code toggle + collapsed fallback
+  field are gone (the global capture — "scan anywhere" — is the one
+  browser badge path; the typed-badge fallback is deliberately gone —
+  the browser path is capture-only, and `scripts/scanner_bridge.py` is
+  the non-browser fallback), and the terminal-pairing panel moved off
+  the login screen into the header pill: the pill is a button that opens
+  the pairing popover (terminal id + the daemon's single-use code, and
+  the Unpair recovery) on every view.
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.

@@ -54,15 +54,62 @@
       <!-- Round 4: which scan path is live. "live" = the grab daemon is
            paired and the queue poll succeeds; "off" = paired but the
            server is unreachable (polling continues); "unpaired" = the
-           round-3 wedge capture is the scan path. -->
-      <span class="feed-pill" :data-scanner-feed="scannerFeed"
-            :title="scannerFeed === 'live'
-              ? 'Scans arrive via the grab daemon (no window focus needed)'
-              : scannerFeed === 'off'
-                ? 'Paired, but the server is unreachable — retrying'
-                : 'Not paired to a scanner daemon — scans go to the focused window'">
+           round-3 wedge capture is the scan path.
+           The pill is a BUTTON (the login-screen pairing panel is gone):
+           clicking it opens the pairing popover below — the terminal id +
+           the daemon's single-use code when unpaired, the status + Unpair
+           recovery when paired. -->
+      <button type="button" class="feed-pill" :data-scanner-feed="scannerFeed"
+              @click="pairOpen = !pairOpen"
+              :aria-expanded="pairOpen ? 'true' : 'false'"
+              aria-haspopup="dialog"
+              :title="scannerFeed === 'live'
+                ? 'Scans arrive via the grab daemon (no window focus needed) — click to manage the pairing'
+                : scannerFeed === 'off'
+                  ? 'Paired, but the server is unreachable — retrying — click to manage the pairing'
+                  : 'Not paired to a scanner daemon — click to pair this kiosk'">
         {{ scannerFeed === 'live' ? 'scanner' : scannerFeed === 'off' ? 'scanner offline' : 'no scanner' }}
-      </span>
+      </button>
+      <!-- The pairing popover (the old login-screen panel, consolidated
+           into the pill). The backdrop closes it on any outside click;
+           z-order: backdrop under the popover, both above the page
+           content but below the modals (the topbar is its own stacking
+           context — modal-opening paths close it instead). -->
+      <template v-if="pairOpen">
+        <div class="popover-backdrop" @click="pairOpen = false"></div>
+        <div class="pair-popover" role="dialog" aria-label="Scanner pairing">
+          <template v-if="scannerFeed === 'unpaired'">
+            <p class="muted">Pair this kiosk with its scanner terminal —
+              enter the terminal id and the single-use 8-character code the
+              daemon printed (<code>scanner_daemon --register</code>).</p>
+            <form @submit.prevent="pairTerminal" class="pair-form">
+              <label>Terminal id
+                <input type="text" v-model="pairForm.terminal_id"
+                       placeholder="counter-1" autocomplete="off" />
+              </label>
+              <label>Pairing code
+                <input type="text" v-model="pairForm.code" maxlength="8"
+                       placeholder="8 characters" autocomplete="off" />
+              </label>
+              <p v-if="pairError" class="error">{{ pairError }}</p>
+              <div class="pair-actions">
+                <button class="btn ghost" :disabled="pairBusy">Pair this terminal</button>
+              </div>
+            </form>
+          </template>
+          <template v-else>
+            <p class="muted">Paired — scans from this terminal now arrive
+              here, even with this window unfocused<template v-if="scannerFeed === 'off'">
+              (server unreachable — retrying)</template>.</p>
+            <p v-if="pairError" class="error">{{ pairError }}</p>
+            <div class="pair-actions">
+              <button type="button" class="btn ghost"
+                      v-if="!user || isStaff"
+                      @click="unpairTerminal">Unpair</button>
+            </div>
+          </template>
+        </div>
+      </template>
       <template v-if="user">
         <span class="user-name">{{ user.name }} <small>({{ user.role }})</small></span>
         <button class="btn ghost" @click="logout">Log out</button>
@@ -96,63 +143,23 @@
       </form>
       <hr class="divider" />
       <!-- Auto-detect is the PRIMARY path (Task E): the global scan capture
-           logs a badge scan in from anywhere — no click, no field. -->
+           logs a badge scan in from anywhere — no click, no field. The old
+           badge-code toggle + collapsed fallback field are gone (owner
+           decision, login-screen cleanup): the capture bus is the one
+           browser badge path. -->
       <p class="muted scan-anywhere">
         Scan anywhere — your QR badge logs you in automatically.
       </p>
-      <button class="btn ghost block" @click="showBadgeField = !showBadgeField">
-        {{ showBadgeField ? "Hide the badge code field" : "Use a badge code instead" }}
-      </button>
-      <!-- The manual fallback (typing/pasting a code; slow emulators,
-           accessibility). Collapsed by default; v-show keeps it in the DOM
-           (the ui_check regression pin targets it) — data-scan-sink is
-           unchanged: its own Enter flow never double-fires with the global
-           capture. -->
-      <form v-show="showBadgeField" @submit.prevent="doBadgeLogin">
-        <label>QR badge
-          <input
-            type="text"
-            v-model="badgeCode"
-            placeholder="Scan your QR badge here"
-            autocomplete="off"
-            data-scan-sink
-          />
-        </label>
-        <p class="muted">
-          Type or paste a badge code — or just scan it anywhere on this page.
-        </p>
-        <button class="btn block" :disabled="busy || !badgeCode">Log in with badge</button>
-      </form>
       <!-- Attribution banner: anonymous scans staged while logged out -->
       <div class="staged-banner" v-if="stagedScans.length">
         <strong>{{ stagedScans.length }} scanned item(s) waiting</strong> —
         scan your QR badge or log in to add them to your list.
         <button class="btn tiny ghost" @click="discardStagedScans">Discard</button>
       </div>
-      <!-- Round 4, T6: pair this kiosk browser to a scanner terminal, once
-           per install. The operator types the terminal id + the 8-char
-           single-use code the daemon printed (scripts/scanner_daemon.py
-           --register). The stored token is per-TERMINAL: it survives
+      <!-- Round 4, T6: kiosk pairing now lives in the header pill button
+           (pairOpen) — the login screen no longer carries the terminal-id /
+           pairing-code form. The stored token is per-TERMINAL: it survives
            logins and logouts and is NOT cleared on logout. -->
-      <hr class="divider" />
-      <form @submit.prevent="pairTerminal" class="pair-form">
-        <label>Terminal id
-          <input type="text" v-model="pairForm.terminal_id"
-                 placeholder="counter-1" autocomplete="off" />
-        </label>
-        <label>Pairing code
-          <input type="text" v-model="pairForm.code" maxlength="8"
-                 placeholder="8 characters" autocomplete="off" />
-        </label>
-        <p v-if="pairError" class="error">{{ pairError }}</p>
-        <p v-if="pairOk" class="muted pair-ok">Paired — scans from this terminal
-          now arrive here, even with this window unfocused.</p>
-        <div class="pair-actions">
-          <button class="btn ghost" :disabled="pairBusy">Pair this terminal</button>
-          <button type="button" class="btn ghost" v-if="scannerFeed !== 'unpaired'"
-                  @click="unpairTerminal">Unpair</button>
-        </div>
-      </form>
       <p class="muted">No account yet? <a href="#/register">Create a member account</a></p>
     </section>
 
