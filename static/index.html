@@ -47,6 +47,7 @@
       <a v-if="isStaff" href="#/table" :class="{active: currentView === 'table'}">Table</a>
       <a v-if="isStaff" href="#/admin" :class="{active: currentView === 'admin'}">Admin</a>
       <a href="#/account" :class="{active: currentView === 'account'}">My profile</a>
+      <a href="#/purchases" :class="{active: currentView === 'purchases'}">Purchase history</a>
     </nav>
 
     <div class="userbox">
@@ -183,22 +184,6 @@
     <section v-else-if="currentView === 'catalogue' || currentView === 'checkout'"
              class="catalogue-layout">
       <div class="catalogue-main">
-        <!-- The visible scan field: explicit operator intent, no heuristics —
-             also the deterministic path for payloads the global capture
-             gate deliberately ignores (short internal codes). -->
-        <input
-          class="scan-field"
-          type="text"
-          v-model="scanFieldCode"
-          placeholder="⌁ Scan items or badges here (or scan anywhere)…"
-          autocomplete="off"
-          data-scan-sink
-          @keydown.enter.prevent="scanFieldSubmit"
-        />
-        <p class="muted scan-hint">
-          Scanning your own badge logs you off (60&nbsp;s countdown); another
-          member's badge switches accounts.
-        </p>
         <div class="toolbar">
           <input
             class="search"
@@ -351,7 +336,6 @@
         <button :class="{active: profileTab === 'profile'}" @click="selectProfileTab('profile')">Profile</button>
         <button :class="{active: profileTab === 'security'}" @click="selectProfileTab('security')">Security</button>
         <button :class="{active: profileTab === 'badge'}" @click="selectProfileTab('badge')">My QR badge</button>
-        <button :class="{active: profileTab === 'purchases'}" @click="selectProfileTab('purchases')">Purchase history</button>
         <button :class="{active: profileTab === 'requests'}" @click="selectProfileTab('requests')">My scan requests</button>
       </div>
 
@@ -428,81 +412,6 @@
         <div v-if="badgeSvg" class="qr-badge" v-html="badgeSvg"></div>
       </div>
 
-      <!-- Purchase history (round 3, item 5: list left, spend calendar
-           right — the two-column layout collapses under 900 px) -->
-      <div v-else-if="profileTab === 'purchases'">
-        <h2>Purchase history</h2>
-        <div class="history-layout">
-          <div class="history-list">
-            <p class="muted" v-if="myOrders.length === 0">
-              Nothing purchased yet — complete a purchase from your list in the catalogue.
-            </p>
-            <div v-for="order in myOrders" :key="order.id" class="order-card">
-              <div class="order-head" @click="toggleOrder(order.id)">
-                <span><strong>#{{ order.id }}</strong> · {{ formatDate(order.created_at) }}
-                  · {{ order.lines.length }} item(s)</span>
-                <span>
-                  <span v-if="order.id === lastCheckout" class="status-chip resolved">new</span>
-                  <strong>{{ formatPrice(order.total_cents) }}</strong>
-                </span>
-              </div>
-              <table class="table" v-if="expandedOrders.includes(order.id)">
-                <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-                <tbody>
-                  <tr v-for="line in order.lines" :key="line.item_id">
-                    <td>{{ line.name }}<br /><small class="muted">SKU {{ line.sku }}</small></td>
-                    <td>
-                      <template v-if="line.clamped">
-                        <span class="status-chip open" :title="'requested ' + line.qty + ', only ' + line.applied_qty + ' in stock'">
-                          {{ line.applied_qty }} of {{ line.qty }}
-                        </span>
-                      </template>
-                      <template v-else>{{ line.qty }}</template>
-                    </td>
-                    <td>{{ formatPrice(line.price_cents) }}</td>
-                    <td>{{ formatPrice(line.line_total_cents) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <button v-if="myOrders.length >= ordersLimit && ordersLimit < 100" class="btn ghost block"
-                    @click="loadMoreOrders">Load more</button>
-          </div>
-
-          <!-- The spend calendar (round 3, item 5): one coloured dot per
-               purchase day, ramped by that month's min/max spend (the
-               min-spend day — the first purchase — is light green); the
-               month's total below. UTC days throughout, matching the
-               endpoint's bucketing and the list's date labels. -->
-          <aside class="calendar-card">
-            <div class="cal-head">
-              <button class="btn tiny" :disabled="calLoading || !calYear"
-                      @click="shiftCalendarMonth(-1)" title="Previous month">‹</button>
-              <strong>{{ calendarMonthLabel || "Calendar" }}</strong>
-              <button class="btn tiny" :disabled="calLoading || !calYear"
-                      @click="shiftCalendarMonth(1)" title="Next month">›</button>
-            </div>
-            <div class="cal-grid cal-weekdays">
-              <span v-for="w in calendarWeekdays" :key="w">{{ w }}</span>
-            </div>
-            <div class="cal-grid">
-              <div v-for="(cell, i) in calendarCells" :key="i"
-                   class="cal-day" :class="{ 'cal-today': cell && isCalendarToday(cell.key) }">
-                <template v-if="cell">
-                  <span class="cal-num">{{ cell.day }}</span>
-                  <span v-if="calendarDay(cell.key)" class="cal-dot"
-                        :style="{ background: dayColor(calendarDay(cell.key).cents) }"
-                        :title="calendarDay(cell.key).count + ' purchase(s) · ' + formatPrice(calendarDay(cell.key).cents)"></span>
-                </template>
-              </div>
-            </div>
-            <div class="cal-total">
-              {{ calendarTotalLabel }}: <strong>{{ formatPrice(calTotalCents) }}</strong>
-            </div>
-          </aside>
-        </div>
-      </div>
-
       <!-- My scan requests: existing block, moved -->
       <div v-else-if="profileTab === 'requests'">
         <h2>My scan requests</h2>
@@ -523,6 +432,81 @@
             </tr>
           </tbody>
         </table>
+      </div>
+    </section>
+
+    <!-- ================= Purchase history (top-level tab: list left, spend
+         calendar right — the two-column layout collapses under 900 px) ================= -->
+    <section v-else-if="currentView === 'purchases'" class="auth-card profile-card">
+      <h1>Purchase history</h1>
+      <div class="history-layout">
+        <div class="history-list">
+          <p class="muted" v-if="myOrders.length === 0">
+            Nothing purchased yet — complete a purchase from your list in the catalogue.
+          </p>
+          <div v-for="order in myOrders" :key="order.id" class="order-card">
+            <div class="order-head" @click="toggleOrder(order.id)">
+              <span><strong>#{{ order.id }}</strong> · {{ formatDate(order.created_at) }}
+                · {{ order.lines.length }} item(s)</span>
+              <span>
+                <span v-if="order.id === lastCheckout" class="status-chip resolved">new</span>
+                <strong>{{ formatPrice(order.total_cents) }}</strong>
+              </span>
+            </div>
+            <table class="table" v-if="expandedOrders.includes(order.id)">
+              <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+              <tbody>
+                <tr v-for="line in order.lines" :key="line.item_id">
+                  <td>{{ line.name }}<br /><small class="muted">SKU {{ line.sku }}</small></td>
+                  <td>
+                    <template v-if="line.clamped">
+                      <span class="status-chip open" :title="'requested ' + line.qty + ', only ' + line.applied_qty + ' in stock'">
+                        {{ line.applied_qty }} of {{ line.qty }}
+                      </span>
+                    </template>
+                    <template v-else>{{ line.qty }}</template>
+                  </td>
+                  <td>{{ formatPrice(line.price_cents) }}</td>
+                  <td>{{ formatPrice(line.line_total_cents) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <button v-if="myOrders.length >= ordersLimit && ordersLimit < 100" class="btn ghost block"
+                  @click="loadMoreOrders">Load more</button>
+        </div>
+
+        <!-- The spend calendar (round 3, item 5): one coloured dot per
+             purchase day, ramped by that month's min/max spend (the
+             min-spend day — the first purchase — is light green); the
+             month's total below. UTC days throughout, matching the
+             endpoint's bucketing and the list's date labels. -->
+        <aside class="calendar-card">
+          <div class="cal-head">
+            <button class="btn tiny" :disabled="calLoading || !calYear"
+                    @click="shiftCalendarMonth(-1)" title="Previous month">‹</button>
+            <strong>{{ calendarMonthLabel || "Calendar" }}</strong>
+            <button class="btn tiny" :disabled="calLoading || !calYear"
+                    @click="shiftCalendarMonth(1)" title="Next month">›</button>
+          </div>
+          <div class="cal-grid cal-weekdays">
+            <span v-for="w in calendarWeekdays" :key="w">{{ w }}</span>
+          </div>
+          <div class="cal-grid">
+            <div v-for="(cell, i) in calendarCells" :key="i"
+                 class="cal-day" :class="{ 'cal-today': cell && isCalendarToday(cell.key) }">
+              <template v-if="cell">
+                <span class="cal-num">{{ cell.day }}</span>
+                <span v-if="calendarDay(cell.key)" class="cal-dot"
+                      :style="{ background: dayColor(calendarDay(cell.key).cents) }"
+                      :title="calendarDay(cell.key).count + ' purchase(s) · ' + formatPrice(calendarDay(cell.key).cents)"></span>
+              </template>
+            </div>
+          </div>
+          <div class="cal-total">
+            {{ calendarTotalLabel }}: <strong>{{ formatPrice(calTotalCents) }}</strong>
+          </div>
+        </aside>
       </div>
     </section>
 
@@ -1008,7 +992,7 @@
         {{ lastReceipt.skipped.length }} scanned item(s) no longer exist and were skipped.
       </p>
       <p class="muted">Your purchase list was cleared. The receipt also appears
-        in My profile → Purchase history.</p>
+        in Purchase history.</p>
       <button class="btn block" @click="lastReceipt = null">Done</button>
     </div>
   </div>

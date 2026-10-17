@@ -71,6 +71,12 @@
   (caught by the at-most-once test). The full live checklist is
   `docs/plans/r4-checklist.md`; the plan record is
   `docs/plans/COORDINATOR4.md` + `r4t1`…`r4t7`-FINAL.
+- **Post-round-4 UX**: removed the catalogue's visible scan field (the
+  "Scan items or badges here" box — the global capture + the badge fallback
+  are the scan paths); semantic search now ranks **every** item by
+  similarity (no threshold — `vector-search`'s `limit` is omitted); purchase
+  history moved out of the profile's sub-tabs into its own top-level
+  **Purchase history** tab (`#/purchases`), beside Catalogue and My profile.
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.
@@ -264,8 +270,10 @@ Inventory-management/
   matched literally (regression-tested).
 - `GET /api/items/vector-search` — embeds the query **once**, exact cosine scan
   via `vector_full_scan`, category filter applied **in SQL before LIMIT/OFFSET**
-  (pagination correctness), similarity clamped to [0,1]. Returns 503 if the
-  model isn't loaded or the extension failed.
+  (pagination correctness), similarity clamped to [0,1]. `limit` omitted →
+  **every** matching item ranked (no threshold); an explicit `limit` gives a
+  top-N slice (suggestions, “similar items”). Returns 503 if the model isn't
+  loaded or the extension failed.
 - Create/update policy when the embedding model is down: **503, nothing
   persisted** — an item that can't be embedded would be invisible to semantic
   search, and a PATCH must never null out an existing embedding (data-loss

@@ -174,7 +174,6 @@ Vue.createApp({
       memberForm: { name: "", email: "", password: "", role: "member" },
       memberError: "",
       members: [],
-      scanFieldCode: "",       // the visible scan field (explicit operator intent)
 
       // account
       pwForm: { current_password: "", new_password: "" },
@@ -241,6 +240,7 @@ Vue.createApp({
       if (!this.user) return this.route === "#/register" ? "register" : "login";
       if (this.route.startsWith("#/admin") && this.isStaff) return "admin";
       if (this.route.startsWith("#/account")) return "account";
+      if (this.route.startsWith("#/purchases")) return "purchases";
       if (this.route.startsWith("#/table") && this.isStaff) return "table";
       // The checkout review screen (round 3, item 4): the catalogue section
       // with the aside swapped to the review panel.
@@ -390,6 +390,10 @@ Vue.createApp({
       }
       if (view === "admin") this.loadAdminData();
       if (view === "table") this.loadDataPage();
+      if (view === "purchases") {
+        this.loadMyOrders();
+        this.loadCalendar();
+      }
       if (view === "account") {
         // A flagged account's mandatory change is the point of the visit:
         // land on the Security tab, one click from the fix. Everyone else
@@ -460,6 +464,7 @@ Vue.createApp({
         return;
       }
       await this.loadCart();
+      this._announceCartRestored();
       await this.replayStagedScans();
       location.hash = "#/catalogue";
       this.route = "#/catalogue";
@@ -594,13 +599,22 @@ Vue.createApp({
       this.clearLogoff();
       this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
+      // P2: drain any in-flight cart mutation before tearing the session
+      // down, so a late write can never repopulate the login screen with
+      // the previous user's cart. The cart itself is already durable
+      // server-side — this is about the in-memory view, not persistence.
+      await this.flushCart();
       try { await api("/auth/logout", { method: "POST" }); } catch (_) { /* ignore */ }
+      const hadItems = !!(this.cart && this.cart.total_qty > 0);
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
       this.user = null;
       this.cart = { lines: [], total_qty: 0, total_cents: 0 };
       location.hash = "#/login";
       this.route = "#/login";
+      if (hadItems) {
+        this.showToast("Your list was saved — it will be here when you log back in");
+      }
     },
 
     /* ---------- account ---------- */
@@ -699,21 +713,22 @@ Vue.createApp({
       if (this.loading || !this.hasMore) return;
       this.loading = true;
       try {
-        const params = new URLSearchParams({
-          limit: PAGE_SIZE, offset: this.offset,
-        });
         const term = this.search.trim();
         // The backend requires q to be at least 2 characters for semantic
         // search; a single character falls back to keyword search.
         if (this.semantic && term.length >= 2) {
-          // Semantic (vector) search — ranked by meaning similarity.
-          params.set("q", term);
+          // Semantic (vector) search — rank EVERY item in the shop by
+          // meaning similarity (no limit, no threshold, no pagination).
+          const params = new URLSearchParams({ q: term });
           if (this.category) params.set("category", this.category);
           const page = await api("/items/vector-search?" + params.toString());
-          this.items.push(...page);
-          this.offset += page.length;
-          this.hasMore = page.length === PAGE_SIZE;
+          this.items = page;
+          this.offset = page.length;
+          this.hasMore = false;
         } else {
+          const params = new URLSearchParams({
+            limit: PAGE_SIZE, offset: this.offset,
+          });
           if (term) params.set("q", term);
           if (this.category) params.set("category", this.category);
           const page = await api("/items?" + params.toString());
@@ -762,6 +777,16 @@ Vue.createApp({
       if (!this.user || this.user.must_change_password) return; // 403-gated
       this.cart = await api("/cart");
       await this.importLegacyPurchase();
+    },
+
+    /* The "your list is durable" reassurance: called ONLY at the session-entry
+     * points (afterLogin, switchAccount) after loadCart — never inside
+     * loadCart itself, which also runs for qty re-syncs and page-load restores
+     * where this would be noise. */
+    _announceCartRestored() {
+      if (this.cart && this.cart.lines.length) {
+        this.showToast(`Your purchase list was restored (${this.cart.total_qty} item(s))`);
+      }
     },
 
     async importLegacyPurchase() {
@@ -851,10 +876,6 @@ Vue.createApp({
 
     selectProfileTab(tab) {
       this.profileTab = tab;
-      if (tab === "purchases") {
-        this.loadMyOrders();
-        this.loadCalendar();   // round 3, Task C: the spend calendar's data
-      }
       if (tab === "requests") this.loadMyRequests();
       if (tab === "profile")
         this.phoneForm.phone = (this.user && this.user.phone) || "";
@@ -1103,13 +1124,12 @@ Vue.createApp({
             this.cart = r.data.cart;                    // the emptied cart, one payload
             const pid = r.data.purchase.id;
             this.lastCheckout = pid;                    // "new" chip in history
-            // Land on the purchases tab. route + hash in one synchronous
-            // turn (the hashchange `navigated` guard); the currentView
-            // watcher then fires selectProfileTab("purchases"), which loads
-            // the orders AND the calendar (today's dot appears at once).
-            this.profileTab = "purchases";
-            this.route = "#/account";
-            location.hash = "#/account";
+            // Land on the purchase-history view. route + hash in one
+            // synchronous turn (the hashchange `navigated` guard); the
+            // currentView watcher then loads the orders AND the calendar
+            // (today's dot appears at once).
+            this.route = "#/purchases";
+            location.hash = "#/purchases";
             this.expandedOrders = [pid];                 // pre-expand the receipt
             this.showToast("Purchase complete — " +
               this.formatPrice(r.data.purchase.total_cents));
@@ -1405,19 +1425,6 @@ Vue.createApp({
       }
       // select/plain: nothing to splice (the select's undo is the restore;
       // plain targets never had their keys prevented)
-    },
-
-    scanFieldSubmit() {
-      // The visible scan field (catalogue header): explicit operator intent,
-      // no heuristics — also the deterministic path for payloads the global
-      // gate deliberately ignores (short internal codes). Routing uses the
-      // same badge shapes as the global gate (full AND raw-43 forms — both
-      // are accepted by qr-login/qr-identify), but no length/charset floor.
-      const code = (this.scanFieldCode || "").trim();
-      this.scanFieldCode = "";
-      if (!code) return;
-      const kind = HcrmScanCapture.isBadgeShape(code) ? "badge" : "barcode";
-      this.enqueueScan(code, kind);
     },
 
     enqueueScan(code, kind) {
@@ -1739,17 +1746,26 @@ Vue.createApp({
       });                                           //    foreign token never
                                                     //    trips the 401 redirect)
       if (auth.user.must_change_password) {
+        // P2: the incoming user's cart never loaded — drop the OUTGOING
+        // user's cart from the view so the header count can't leak it.
+        this.cart = { lines: [], total_qty: 0, total_cents: 0 };
         location.hash = "#/account";
         this.route = "#/account";
         this.showToast(`Switched to ${auth.user.name} — change the password to continue`);
         return;
       }
       await this.loadCart();                        // 6. the incoming user's list
+      this._announceCartRestored();
       this.reloadItems();
       this.loadCategories();
       location.hash = "#/catalogue";
       this.route = "#/catalogue";
-      this.showToast(`Switched to ${auth.user.name} — ${oldName}'s list was saved`);
+      // The save-then-switch message: the outgoing list is durable and will
+      // be back when that user returns — surfaced on the persistent greeting
+      // banner (not a 3 s toast) so the save is legible and click-dismissible.
+      this.greeting = `Switched to ${auth.user.name} — ${oldName}'s list was saved and will be back when ${oldName} signs in`;
+      clearTimeout(this._greetingTimer);
+      this._greetingTimer = setTimeout(() => (this.greeting = ""), 6000);
       await this.replayStagedScans();
     },
 
@@ -2433,6 +2449,7 @@ Vue.createApp({
       if (this.currentView === "admin") this.loadAdminData();
       if (this.currentView === "table") this.loadDataPage();
       if (this.currentView === "account") this.loadMyRequests();
+      if (this.currentView === "purchases") { this.loadMyOrders(); this.loadCalendar(); }
     }
 
     // Infinite scroll: load more items when the sentinel becomes visible.

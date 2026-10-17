@@ -133,7 +133,9 @@ def vector_search(
     q: str = Query(min_length=2, description="Natural-language query, matched "
                  "semantically against item descriptions"),
     category: str = Query(default="", description="Restrict results to this category"),
-    limit: int = Query(default=12, ge=1, le=100),
+    limit: int | None = Query(default=None, ge=1,
+                              description="Max results; omit for every item "
+                                          "(ranked by similarity, no cutoff)"),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
@@ -186,13 +188,17 @@ def vector_search(
 
 
 def _vector_search_rows(session: Session, query_blob: bytes, *,
-                        category: str = "", limit: int = 12, offset: int = 0):
+                        category: str = "", limit: int | None = None,
+                        offset: int = 0):
     """The sqlite-vector exact cosine scan (extracted from vector_search so
     the suggest endpoint can reuse it AND degrade to [] instead of 503).
 
     Returns the ``(row_id, distance)`` rows, or ``None`` when the extension
     is unavailable — the caller decides whether that is a 503 (the search
     endpoint, unchanged behaviour) or an empty suggestion group.
+    ``limit`` defaults to None: rank EVERY matching item (no threshold, no
+    cutoff); callers that want a slice (suggestions, "similar items") pass
+    an explicit limit.
     The category filter is applied in SQL (before LIMIT/OFFSET) so that
     pagination stays correct; filtering after the scan would break it.
     """
@@ -212,11 +218,16 @@ def _vector_search_rows(session: Session, query_blob: bytes, *,
     )
     if category:
         scan_sql += "WHERE i.category = :cat "
-    scan_sql += "ORDER BY v.distance LIMIT :limit OFFSET :offset"
+    scan_sql += "ORDER BY v.distance"
+    if limit is not None:
+        scan_sql += " LIMIT :limit OFFSET :offset"
 
-    params = {"qvec": query_blob, "limit": limit, "offset": offset}
+    params = {"qvec": query_blob}
     if category:
         params["cat"] = category
+    if limit is not None:
+        params["limit"] = limit
+        params["offset"] = offset
     return session.execute(text(scan_sql), params).all()
 
 

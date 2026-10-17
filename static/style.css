@@ -622,18 +622,6 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
   white-space: nowrap;
 }
 
-/* The visible scan field (explicit operator intent, no heuristics). */
-.scan-field {
-  width: 100%;
-  padding: 0.6rem 0.9rem;
-  margin-bottom: 0.75rem;
-  font-size: 1rem;
-  font-family: ui-monospace, monospace;
-  border: 2px dashed var(--accent, #2563eb);
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
 /* Attribution banner: anonymous scans staged while logged out. */
 .staged-banner {
   margin-top: 0.75rem;

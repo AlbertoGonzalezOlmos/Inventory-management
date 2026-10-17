@@ -13,9 +13,8 @@ one arithmetic the whole design stands on:
   references the HcrmScanCapture global at install time, so a reversed
   order is a silently dead scan bus (ui_check would only catch it as a
   console error, and only on a page that logs it).
-- the two [data-scan-sink] fields: the collapsed badge-code fallback and
-  the visible scan field must keep their dedicated Enter paths (the global
-  capture must never regress them).
+- the [data-scan-sink] field: the collapsed badge-code fallback must
+  keep its dedicated Enter path (the global capture must never regress it).
 - no isTrusted check: the M-10's USB host is dead
   (docs/m10-unreachable-2026-10-10.md), so console-dispatched synthetic
   KeyboardEvents are the only capture-verification path — a handler that
@@ -58,18 +57,18 @@ def test_scancapture_loads_before_app_js():
         "HcrmScanCapture global at install time")
 
 
-def test_both_scan_sinks_still_exist():
-    """The badge fallback field and the visible scan field own their keys.
+def test_badge_fallback_sink_still_exists():
+    """The collapsed badge-code fallback owns its keys.
 
     The global capture returns early for [data-scan-sink] targets; losing
-    either attribute would route the M-10's keystrokes into BOTH the sink's
+    the attribute would route the M-10's keystrokes into BOTH the fallback's
     handler and the capture bus (double-fire) — or break the login fallback
-    entirely.
+    entirely. (The visible catalogue scan field was removed: the global
+    capture is the primary path and the badge field is the only sink.)
     """
     html = _read("index.html")
-    assert html.count("data-scan-sink") >= 2, (
-        "expected both data-scan-sink fields (the collapsed badge-code "
-        "fallback on the login view and the visible scan field)")
+    assert html.count("data-scan-sink") >= 1, (
+        "expected the data-scan-sink badge fallback field on the login view")
 
 
 def test_capture_never_checks_is_trusted():
