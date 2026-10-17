@@ -228,7 +228,16 @@ def resolve(code: str, symbology: str, force: bool) -> tuple[str, str]:
             symbology = "ean8"
         elif len(body) == 11:
             symbology = "upca"
-        elif len(body) in (12, 13):
+        elif len(body) == 12:
+            # 12 digits is ambiguous: a complete UPC-A (with check digit) or
+            # an EAN-13 body (check digit to be appended). Default to EAN-13
+            # (the common retail case) but say so — a real 12-digit UPC-A
+            # must be requested explicitly with --symbology upca.
+            print("barcode_render: 12 digits interpreted as an EAN-13 body "
+                  "(check digit will be appended); pass --symbology upca for "
+                  "a 12-digit UPC-A", file=sys.stderr)
+            symbology = "ean13"
+        elif len(body) == 13:
             symbology = "ean13"
         else:
             raise ValueError(

@@ -67,8 +67,12 @@ def test_badge_fallback_sink_still_exists():
     capture is the primary path and the badge field is the only sink.)
     """
     html = _read("index.html")
-    assert html.count("data-scan-sink") >= 1, (
-        "expected the data-scan-sink badge fallback field on the login view")
+    # The attribute appears on the badge fallback input; an adjacent comment
+    # also mentions "data-scan-sink is", so count the attribute form only.
+    sinks = re.findall(r"data-scan-sink(?!\s+is)", html)
+    assert len(sinks) == 1, (
+        "expected exactly one data-scan-sink attribute (the collapsed badge "
+        "fallback on the login view)")
 
 
 def test_capture_never_checks_is_trusted():

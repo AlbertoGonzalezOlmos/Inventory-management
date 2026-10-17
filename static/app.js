@@ -184,7 +184,7 @@ Vue.createApp({
       myRequests: [],    // "My scan requests" (GET /api/scan-requests/mine)
 
       // Task D — the tabbed "My profile" (#/account, no route churn):
-      // profile | security | badge | purchases | requests. A flagged
+      // profile | security | badge | requests. A flagged
       // account (must_change_password) is steered to "security" on arrival
       // — the redirect keeps working and lands one click from the fix.
       profileTab: "profile",
@@ -615,6 +615,7 @@ Vue.createApp({
       if (hadItems) {
         this.showToast("Your list was saved — it will be here when you log back in");
       }
+      return hadItems;
     },
 
     /* ---------- account ---------- */
@@ -770,13 +771,16 @@ Vue.createApp({
     async flushCart() {
       // The save-then-switch flush: every mutation is already a committed
       // server write — flushing is draining the chain, not persisting.
-      await this._cartChain;
+      // Best-effort: a rejected op must never abort the teardown that
+      // follows (logout/switch clear the session), or a shared kiosk would
+      // strand the previous user.
+      await (this._cartChain || Promise.resolve()).catch(() => {});
     },
 
     async loadCart() {
       if (!this.user || this.user.must_change_password) return; // 403-gated
       this.cart = await api("/cart");
-      await this.importLegacyPurchase();
+      this._cartImportedLegacy = await this.importLegacyPurchase();
     },
 
     /* The "your list is durable" reassurance: called ONLY at the session-entry
@@ -784,9 +788,13 @@ Vue.createApp({
      * loadCart itself, which also runs for qty re-syncs and page-load restores
      * where this would be noise. */
     _announceCartRestored() {
-      if (this.cart && this.cart.lines.length) {
+      // Skip when the cart was just populated by the one-time legacy import:
+      // that path already toasted "Imported N items", and a second
+      // "restored" toast would clobber it.
+      if (this.cart && this.cart.lines.length && !this._cartImportedLegacy) {
         this.showToast(`Your purchase list was restored (${this.cart.total_qty} item(s))`);
       }
+      this._cartImportedLegacy = false;
     },
 
     async importLegacyPurchase() {
@@ -795,9 +803,9 @@ Vue.createApp({
       // cart must never be clobbered by a stale browser copy), then the key
       // dies regardless, so this can never double-run.
       const raw = localStorage.getItem(PURCHASE_KEY);
-      if (!raw) return;
+      if (!raw) return false;
       localStorage.removeItem(PURCHASE_KEY);
-      if (this.cart.lines.length) return;
+      if (this.cart.lines.length) return false;
       try {
         const entries = JSON.parse(raw);
         const lines = (Array.isArray(entries) ? entries : [])
@@ -807,6 +815,7 @@ Vue.createApp({
           try {
             this.cart = await api("/cart", { method: "PUT", body: { lines } });
             this.showToast(`Imported ${lines.length} item(s) from your old purchase list`);
+            return true;
           } catch (e) {
             if (e.status === 404 || e.status === 422) {
               // A deleted catalogue item poisons the all-or-nothing PUT:
@@ -818,10 +827,12 @@ Vue.createApp({
                 } catch (_) { /* item gone from the catalogue */ }
               }
               this.showToast("Imported your old purchase list (some items are gone)");
+              return true;
             } // transient errors: the import is one-time by design
           }
         }
-      } catch (_) { /* malformed legacy data: the key is already removed */ }
+        return false;
+      } catch (_) { /* malformed legacy data: the key is already removed */ return false; }
     },
 
     _stockWarn(line) {
@@ -1266,9 +1277,9 @@ Vue.createApp({
     },
 
     _onScanKey(e) {
-      // Sinks own their keys entirely (the login badge field and the visible
-      // scan field keep their dedicated Enter handlers — no double-fire;
-      // focus changes into them flush via the focusin listener).
+      // Sinks own their keys entirely (the login badge field keeps its
+      // dedicated Enter handler — no double-fire; focus changes into it
+      // flush via the focusin listener).
       if (e.target && e.target.closest && e.target.closest("[data-scan-sink]")) {
         return;
       }
@@ -1702,8 +1713,10 @@ Vue.createApp({
 
     async finishLogoff() {
       this.clearLogoff();
-      await this.logout();   // best-effort: the server deadline already killed
-      this.showToast("Logged off"); // the token if the browser was throttled
+      const announcedSave = await this.logout();   // best-effort: the server
+      if (!announcedSave) {                        // deadline already killed
+        this.showToast("Logged off");              // the token if throttled
+      }
     },
 
     async cancelLogoff() {
@@ -1747,7 +1760,7 @@ Vue.createApp({
                                                     //    trips the 401 redirect)
       if (auth.user.must_change_password) {
         // P2: the incoming user's cart never loaded — drop the OUTGOING
-        // user's cart from the view so the header count can't leak it.
+        // user's cart from the view so it can't linger in the UI.
         this.cart = { lines: [], total_qty: 0, total_cents: 0 };
         location.hash = "#/account";
         this.route = "#/account";

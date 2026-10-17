@@ -145,6 +145,11 @@ def vector_search(
     Uses the sqlite-vector extension: an exact SIMD scan over the float32
     BLOB embeddings stored in the items table.
     """
+    if limit is None and offset > 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="offset requires a limit (omit limit to rank every item)",
+        )
     query_vec = embed_text(q)
     if query_vec is None:
         raise HTTPException(
