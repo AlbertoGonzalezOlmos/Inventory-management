@@ -237,3 +237,64 @@ def test_svg_and_png_canvas_geometry_agree():
     assert px[guard_x, 0] == (0, 0, 0)
     assert px[guard_x, 109] == (0, 0, 0)
     assert px[guard_x, 110] == (255, 255, 255)
+
+
+def test_check_force_invalid_still_exits_nonzero(capsys):
+    """--force lets an invalid code RENDER (misread testing), but --check
+    must not report success for it: the report says INVALID and the exit
+    code follows the verdict (round-2 review: it used to exit 0)."""
+    rc = br.main(["8412345678906", "--check", "--force"])
+    assert rc == 1
+    assert "check:     6 (INVALID)" in capsys.readouterr().out
+    # and with an explicit format the file IS written (that is --force's
+    # purpose) — the exit code still reports the invalid verdict
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        import os
+        old = os.getcwd()
+        os.chdir(td)
+        try:
+            rc = br.main(["8412345678906", "--check", "--force",
+                          "--format", "svg"])
+            assert rc == 1
+            assert (Path(td) / "8412345678906.svg").exists()
+        finally:
+            os.chdir(old)
+
+
+def test_check_invalid_with_output_notifies_no_file(tmp_path, monkeypatch, capsys):
+    """An explicitly requested file is never silently not written — not
+    even on the invalid path (the same swallow class as --format)."""
+    monkeypatch.chdir(tmp_path)
+    rc = br.main(["8412345678906", "--check", "-o", "x.svg"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "check:     6 (INVALID)" in captured.out
+    assert "no file written" in captured.err
+    assert not (tmp_path / "x.svg").exists()
+
+
+def test_output_extension_infers_format(tmp_path, monkeypatch, capsys):
+    """--output label.png without --format must write PNG bytes (round-2
+    review: it used to write SVG bytes into a .png filename). Explicit
+    --format still wins over the extension."""
+    monkeypatch.chdir(tmp_path)
+    rc = br.main(["036000291452", "--output", "label.svg"])
+    assert rc == 0
+    assert (tmp_path / "label.svg").read_bytes().startswith(b"<svg")
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        pytest.skip("Pillow not installed")
+    rc = br.main(["036000291452", "--output", "label.png"])
+    assert rc == 0
+    assert (tmp_path / "label.png").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    # explicit --format beats the extension
+    rc = br.main(["036000291452", "--output", "odd.png", "--format", "svg"])
+    assert rc == 0
+    assert (tmp_path / "odd.png").read_bytes().startswith(b"<svg")
+    # unknown extension falls back to svg (the documented default)
+    rc = br.main(["036000291452", "--output", "plain.txt"])
+    assert rc == 0
+    assert (tmp_path / "plain.txt").read_bytes().startswith(b"<svg")
+    capsys.readouterr()

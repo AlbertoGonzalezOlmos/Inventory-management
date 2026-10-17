@@ -32,6 +32,30 @@ def _read(name: str) -> str:
     return (STATIC / name).read_text(encoding="utf-8")
 
 
+def _method_body(header: str) -> str:
+    """Extract a method body from static/app.js by brace matching.
+
+    ``header`` must be the DEFINITION line's text ending in ``{`` (e.g.
+    ``"handleSessionExpired() {"``) so a call site can never match. The
+    honest alternative to unbounded ``\\{[\\s\\S]*?foo\\(`` regexes, which
+    lazily match a *later definition* and false-pass when the pinned call
+    is deleted (found by the round-2 review probe).
+    """
+    js = _read("app.js")
+    assert header.endswith("{"), "header must include the opening brace"
+    start = js.index(header)
+    open_i = start + len(header) - 1
+    depth = 0
+    for i in range(open_i, len(js)):
+        if js[i] == "{":
+            depth += 1
+        elif js[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start:i + 1]
+    raise AssertionError(f"unbalanced braces after {header!r}")
+
+
 def test_scan_defer_exceeds_max_gap():
     """The load-bearing inequality, read from the shipped source."""
     src = _read("scancapture.js")
@@ -194,10 +218,11 @@ def test_purchases_route_wiring_is_pinned():
     html = _read("index.html")
     assert 'href="#/purchases"' in html
     assert "currentView === 'purchases'" in html
-    js = _read("app.js")
-    assert re.search(r"currentView\(view\) \{[\s\S]*?loadMyOrders\(\)", js), \
+    watcher = _method_body("currentView(view) {")
+    assert "loadMyOrders()" in watcher, \
         "the currentView watcher must load purchase history (navigation)"
-    assert re.search(r"mounted\(\) \{[\s\S]*?loadMyOrders\(\)", js), \
+    mounted = _method_body("mounted() {")
+    assert "loadMyOrders()" in mounted, \
         "mounted() must load purchase history (direct deep link)"
 
 
@@ -212,21 +237,31 @@ def test_similar_items_fetch_pins_explicit_limit():
 
 
 def test_session_expired_clears_the_cart_view():
-    """The 401 teardown must reset this.cart exactly like logout() does:
-    the next user can log in flagged (must_change_password skips
+    """BOTH 401 teardown paths must reset this.cart exactly like logout()
+    does: the next user can log in flagged (must_change_password skips
     loadCart), so a lingering cart would display — and be mutable — under
-    the new token (a cross-user leak)."""
+    the new token (a cross-user leak). The reset lives in the ONE
+    canonical handleSessionExpired(), and the event handler delegates to
+    it (api()'s throwing path) — the two paths cannot drift apart."""
     js = _read("app.js")
+    body = _method_body("handleSessionExpired() {")
+    assert "this.cart = { lines: [], total_qty: 0, total_cents: 0 }" in body
+    assert "_cartImportedLegacy = false" in body
     m = re.search(r'"hcrm-session-expired", \(\) => \{([\s\S]*?)\}\);', js)
     assert m, "the hcrm-session-expired handler must exist"
-    assert "this.cart = { lines: [], total_qty: 0, total_cents: 0 }" in m.group(1)
+    assert "handleSessionExpired()" in m.group(1), \
+        "the event handler must delegate to the canonical teardown"
 
 
 def test_stale_search_responses_are_generation_guarded():
     """reloadItems must bump a request generation and loadMore must drop
-    superseded responses: without it, a slow in-flight semantic response
-    for an old term/category replaces the grid and hasMore=false kills the
-    scroll sentinel (no self-healing until the next keystroke)."""
+    superseded responses on BOTH the resolve and the reject path: without
+    the reject-path refetch, an erroring superseded request abandons the
+    fresh reload and the grid silently stays empty (round-2 review). The
+    interleavings themselves are behaviour-tested in tests/js/
+    loadmore.test.mjs; this pins the mechanism's presence."""
     js = _read("app.js")
     assert "_itemsGen = (this._itemsGen || 0) + 1" in js
-    assert "gen !== this._itemsGen) continue" in js
+    body = _method_body("async loadMore() {")
+    assert body.count("gen !== this._itemsGen) continue") == 2, \
+        "both the resolve and the reject path must refetch when superseded"

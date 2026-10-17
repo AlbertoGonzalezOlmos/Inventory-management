@@ -717,32 +717,43 @@ Vue.createApp({
     async loadMore() {
       if (this.loading || !this.hasMore) return;
       this.loading = true;
-      let gen = 0;
       try {
         // A response superseded mid-flight (reloadItems bumped _itemsGen:
         // new search term, category or semantic toggle) must be dropped and
         // re-fetched with the fresh state — committing it used to pin the
         // grid on results for a filter the operator already changed, with
         // hasMore = false killing the scroll sentinel (no self-healing).
+        // The REJECT path is included: a superseded request that errors
+        // must also refetch, or the fresh reload silently never runs and
+        // the grid stays empty until the next user action (the sentinel
+        // only fires on intersection *changes*, so it cannot rescue it).
         for (;;) {
-          gen = this._itemsGen || 0;
+          const gen = this._itemsGen || 0;
           const term = this.search.trim();
           let page;
-          // The backend requires q to be at least 2 characters for semantic
-          // search; a single character falls back to keyword search.
-          if (this.semantic && term.length >= 2) {
-            // Semantic (vector) search — rank EVERY item in the shop by
-            // meaning similarity (no limit, no threshold, no pagination).
-            const params = new URLSearchParams({ q: term });
-            if (this.category) params.set("category", this.category);
-            page = await api("/items/vector-search?" + params.toString());
-          } else {
-            const params = new URLSearchParams({
-              limit: PAGE_SIZE, offset: this.offset,
-            });
-            if (term) params.set("q", term);
-            if (this.category) params.set("category", this.category);
-            page = await api("/items?" + params.toString());
+          try {
+            // The backend requires q to be at least 2 characters for
+            // semantic search; a single character falls back to keyword
+            // search.
+            if (this.semantic && term.length >= 2) {
+              // Semantic (vector) search — rank EVERY item in the shop by
+              // meaning similarity (no limit, no threshold, no pagination).
+              const params = new URLSearchParams({ q: term });
+              if (this.category) params.set("category", this.category);
+              page = await api("/items/vector-search?" + params.toString());
+            } else {
+              const params = new URLSearchParams({
+                limit: PAGE_SIZE, offset: this.offset,
+              });
+              if (term) params.set("q", term);
+              if (this.category) params.set("category", this.category);
+              page = await api("/items?" + params.toString());
+            }
+          } catch (e) {
+            if (gen !== this._itemsGen) continue;  // stale error: refetch fresh
+            this.showToast(e.message);
+            this.hasMore = false;
+            break;
           }
           if (gen !== this._itemsGen) continue;  // superseded — refetch fresh
           if (this.semantic && term.length >= 2) {
@@ -755,11 +766,6 @@ Vue.createApp({
             this.hasMore = page.length === PAGE_SIZE;
           }
           break;
-        }
-      } catch (e) {
-        if (gen === (this._itemsGen || 0)) {
-          this.showToast(e.message);
-          this.hasMore = false;
         }
       } finally {
         this.loading = false;
@@ -1558,16 +1564,23 @@ Vue.createApp({
     },
 
     handleSessionExpired() {
-      // Raw-mode 401s land here: the session is dead — mirror the api()
-      // wrapper's throwing-path cleanup (raw callers own their errors, so
-      // the wrapper skipped it). Any open overlay belonged to the dead
-      // session: close it so it cannot strand over the login view.
+      // THE canonical 401 teardown, shared by both expiry paths: raw-mode
+      // callers call it directly (they own their errors), and api()'s
+      // throwing path dispatches hcrm-session-expired after removing the
+      // tokens itself. Any open overlay belonged to the dead session:
+      // close it so it cannot strand over the login view.
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
       this.user = null;
       this.clearLogoff();
       this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
+      // The previous user's cart must die with their session exactly as
+      // in logout(): the next user can log in flagged (must_change_password
+      // skips loadCart), so a lingering cart would both display AND be
+      // mutable under the new token — a cross-user leak.
+      this.cart = { lines: [], total_qty: 0, total_cents: 0 };
+      this._cartImportedLegacy = false;
       location.hash = "#/login";
       this.route = "#/login";
       this.showToast("Session expired — please log in again.");
@@ -2455,20 +2468,12 @@ Vue.createApp({
       if (navigated) this._closeOverlays();
     });
 
-    // The api() wrapper broadcasts this when a request comes back 401:
-    // drop the in-memory session and show the login screen.
+    // The api() wrapper broadcasts this when a request comes back 401
+    // (it has already removed the tokens): run the canonical teardown —
+    // the SAME handleSessionExpired() the raw-mode 401 callers use, so
+    // the two expiry paths can never drift apart again.
     window.addEventListener("hcrm-session-expired", () => {
-      this.user = null;
-      this.clearLogoff();   // a pending countdown's timer must die here
-      this.dismissGreeting();  // the banner names a user whose session is dead
-      this._closeOverlays();  // ...and the dead session's modals with it
-      // The previous user's cart must die with their session exactly as
-      // in logout(): the next user can log in flagged (must_change_password
-      // skips loadCart), so a lingering cart would both display AND be
-      // mutable under the new token — a cross-user leak.
-      this.cart = { lines: [], total_qty: 0, total_cents: 0 };
-      this._cartImportedLegacy = false;
-      this.route = "#/login";
+      this.handleSessionExpired();
     });
 
     // The global HID scan capture: one document-level listener, always on

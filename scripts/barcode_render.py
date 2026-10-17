@@ -295,8 +295,9 @@ def resolve(code: str, symbology: str, force: bool) -> tuple[str, str]:
                      f"got {len(body)}")
 
 
-def _print_report(full: str, symbology: str, *, analyze: bool) -> None:
-    """The --check/--analyze report (stdout; exit code is the caller's)."""
+def _print_report(full: str, symbology: str, *, analyze: bool) -> bool:
+    """The --check/--analyze report (stdout). Returns True when the check
+    digit validates, so the caller's exit code can follow the verdict."""
     valid = check_digit(full[:-1]) == full[-1]
     print(f"symbology: {symbology}")
     print(f"code:      {full}")
@@ -310,6 +311,7 @@ def _print_report(full: str, symbology: str, *, analyze: bool) -> None:
             print(f"format:    {a.info.format}")
             print(f"region:    {a.info.region or '-'}")
             print(f"global:    {a.info.globally_unique}")
+    return valid
 
 
 def main(argv=None) -> int:
@@ -343,22 +345,41 @@ def main(argv=None) -> int:
             print(f"barcode_render: {exc}", file=sys.stderr)
             return 1
         _print_report(exc.body, exc.symbology, analyze=args.analyze)
+        if args.output is not None or args.format is not None:
+            # An explicitly requested file is never silently not written
+            # (the same swallow class the --format fix targets).
+            print("barcode_render: no file written (the code is invalid)",
+                  file=sys.stderr)
         return 1
     except ValueError as exc:
         print(f"barcode_render: {exc}", file=sys.stderr)
         return 1
 
+    reported_invalid = False
     if args.check or args.analyze:
-        _print_report(full, symbology, analyze=args.analyze)
+        # --force can walk an invalid code through resolve; a validator
+        # must still not report success for it (the report says INVALID,
+        # and the exit code follows the verdict, not the render).
+        reported_invalid = not _print_report(full, symbology,
+                                             analyze=args.analyze)
     if args.output is None and (args.check or args.analyze) and \
             args.format is None:
         # Print-only recognition mode. An explicit --format (or --output)
         # means the user wants the file too — never swallow it silently.
         print("barcode_render: print-only mode (pass --output to also "
               "write a file)", file=sys.stderr)
-        return 0
+        return 1 if reported_invalid else 0
 
-    fmt = args.format or "svg"
+    # Explicit --format wins; otherwise infer from --output's extension
+    # (writing SVG bytes into a .png filename is a silent mismatch);
+    # default svg.
+    fmt = "svg"
+    if args.format:
+        fmt = args.format
+    elif args.output:
+        ext = os.path.splitext(args.output)[1].lstrip(".").lower()
+        if ext in ("svg", "png"):
+            fmt = ext
     bits = _bits_for(full, symbology)
     label = "" if args.no_label else full
     if fmt == "svg":
@@ -373,7 +394,7 @@ def main(argv=None) -> int:
         f.write(payload)
     print(f"barcode_render: wrote {out} ({symbology} {full}, "
           f"{len(bits)} modules)")
-    return 0
+    return 1 if reported_invalid else 0
 
 
 if __name__ == "__main__":
