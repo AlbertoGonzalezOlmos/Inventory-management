@@ -133,9 +133,9 @@ def vector_search(
     q: str = Query(min_length=2, description="Natural-language query, matched "
                  "semantically against item descriptions"),
     category: str = Query(default="", description="Restrict results to this category"),
-    limit: int | None = Query(default=None, ge=1,
-                              description="Max results; omit for every item "
-                                          "(ranked by similarity, no cutoff)"),
+    limit: int | None = Query(default=None, ge=1, le=500,
+                              description="Max results (≤ 500); omit to rank "
+                                          "every item (no cutoff)"),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
@@ -147,7 +147,7 @@ def vector_search(
     """
     if limit is None and offset > 0:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="offset requires a limit (omit limit to rank every item)",
         )
     query_vec = embed_text(q)

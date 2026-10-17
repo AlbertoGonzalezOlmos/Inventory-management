@@ -182,3 +182,51 @@ def test_terminal_token_key_is_the_persisted_binding():
                  'localStorage.setItem(TERMINAL_TOKEN_KEY',
                  'localStorage.removeItem(TERMINAL_TOKEN_KEY)'):
         assert call in app, f"missing {call} — the binding would not persist"
+
+
+def test_purchases_route_wiring_is_pinned():
+    """The #/purchases tab needs five cooperating pieces (nav link, view
+    mapping, section, watcher load, mounted load); drop any one and the
+    page renders EMPTY rather than erroring — exactly the silent shape
+    this suite exists to pin. The watcher/mounted pair is the piece a
+    well-meaning "de-duplication" eats, killing either deep links or
+    navigation."""
+    html = _read("index.html")
+    assert 'href="#/purchases"' in html
+    assert "currentView === 'purchases'" in html
+    js = _read("app.js")
+    assert re.search(r"currentView\(view\) \{[\s\S]*?loadMyOrders\(\)", js), \
+        "the currentView watcher must load purchase history (navigation)"
+    assert re.search(r"mounted\(\) \{[\s\S]*?loadMyOrders\(\)", js), \
+        "mounted() must load purchase history (direct deep link)"
+
+
+def test_similar_items_fetch_pins_explicit_limit():
+    """openDetail's "similar items" fetch must keep its explicit limit=5:
+    the vector-search default is now rank-everything, so dropping the
+    parameter would silently fetch the whole catalogue per item click."""
+    js = _read("app.js")
+    assert re.search(
+        r'"/items/vector-search\?q="[\s\S]{0,300}?&limit=5', js), \
+        "the similar-items fetch must carry an explicit limit"
+
+
+def test_session_expired_clears_the_cart_view():
+    """The 401 teardown must reset this.cart exactly like logout() does:
+    the next user can log in flagged (must_change_password skips
+    loadCart), so a lingering cart would display — and be mutable — under
+    the new token (a cross-user leak)."""
+    js = _read("app.js")
+    m = re.search(r'"hcrm-session-expired", \(\) => \{([\s\S]*?)\}\);', js)
+    assert m, "the hcrm-session-expired handler must exist"
+    assert "this.cart = { lines: [], total_qty: 0, total_cents: 0 }" in m.group(1)
+
+
+def test_stale_search_responses_are_generation_guarded():
+    """reloadItems must bump a request generation and loadMore must drop
+    superseded responses: without it, a slow in-flight semantic response
+    for an old term/category replaces the grid and hasMore=false kills the
+    scroll sentinel (no self-healing until the next keystroke)."""
+    js = _read("app.js")
+    assert "_itemsGen = (this._itemsGen || 0) + 1" in js
+    assert "gen !== this._itemsGen) continue" in js

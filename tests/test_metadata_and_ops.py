@@ -201,6 +201,11 @@ def test_shipped_artifacts_never_name_a_git_branch():
         r"\b(?:feature|archive|backup|hotfix|release|chore|refactor)"
         r"/[A-Za-z0-9][A-Za-z0-9._]*[-_.][A-Za-z0-9._-]*")
     exempt_prefixes = ("PLAN", "REVIEW", "NOTES")
+    # docs/plans/ is the workstream's process-notes parking lot (council
+    # proposals/reviews, coordinator syntheses, round checklists): the same
+    # "exists to talk about the work, including its branches" class as the
+    # exempt prefixes above — but never shipped operator documentation.
+    exempt_dirs = ("docs/plans",)
     # --cached --others --exclude-standard: everything that would be part of
     # the next commit, including files this branch adds but has not committed
     # yet. `git ls-files` alone silently skips those — which is exactly when a
@@ -214,6 +219,8 @@ def test_shipped_artifacts_never_name_a_git_branch():
                 and path not in ("README.md",):
             continue
         if os.path.basename(path).startswith(exempt_prefixes):
+            continue
+        if os.path.dirname(path) in exempt_dirs:
             continue
         try:
             text = open(os.path.join(REPO_ROOT, path), encoding="utf-8").read()

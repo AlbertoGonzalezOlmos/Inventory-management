@@ -441,8 +441,16 @@
       <h1>Purchase history</h1>
       <div class="history-layout">
         <div class="history-list">
+          <!-- A flagged account cannot buy anything yet (every purchase
+               endpoint 403s until the password changes) — the generic
+               "complete a purchase" instruction would be a dead end. -->
           <p class="muted" v-if="myOrders.length === 0">
-            Nothing purchased yet — complete a purchase from your list in the catalogue.
+            <template v-if="user && user.must_change_password">
+              Change your password (Account → Security) to unlock your purchase history.
+            </template>
+            <template v-else>
+              Nothing purchased yet — complete a purchase from your list in the catalogue.
+            </template>
           </p>
           <div v-for="order in myOrders" :key="order.id" class="order-card">
             <div class="order-head" @click="toggleOrder(order.id)">

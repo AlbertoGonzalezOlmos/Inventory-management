@@ -216,3 +216,46 @@ def test_vector_search_similarity_clamped(client, admin_token):
     r = client.get("/api/items/vector-search?q=zzzq", headers=auth(admin_token))
     assert r.status_code == 200
     assert all(0.0 <= i["similarity"] <= 1.0 for i in r.json())
+
+
+def test_vector_search_no_limit_ranks_every_item(client, admin_token):
+    """The rank-all contract (PR #34's headline change): with limit omitted,
+    EVERY item comes back, ranked by similarity (non-increasing)."""
+    r = client.get("/api/items/vector-search?q=anything", headers=auth(admin_token))
+    assert r.status_code == 200
+    body = r.json()
+    total = len(client.get("/api/items?limit=100", headers=auth(admin_token)).json())
+    assert total >= 12            # the fixture must actually exercise this
+    assert len(body) == total     # no cutoff, no threshold
+    sims = [i["similarity"] for i in body]
+    assert sims == sorted(sims, reverse=True)
+
+
+def test_vector_search_offset_without_limit_is_422(client, admin_token):
+    """offset is silently useless without LIMIT (the SQL drops both) — the
+    guard turns the foot-gun into an explicit 422."""
+    r = client.get(
+        "/api/items/vector-search?q=anything&offset=5", headers=auth(admin_token)
+    )
+    assert r.status_code == 422
+    assert "offset requires a limit" in r.json()["detail"]
+    # ...and the sanctioned combinations still work
+    r = client.get(
+        "/api/items/vector-search?q=anything&limit=500&offset=0",
+        headers=auth(admin_token),
+    )
+    assert r.status_code == 200
+
+
+def test_vector_search_limit_has_a_ceiling(client, admin_token):
+    """The rank-all default is unbounded BY DESIGN (kiosk-scale catalogue),
+    but an explicit limit must stay bounded: no le means a stray client
+    parameter could pin the exact SIMD scan into a 10^6-row response."""
+    r = client.get(
+        "/api/items/vector-search?q=anything&limit=501", headers=auth(admin_token)
+    )
+    assert r.status_code == 422
+    r = client.get(
+        "/api/items/vector-search?q=anything&limit=500", headers=auth(admin_token)
+    )
+    assert r.status_code == 200

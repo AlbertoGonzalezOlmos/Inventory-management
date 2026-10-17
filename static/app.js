@@ -704,6 +704,10 @@ Vue.createApp({
     },
 
     async reloadItems() {
+      // Bump the request generation: any response for the OLD state that
+      // is still in flight (or lands between here and loadMore's commit)
+      // is superseded and must never be committed to the grid.
+      this._itemsGen = (this._itemsGen || 0) + 1;
       this.offset = 0;
       this.items = [];
       this.hasMore = true;
@@ -713,33 +717,50 @@ Vue.createApp({
     async loadMore() {
       if (this.loading || !this.hasMore) return;
       this.loading = true;
+      let gen = 0;
       try {
-        const term = this.search.trim();
-        // The backend requires q to be at least 2 characters for semantic
-        // search; a single character falls back to keyword search.
-        if (this.semantic && term.length >= 2) {
-          // Semantic (vector) search — rank EVERY item in the shop by
-          // meaning similarity (no limit, no threshold, no pagination).
-          const params = new URLSearchParams({ q: term });
-          if (this.category) params.set("category", this.category);
-          const page = await api("/items/vector-search?" + params.toString());
-          this.items = page;
-          this.offset = page.length;
-          this.hasMore = false;
-        } else {
-          const params = new URLSearchParams({
-            limit: PAGE_SIZE, offset: this.offset,
-          });
-          if (term) params.set("q", term);
-          if (this.category) params.set("category", this.category);
-          const page = await api("/items?" + params.toString());
-          this.items.push(...page);
-          this.offset += page.length;
-          this.hasMore = page.length === PAGE_SIZE;
+        // A response superseded mid-flight (reloadItems bumped _itemsGen:
+        // new search term, category or semantic toggle) must be dropped and
+        // re-fetched with the fresh state — committing it used to pin the
+        // grid on results for a filter the operator already changed, with
+        // hasMore = false killing the scroll sentinel (no self-healing).
+        for (;;) {
+          gen = this._itemsGen || 0;
+          const term = this.search.trim();
+          let page;
+          // The backend requires q to be at least 2 characters for semantic
+          // search; a single character falls back to keyword search.
+          if (this.semantic && term.length >= 2) {
+            // Semantic (vector) search — rank EVERY item in the shop by
+            // meaning similarity (no limit, no threshold, no pagination).
+            const params = new URLSearchParams({ q: term });
+            if (this.category) params.set("category", this.category);
+            page = await api("/items/vector-search?" + params.toString());
+          } else {
+            const params = new URLSearchParams({
+              limit: PAGE_SIZE, offset: this.offset,
+            });
+            if (term) params.set("q", term);
+            if (this.category) params.set("category", this.category);
+            page = await api("/items?" + params.toString());
+          }
+          if (gen !== this._itemsGen) continue;  // superseded — refetch fresh
+          if (this.semantic && term.length >= 2) {
+            this.items = page;
+            this.offset = page.length;
+            this.hasMore = false;
+          } else {
+            this.items.push(...page);
+            this.offset += page.length;
+            this.hasMore = page.length === PAGE_SIZE;
+          }
+          break;
         }
       } catch (e) {
-        this.showToast(e.message);
-        this.hasMore = false;
+        if (gen === (this._itemsGen || 0)) {
+          this.showToast(e.message);
+          this.hasMore = false;
+        }
       } finally {
         this.loading = false;
       }
@@ -1774,11 +1795,12 @@ Vue.createApp({
       location.hash = "#/catalogue";
       this.route = "#/catalogue";
       // The save-then-switch message: the outgoing list is durable and will
-      // be back when that user returns — surfaced on the persistent greeting
-      // banner (not a 3 s toast) so the save is legible and click-dismissible.
+      // be back when that user returns — surfaced on the greeting banner
+      // (not a 3 s toast) so the save is legible. Deliberately PERSISTENT
+      // (click-dismissible via dismissGreeting): no auto-dismiss timer —
+      // the reassurance must survive until the next user starts scanning.
       this.greeting = `Switched to ${auth.user.name} — ${oldName}'s list was saved and will be back when ${oldName} signs in`;
       clearTimeout(this._greetingTimer);
-      this._greetingTimer = setTimeout(() => (this.greeting = ""), 6000);
       await this.replayStagedScans();
     },
 
@@ -2440,6 +2462,12 @@ Vue.createApp({
       this.clearLogoff();   // a pending countdown's timer must die here
       this.dismissGreeting();  // the banner names a user whose session is dead
       this._closeOverlays();  // ...and the dead session's modals with it
+      // The previous user's cart must die with their session exactly as
+      // in logout(): the next user can log in flagged (must_change_password
+      // skips loadCart), so a lingering cart would both display AND be
+      // mutable under the new token — a cross-user leak.
+      this.cart = { lines: [], total_qty: 0, total_cents: 0 };
+      this._cartImportedLegacy = false;
       this.route = "#/login";
     });
 

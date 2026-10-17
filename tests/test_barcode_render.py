@@ -14,7 +14,10 @@ tautology. A full known-answer bit string then pins the encode *logic*.
 """
 
 import sys
+from io import BytesIO
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -117,15 +120,47 @@ def test_resolve_rejects_a_bad_check_digit_unless_forced():
         ("8412345678906", "ean13")
 
 
-def test_resolve_upca_requires_explicit_symbology():
-    """A 12-digit input is ambiguous; auto resolves it to EAN-13, and a real
-    UPC-A must be requested explicitly (the script also warns on stderr)."""
-    # auto treats 12 digits as an EAN-13 body: check digit appended -> 13.
+def test_resolve_auto_disambiguates_a_valid_12_digit_upca():
+    """036000291452 is a COMPLETE, valid UPC-A: auto must render exactly
+    those digits. (The old behaviour appended an EAN-13 check digit and
+    silently produced a different GTIN — a scannable barcode carrying the
+    wrong number.)"""
     assert br.resolve("036000291452", "auto", force=False) == \
-        ("0360002914522", "ean13")
-    # explicit upca keeps the 12 digits as-is (check digit verified).
+        ("036000291452", "upca")
+    # explicit upca is unchanged: 12 digits verified as-is
     assert br.resolve("036000291452", "upca", force=False) == \
         ("036000291452", "upca")
+
+
+def test_resolve_auto_keeps_ean13_body_when_upc_check_fails():
+    """A 12-digit body that is NOT a valid UPC-A keeps the EAN-13 body
+    interpretation (check digit appended) — the common retail case."""
+    full, symbology = br.resolve("841234567890", "auto", force=False)
+    assert (full, symbology) == ("841234567890" + check_digit("841234567890"),
+                                 "ean13")
+
+
+def test_resolve_round_trips_ean8_and_upca():
+    # 7 digits -> EAN-8 body; the full code then passes through unchanged.
+    assert br.resolve("1234567", "auto", force=False) == ("12345670", "ean8")
+    assert br.resolve("12345670", "auto", force=False) == ("12345670", "ean8")
+    # 11 digits -> UPC-A body; 12-digit full code (valid) -> UPC-A as-is.
+    assert br.resolve("03600029145", "auto", force=False) == \
+        ("036000291452", "upca")
+    assert br.resolve("036000291452", "upca", force=False) == \
+        ("036000291452", "upca")
+
+
+def test_resolve_rejects_non_ascii_digits_before_the_bit_tables():
+    """str.isdigit() alone accepts Arabic-Indic/fullwidth digits, which
+    would then hit the ASCII-keyed tables as a raw KeyError traceback."""
+    for bad in ("\u0661\u0662\u0663\u0664\u0665\u0666\u0667",          # ١٢٣٤٥٦٧
+                "\uff14\uff10\uff10\uff16\uff13\uff18",                  # ４００６３８
+                "12\u0663\u0664", "1234567\u0660"):
+        with pytest.raises(ValueError):
+            br.resolve(bad, "auto", force=True)  # --force must not bypass
+        with pytest.raises(ValueError):
+            br.resolve(bad, "ean13", force=True)
 
 
 def test_svg_has_expected_dimensions_and_bar_count():
@@ -137,3 +172,68 @@ def test_svg_has_expected_dimensions_and_bar_count():
     # 30 bar runs for this code (each run = one black <rect/>; the background
     # rect and the <text> label are not counted by 'fill="black"/>').
     assert svg.count('fill="black"/>') == 30
+
+
+def test_check_mode_reports_invalid_instead_of_erroring(capsys):
+    """A validator that can only ever print 'valid' is useless: --check on a
+    wrong check digit must print the INVALID report (exit 1, report on
+    stdout) instead of the bare error line."""
+    rc = br.main(["8412345678906", "--check"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "symbology: ean13" in out
+    assert "code:      8412345678906" in out
+    assert "check:     6 (INVALID)" in out
+    assert "expected 5" not in out  # the INVALID line carries it
+    # without --check/--analyze it stays a one-line error on stderr
+    capsys.readouterr()
+    rc = br.main(["8412345678906"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "expected 5" in captured.err
+
+
+def test_check_mode_reports_valid(capsys):
+    rc = br.main(["8412345678905", "--check"])
+    assert rc == 0
+    assert "check:     5 (valid)" in capsys.readouterr().out
+
+
+def test_check_with_format_writes_the_file(tmp_path, monkeypatch, capsys):
+    """--format/--output must never be silently swallowed by recognition
+    mode: only the flag-less default is print-only."""
+    monkeypatch.chdir(tmp_path)
+    rc = br.main(["036000291452", "--check", "--format", "svg"])
+    assert rc == 0
+    assert (tmp_path / "036000291452.svg").exists()
+    assert "check:     2 (valid)" in capsys.readouterr().out
+    # plain --check (no format, no output) stays print-only
+    capsys.readouterr()
+    rc = br.main(["036000291452", "--check"])
+    assert rc == 0
+    assert "print-only" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == [tmp_path / "036000291452.svg"]
+
+
+def test_svg_and_png_canvas_geometry_agree():
+    """The two formats must be pixel-interchangeable: same canvas size, and
+    the PNG's bars exactly `height` rows (PIL rectangles are inclusive)."""
+    bits = br.ean13_bits("8412345678905")
+    svg = br._render_svg(bits, "8412345678905", module=3, height=110)
+    assert 'height="134"' in svg          # 110 + 24
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        pytest.skip("Pillow not installed")
+    png = br._render_png(bits, "8412345678905", module=3, height=110)
+    img = Image.open(BytesIO(png))
+    assert img.size == (351, 134)         # (2*11 + 95) * 3 wide, 110 + 24 tall
+    # bar rows: the top-left quiet zone + first guard bar pixel is black,
+    # the row at y=110 (the first label row) is white, and every row
+    # between 0 and 109 in the guard column is black.
+    px = img.load()
+    guard_x = 11 * 3                      # first module after the quiet zone
+    assert px[guard_x, 0] == (0, 0, 0)
+    assert px[guard_x, 109] == (0, 0, 0)
+    assert px[guard_x, 110] == (255, 255, 255)

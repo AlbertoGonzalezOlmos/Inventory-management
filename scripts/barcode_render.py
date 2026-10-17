@@ -25,8 +25,14 @@ so there is one source table to trust and it is pinned by a property test
 Usage:
   scripts/barcode_render.py 841234567890            # EAN-13: computes check
   scripts/barcode_render.py 8412345678905 --check   # validate the check digit
+                                                       # (an INVALID code prints its
+                                                       # report and exits 1)
   scripts/barcode_render.py 8412345678905 --analyze # GS1 classification
   scripts/barcode_render.py 841234567890 --format png --output barcode.png
+                                                       # (--check is print-only UNLESS
+                                                       # --format/--output is given)
+  scripts/barcode_render.py 036000291452            # 12 digits with a valid UPC-A
+                                                       # check digit → rendered as UPC-A
 """
 
 from __future__ import annotations
@@ -185,7 +191,11 @@ def _render_png(bits: str, label: str, *, module: int = 3,
         raise SystemExit("PNG output needs Pillow (`pip install pillow`); "
                          "use --format svg instead") from exc
     width = (quiet * 2 + len(bits)) * module
-    img = Image.new("RGB", (width, height + 28), "white")
+    # Canvas height matches the SVG exactly (height + 24): the two formats
+    # must be pixel-interchangeable. PIL's rectangle is inclusive on both
+    # corners, so y1 = height - 1 paints exactly `height` rows (y1 = height
+    # would paint one row too many).
+    img = Image.new("RGB", (width, height + 24), "white")
     draw = ImageDraw.Draw(img)
     x = quiet * module
     i = 0
@@ -194,7 +204,7 @@ def _render_png(bits: str, label: str, *, module: int = 3,
             j = i
             while j < len(bits) and bits[j] == "1":
                 j += 1
-            draw.rectangle([x, 0, x + (j - i) * module - 1, height],
+            draw.rectangle([x, 0, x + (j - i) * module - 1, height - 1],
                            fill="black")
             x += (j - i) * module
             i = j
@@ -214,6 +224,25 @@ def _render_png(bits: str, label: str, *, module: int = 3,
     return buf.getvalue()
 
 
+class CheckDigitError(ValueError):
+    """A full code whose check digit is wrong.
+
+    Subclassing ValueError keeps the render path's behaviour (message +
+    exit 1) while letting --check/--analyze report a structured INVALID
+    verdict instead of a bare error line.
+    """
+
+    def __init__(self, body: str, symbology: str):
+        expected = check_digit(body[:-1])
+        super().__init__(
+            f"check digit {body[-1]} is wrong for {body[:-1]} "
+            f"(expected {expected}) — re-check, or pass "
+            "--force to render the invalid code as-is (misread testing)")
+        self.body = body
+        self.symbology = symbology
+        self.expected = expected
+
+
 def resolve(code: str, symbology: str, force: bool) -> tuple[str, str]:
     """Normalise a digit string to the full code for a symbology.
 
@@ -221,8 +250,11 @@ def resolve(code: str, symbology: str, force: bool) -> tuple[str, str]:
     computed; a full code is verified (unless ``force``).
     """
     body = code.strip()
-    if not body.isdigit():
-        raise ValueError("barcode digits must be 0-9 only")
+    # isascii() matters: str.isdigit() alone accepts Arabic-Indic and
+    # other Unicode decimal digits, which would then flow into the
+    # ASCII-keyed bit tables and die with a raw KeyError traceback.
+    if not (body.isascii() and body.isdigit()):
+        raise ValueError("barcode digits must be 0-9 (ASCII) only")
     if symbology == "auto":
         if len(body) == 7 or len(body) == 8:
             symbology = "ean8"
@@ -230,13 +262,21 @@ def resolve(code: str, symbology: str, force: bool) -> tuple[str, str]:
             symbology = "upca"
         elif len(body) == 12:
             # 12 digits is ambiguous: a complete UPC-A (with check digit) or
-            # an EAN-13 body (check digit to be appended). Default to EAN-13
-            # (the common retail case) but say so — a real 12-digit UPC-A
-            # must be requested explicitly with --symbology upca.
-            print("barcode_render: 12 digits interpreted as an EAN-13 body "
-                  "(check digit will be appended); pass --symbology upca for "
-                  "a 12-digit UPC-A", file=sys.stderr)
-            symbology = "ean13"
+            # an EAN-13 body (check digit to be appended). If the digits form
+            # a VALID UPC-A, render exactly what was typed (the EAN-13
+            # interpretation would silently produce a different GTIN);
+            # otherwise fall back to the common retail case (EAN-13 body)
+            # and say so on stderr.
+            if check_digit(body[:-1]) == body[-1]:
+                print("barcode_render: 12 digits with a valid UPC-A check "
+                      "digit — rendering as UPC-A (pass --symbology ean13 "
+                      "to append an EAN-13 check digit instead)", file=sys.stderr)
+                symbology = "upca"
+            else:
+                print("barcode_render: 12 digits interpreted as an EAN-13 body "
+                      "(check digit will be appended); pass --symbology upca "
+                      "for a 12-digit UPC-A", file=sys.stderr)
+                symbology = "ean13"
         elif len(body) == 13:
             symbology = "ean13"
         else:
@@ -249,13 +289,27 @@ def resolve(code: str, symbology: str, force: bool) -> tuple[str, str]:
         return body + check_digit(body), symbology
     if len(body) == full:
         if not force and check_digit(body[:-1]) != body[-1]:
-            raise ValueError(
-                f"check digit {body[-1]} is wrong for {body[:-1]} "
-                f"(expected {check_digit(body[:-1])}) — re-check, or pass "
-                "--force to render the invalid code as-is (misread testing)")
+            raise CheckDigitError(body, symbology)
         return body, symbology
     raise ValueError(f"{symbology} needs {full - 1} or {full} digits, "
                      f"got {len(body)}")
+
+
+def _print_report(full: str, symbology: str, *, analyze: bool) -> None:
+    """The --check/--analyze report (stdout; exit code is the caller's)."""
+    valid = check_digit(full[:-1]) == full[-1]
+    print(f"symbology: {symbology}")
+    print(f"code:      {full}")
+    print(f"check:     {full[-1]} ({'valid' if valid else 'INVALID'})")
+    if analyze:
+        a = analyze_scan(full, symbology="EAN-13" if symbology == "ean13"
+                         else ("EAN-8" if symbology == "ean8" else "UPC-A"))
+        print(f"kind:      {a.kind}")
+        print(f"key:       {a.key}")
+        if a.info is not None:
+            print(f"format:    {a.info.format}")
+            print(f"region:    {a.info.region or '-'}")
+            print(f"global:    {a.info.globally_unique}")
 
 
 def main(argv=None) -> int:
@@ -266,7 +320,9 @@ def main(argv=None) -> int:
     parser.add_argument("--symbology", choices=["auto", "ean13", "ean8", "upca"],
                         default="auto",
                         help="symbology to encode (default: infer from length)")
-    parser.add_argument("--format", choices=["svg", "png"], default="svg")
+    parser.add_argument("--format", choices=["svg", "png"], default=None,
+                        help="output format (default: svg) — passing --format "
+                             "with --check/--analyze also writes the file")
     parser.add_argument("--output", "-o", help="output file (default: <code>.<fmt>)")
     parser.add_argument("--module", type=int, default=3, help="bar module width (px)")
     parser.add_argument("--height", type=int, default=110, help="bar height (px)")
@@ -279,37 +335,40 @@ def main(argv=None) -> int:
 
     try:
         full, symbology = resolve(args.code, args.symbology, args.force)
+    except CheckDigitError as exc:
+        # --check/--analyze are recognition modes: report the verdict
+        # instead of erroring out (a validator that can only ever print
+        # "valid" is useless). The exit code stays 1 — the code IS invalid.
+        if not (args.check or args.analyze):
+            print(f"barcode_render: {exc}", file=sys.stderr)
+            return 1
+        _print_report(exc.body, exc.symbology, analyze=args.analyze)
+        return 1
     except ValueError as exc:
         print(f"barcode_render: {exc}", file=sys.stderr)
         return 1
 
     if args.check or args.analyze:
-        print(f"symbology: {symbology}")
-        print(f"code:      {full}")
-        print(f"check:     {full[-1]} "
-              f"({'valid' if check_digit(full[:-1]) == full[-1] else 'INVALID'})")
-        if args.analyze:
-            a = analyze_scan(full, symbology="EAN-13" if symbology == "ean13"
-                             else ("EAN-8" if symbology == "ean8" else "UPC-A"))
-            print(f"kind:      {a.kind}")
-            print(f"key:       {a.key}")
-            if a.info is not None:
-                print(f"format:    {a.info.format}")
-                print(f"region:    {a.info.region or '-'}")
-                print(f"global:    {a.info.globally_unique}")
-    if args.output is None and (args.check or args.analyze):
-        return 0  # recognition modes: print only, no file unless --output given
+        _print_report(full, symbology, analyze=args.analyze)
+    if args.output is None and (args.check or args.analyze) and \
+            args.format is None:
+        # Print-only recognition mode. An explicit --format (or --output)
+        # means the user wants the file too — never swallow it silently.
+        print("barcode_render: print-only mode (pass --output to also "
+              "write a file)", file=sys.stderr)
+        return 0
 
+    fmt = args.format or "svg"
     bits = _bits_for(full, symbology)
     label = "" if args.no_label else full
-    if args.format == "svg":
+    if fmt == "svg":
         payload = _render_svg(bits, label, module=args.module,
                               height=args.height).encode()
     else:
         payload = _render_png(bits, label, module=args.module,
                               height=args.height)
 
-    out = args.output or f"{full}.{args.format}"
+    out = args.output or f"{full}.{fmt}"
     with open(out, "wb") as f:
         f.write(payload)
     print(f"barcode_render: wrote {out} ({symbology} {full}, "
