@@ -111,6 +111,17 @@ def test_by_semantic_returns_results_with_embeddings(client, admin_token):
     assert result["by_semantic"][0]["id"] == item["id"]
 
 
+def test_by_semantic_is_sliced_to_the_suggest_limit(client, admin_token):
+    """The vector-search default became rank-everything (PR #34); the
+    suggest group must keep its own small slice — a five-item suggestion
+    list, never the whole catalogue."""
+    user, token = create_user(client, admin_token)
+    for i in range(8):
+        _create_item(client, admin_token, f"SUG-{i}", f"Suggestible widget {i}")
+    result = _suggest(client, token, q="widget")
+    assert len(result["by_semantic"]) == 5  # sliced, though >5 items match
+
+
 def test_by_semantic_degrades_to_empty_never_503(client, admin_token, monkeypatch):
     """Decision 7 pin: any embedding/extension unavailability is a
     suggestion MISS ([]), never a failure of the endpoint."""

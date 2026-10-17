@@ -13,9 +13,8 @@ one arithmetic the whole design stands on:
   references the HcrmScanCapture global at install time, so a reversed
   order is a silently dead scan bus (ui_check would only catch it as a
   console error, and only on a page that logs it).
-- the two [data-scan-sink] fields: the collapsed badge-code fallback and
-  the visible scan field must keep their dedicated Enter paths (the global
-  capture must never regress them).
+- the [data-scan-sink] field: the collapsed badge-code fallback must
+  keep its dedicated Enter path (the global capture must never regress it).
 - no isTrusted check: the M-10's USB host is dead
   (docs/m10-unreachable-2026-10-10.md), so console-dispatched synthetic
   KeyboardEvents are the only capture-verification path — a handler that
@@ -31,6 +30,30 @@ STATIC = REPO_ROOT / "static"
 
 def _read(name: str) -> str:
     return (STATIC / name).read_text(encoding="utf-8")
+
+
+def _method_body(header: str) -> str:
+    """Extract a method body from static/app.js by brace matching.
+
+    ``header`` must be the DEFINITION line's text ending in ``{`` (e.g.
+    ``"handleSessionExpired() {"``) so a call site can never match. The
+    honest alternative to unbounded ``\\{[\\s\\S]*?foo\\(`` regexes, which
+    lazily match a *later definition* and false-pass when the pinned call
+    is deleted (found by the round-2 review probe).
+    """
+    js = _read("app.js")
+    assert header.endswith("{"), "header must include the opening brace"
+    start = js.index(header)
+    open_i = start + len(header) - 1
+    depth = 0
+    for i in range(open_i, len(js)):
+        if js[i] == "{":
+            depth += 1
+        elif js[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start:i + 1]
+    raise AssertionError(f"unbalanced braces after {header!r}")
 
 
 def test_scan_defer_exceeds_max_gap():
@@ -58,18 +81,22 @@ def test_scancapture_loads_before_app_js():
         "HcrmScanCapture global at install time")
 
 
-def test_both_scan_sinks_still_exist():
-    """The badge fallback field and the visible scan field own their keys.
+def test_badge_fallback_sink_still_exists():
+    """The collapsed badge-code fallback owns its keys.
 
     The global capture returns early for [data-scan-sink] targets; losing
-    either attribute would route the M-10's keystrokes into BOTH the sink's
+    the attribute would route the M-10's keystrokes into BOTH the fallback's
     handler and the capture bus (double-fire) — or break the login fallback
-    entirely.
+    entirely. (The visible catalogue scan field was removed: the global
+    capture is the primary path and the badge field is the only sink.)
     """
     html = _read("index.html")
-    assert html.count("data-scan-sink") >= 2, (
-        "expected both data-scan-sink fields (the collapsed badge-code "
-        "fallback on the login view and the visible scan field)")
+    # The attribute appears on the badge fallback input; an adjacent comment
+    # also mentions "data-scan-sink is", so count the attribute form only.
+    sinks = re.findall(r"data-scan-sink(?!\s+is)", html)
+    assert len(sinks) == 1, (
+        "expected exactly one data-scan-sink attribute (the collapsed badge "
+        "fallback on the login view)")
 
 
 def test_capture_never_checks_is_trusted():
@@ -179,3 +206,62 @@ def test_terminal_token_key_is_the_persisted_binding():
                  'localStorage.setItem(TERMINAL_TOKEN_KEY',
                  'localStorage.removeItem(TERMINAL_TOKEN_KEY)'):
         assert call in app, f"missing {call} — the binding would not persist"
+
+
+def test_purchases_route_wiring_is_pinned():
+    """The #/purchases tab needs five cooperating pieces (nav link, view
+    mapping, section, watcher load, mounted load); drop any one and the
+    page renders EMPTY rather than erroring — exactly the silent shape
+    this suite exists to pin. The watcher/mounted pair is the piece a
+    well-meaning "de-duplication" eats, killing either deep links or
+    navigation."""
+    html = _read("index.html")
+    assert 'href="#/purchases"' in html
+    assert "currentView === 'purchases'" in html
+    watcher = _method_body("currentView(view) {")
+    assert "loadMyOrders()" in watcher, \
+        "the currentView watcher must load purchase history (navigation)"
+    mounted = _method_body("mounted() {")
+    assert "loadMyOrders()" in mounted, \
+        "mounted() must load purchase history (direct deep link)"
+
+
+def test_similar_items_fetch_pins_explicit_limit():
+    """openDetail's "similar items" fetch must keep its explicit limit=5:
+    the vector-search default is now rank-everything, so dropping the
+    parameter would silently fetch the whole catalogue per item click."""
+    js = _read("app.js")
+    assert re.search(
+        r'"/items/vector-search\?q="[\s\S]{0,300}?&limit=5', js), \
+        "the similar-items fetch must carry an explicit limit"
+
+
+def test_session_expired_clears_the_cart_view():
+    """BOTH 401 teardown paths must reset this.cart exactly like logout()
+    does: the next user can log in flagged (must_change_password skips
+    loadCart), so a lingering cart would display — and be mutable — under
+    the new token (a cross-user leak). The reset lives in the ONE
+    canonical handleSessionExpired(), and the event handler delegates to
+    it (api()'s throwing path) — the two paths cannot drift apart."""
+    js = _read("app.js")
+    body = _method_body("handleSessionExpired() {")
+    assert "this.cart = { lines: [], total_qty: 0, total_cents: 0 }" in body
+    assert "_cartImportedLegacy = false" in body
+    m = re.search(r'"hcrm-session-expired", \(\) => \{([\s\S]*?)\}\);', js)
+    assert m, "the hcrm-session-expired handler must exist"
+    assert "handleSessionExpired()" in m.group(1), \
+        "the event handler must delegate to the canonical teardown"
+
+
+def test_stale_search_responses_are_generation_guarded():
+    """reloadItems must bump a request generation and loadMore must drop
+    superseded responses on BOTH the resolve and the reject path: without
+    the reject-path refetch, an erroring superseded request abandons the
+    fresh reload and the grid silently stays empty (round-2 review). The
+    interleavings themselves are behaviour-tested in tests/js/
+    loadmore.test.mjs; this pins the mechanism's presence."""
+    js = _read("app.js")
+    assert "_itemsGen = (this._itemsGen || 0) + 1" in js
+    body = _method_body("async loadMore() {")
+    assert body.count("gen !== this._itemsGen) continue") == 2, \
+        "both the resolve and the reject path must refetch when superseded"

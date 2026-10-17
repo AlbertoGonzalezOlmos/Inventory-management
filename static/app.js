@@ -174,7 +174,6 @@ Vue.createApp({
       memberForm: { name: "", email: "", password: "", role: "member" },
       memberError: "",
       members: [],
-      scanFieldCode: "",       // the visible scan field (explicit operator intent)
 
       // account
       pwForm: { current_password: "", new_password: "" },
@@ -185,7 +184,7 @@ Vue.createApp({
       myRequests: [],    // "My scan requests" (GET /api/scan-requests/mine)
 
       // Task D — the tabbed "My profile" (#/account, no route churn):
-      // profile | security | badge | purchases | requests. A flagged
+      // profile | security | badge | requests. A flagged
       // account (must_change_password) is steered to "security" on arrival
       // — the redirect keeps working and lands one click from the fix.
       profileTab: "profile",
@@ -241,6 +240,7 @@ Vue.createApp({
       if (!this.user) return this.route === "#/register" ? "register" : "login";
       if (this.route.startsWith("#/admin") && this.isStaff) return "admin";
       if (this.route.startsWith("#/account")) return "account";
+      if (this.route.startsWith("#/purchases")) return "purchases";
       if (this.route.startsWith("#/table") && this.isStaff) return "table";
       // The checkout review screen (round 3, item 4): the catalogue section
       // with the aside swapped to the review panel.
@@ -390,6 +390,10 @@ Vue.createApp({
       }
       if (view === "admin") this.loadAdminData();
       if (view === "table") this.loadDataPage();
+      if (view === "purchases") {
+        this.loadMyOrders();
+        this.loadCalendar();
+      }
       if (view === "account") {
         // A flagged account's mandatory change is the point of the visit:
         // land on the Security tab, one click from the fix. Everyone else
@@ -460,6 +464,7 @@ Vue.createApp({
         return;
       }
       await this.loadCart();
+      this._announceCartRestored();
       await this.replayStagedScans();
       location.hash = "#/catalogue";
       this.route = "#/catalogue";
@@ -594,13 +599,23 @@ Vue.createApp({
       this.clearLogoff();
       this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
+      // P2: drain any in-flight cart mutation before tearing the session
+      // down, so a late write can never repopulate the login screen with
+      // the previous user's cart. The cart itself is already durable
+      // server-side — this is about the in-memory view, not persistence.
+      await this.flushCart();
       try { await api("/auth/logout", { method: "POST" }); } catch (_) { /* ignore */ }
+      const hadItems = !!(this.cart && this.cart.total_qty > 0);
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
       this.user = null;
       this.cart = { lines: [], total_qty: 0, total_cents: 0 };
       location.hash = "#/login";
       this.route = "#/login";
+      if (hadItems) {
+        this.showToast("Your list was saved — it will be here when you log back in");
+      }
+      return hadItems;
     },
 
     /* ---------- account ---------- */
@@ -689,6 +704,10 @@ Vue.createApp({
     },
 
     async reloadItems() {
+      // Bump the request generation: any response for the OLD state that
+      // is still in flight (or lands between here and loadMore's commit)
+      // is superseded and must never be committed to the grid.
+      this._itemsGen = (this._itemsGen || 0) + 1;
       this.offset = 0;
       this.items = [];
       this.hasMore = true;
@@ -699,31 +718,55 @@ Vue.createApp({
       if (this.loading || !this.hasMore) return;
       this.loading = true;
       try {
-        const params = new URLSearchParams({
-          limit: PAGE_SIZE, offset: this.offset,
-        });
-        const term = this.search.trim();
-        // The backend requires q to be at least 2 characters for semantic
-        // search; a single character falls back to keyword search.
-        if (this.semantic && term.length >= 2) {
-          // Semantic (vector) search — ranked by meaning similarity.
-          params.set("q", term);
-          if (this.category) params.set("category", this.category);
-          const page = await api("/items/vector-search?" + params.toString());
-          this.items.push(...page);
-          this.offset += page.length;
-          this.hasMore = page.length === PAGE_SIZE;
-        } else {
-          if (term) params.set("q", term);
-          if (this.category) params.set("category", this.category);
-          const page = await api("/items?" + params.toString());
-          this.items.push(...page);
-          this.offset += page.length;
-          this.hasMore = page.length === PAGE_SIZE;
+        // A response superseded mid-flight (reloadItems bumped _itemsGen:
+        // new search term, category or semantic toggle) must be dropped and
+        // re-fetched with the fresh state — committing it used to pin the
+        // grid on results for a filter the operator already changed, with
+        // hasMore = false killing the scroll sentinel (no self-healing).
+        // The REJECT path is included: a superseded request that errors
+        // must also refetch, or the fresh reload silently never runs and
+        // the grid stays empty until the next user action (the sentinel
+        // only fires on intersection *changes*, so it cannot rescue it).
+        for (;;) {
+          const gen = this._itemsGen || 0;
+          const term = this.search.trim();
+          let page;
+          try {
+            // The backend requires q to be at least 2 characters for
+            // semantic search; a single character falls back to keyword
+            // search.
+            if (this.semantic && term.length >= 2) {
+              // Semantic (vector) search — rank EVERY item in the shop by
+              // meaning similarity (no limit, no threshold, no pagination).
+              const params = new URLSearchParams({ q: term });
+              if (this.category) params.set("category", this.category);
+              page = await api("/items/vector-search?" + params.toString());
+            } else {
+              const params = new URLSearchParams({
+                limit: PAGE_SIZE, offset: this.offset,
+              });
+              if (term) params.set("q", term);
+              if (this.category) params.set("category", this.category);
+              page = await api("/items?" + params.toString());
+            }
+          } catch (e) {
+            if (gen !== this._itemsGen) continue;  // stale error: refetch fresh
+            this.showToast(e.message);
+            this.hasMore = false;
+            break;
+          }
+          if (gen !== this._itemsGen) continue;  // superseded — refetch fresh
+          if (this.semantic && term.length >= 2) {
+            this.items = page;
+            this.offset = page.length;
+            this.hasMore = false;
+          } else {
+            this.items.push(...page);
+            this.offset += page.length;
+            this.hasMore = page.length === PAGE_SIZE;
+          }
+          break;
         }
-      } catch (e) {
-        this.showToast(e.message);
-        this.hasMore = false;
       } finally {
         this.loading = false;
       }
@@ -755,13 +798,30 @@ Vue.createApp({
     async flushCart() {
       // The save-then-switch flush: every mutation is already a committed
       // server write — flushing is draining the chain, not persisting.
-      await this._cartChain;
+      // Best-effort: a rejected op must never abort the teardown that
+      // follows (logout/switch clear the session), or a shared kiosk would
+      // strand the previous user.
+      await (this._cartChain || Promise.resolve()).catch(() => {});
     },
 
     async loadCart() {
       if (!this.user || this.user.must_change_password) return; // 403-gated
       this.cart = await api("/cart");
-      await this.importLegacyPurchase();
+      this._cartImportedLegacy = await this.importLegacyPurchase();
+    },
+
+    /* The "your list is durable" reassurance: called ONLY at the session-entry
+     * points (afterLogin, switchAccount) after loadCart — never inside
+     * loadCart itself, which also runs for qty re-syncs and page-load restores
+     * where this would be noise. */
+    _announceCartRestored() {
+      // Skip when the cart was just populated by the one-time legacy import:
+      // that path already toasted "Imported N items", and a second
+      // "restored" toast would clobber it.
+      if (this.cart && this.cart.lines.length && !this._cartImportedLegacy) {
+        this.showToast(`Your purchase list was restored (${this.cart.total_qty} item(s))`);
+      }
+      this._cartImportedLegacy = false;
     },
 
     async importLegacyPurchase() {
@@ -770,9 +830,9 @@ Vue.createApp({
       // cart must never be clobbered by a stale browser copy), then the key
       // dies regardless, so this can never double-run.
       const raw = localStorage.getItem(PURCHASE_KEY);
-      if (!raw) return;
+      if (!raw) return false;
       localStorage.removeItem(PURCHASE_KEY);
-      if (this.cart.lines.length) return;
+      if (this.cart.lines.length) return false;
       try {
         const entries = JSON.parse(raw);
         const lines = (Array.isArray(entries) ? entries : [])
@@ -782,6 +842,7 @@ Vue.createApp({
           try {
             this.cart = await api("/cart", { method: "PUT", body: { lines } });
             this.showToast(`Imported ${lines.length} item(s) from your old purchase list`);
+            return true;
           } catch (e) {
             if (e.status === 404 || e.status === 422) {
               // A deleted catalogue item poisons the all-or-nothing PUT:
@@ -793,10 +854,12 @@ Vue.createApp({
                 } catch (_) { /* item gone from the catalogue */ }
               }
               this.showToast("Imported your old purchase list (some items are gone)");
+              return true;
             } // transient errors: the import is one-time by design
           }
         }
-      } catch (_) { /* malformed legacy data: the key is already removed */ }
+        return false;
+      } catch (_) { /* malformed legacy data: the key is already removed */ return false; }
     },
 
     _stockWarn(line) {
@@ -851,10 +914,6 @@ Vue.createApp({
 
     selectProfileTab(tab) {
       this.profileTab = tab;
-      if (tab === "purchases") {
-        this.loadMyOrders();
-        this.loadCalendar();   // round 3, Task C: the spend calendar's data
-      }
       if (tab === "requests") this.loadMyRequests();
       if (tab === "profile")
         this.phoneForm.phone = (this.user && this.user.phone) || "";
@@ -1103,13 +1162,12 @@ Vue.createApp({
             this.cart = r.data.cart;                    // the emptied cart, one payload
             const pid = r.data.purchase.id;
             this.lastCheckout = pid;                    // "new" chip in history
-            // Land on the purchases tab. route + hash in one synchronous
-            // turn (the hashchange `navigated` guard); the currentView
-            // watcher then fires selectProfileTab("purchases"), which loads
-            // the orders AND the calendar (today's dot appears at once).
-            this.profileTab = "purchases";
-            this.route = "#/account";
-            location.hash = "#/account";
+            // Land on the purchase-history view. route + hash in one
+            // synchronous turn (the hashchange `navigated` guard); the
+            // currentView watcher then loads the orders AND the calendar
+            // (today's dot appears at once).
+            this.route = "#/purchases";
+            location.hash = "#/purchases";
             this.expandedOrders = [pid];                 // pre-expand the receipt
             this.showToast("Purchase complete — " +
               this.formatPrice(r.data.purchase.total_cents));
@@ -1246,9 +1304,9 @@ Vue.createApp({
     },
 
     _onScanKey(e) {
-      // Sinks own their keys entirely (the login badge field and the visible
-      // scan field keep their dedicated Enter handlers — no double-fire;
-      // focus changes into them flush via the focusin listener).
+      // Sinks own their keys entirely (the login badge field keeps its
+      // dedicated Enter handler — no double-fire; focus changes into it
+      // flush via the focusin listener).
       if (e.target && e.target.closest && e.target.closest("[data-scan-sink]")) {
         return;
       }
@@ -1407,19 +1465,6 @@ Vue.createApp({
       // plain targets never had their keys prevented)
     },
 
-    scanFieldSubmit() {
-      // The visible scan field (catalogue header): explicit operator intent,
-      // no heuristics — also the deterministic path for payloads the global
-      // gate deliberately ignores (short internal codes). Routing uses the
-      // same badge shapes as the global gate (full AND raw-43 forms — both
-      // are accepted by qr-login/qr-identify), but no length/charset floor.
-      const code = (this.scanFieldCode || "").trim();
-      this.scanFieldCode = "";
-      if (!code) return;
-      const kind = HcrmScanCapture.isBadgeShape(code) ? "badge" : "barcode";
-      this.enqueueScan(code, kind);
-    },
-
     enqueueScan(code, kind) {
       // NEVER render the raw badge payload on screen: it is a bearer
       // credential, shoulder-surfable for the pill's 2 s lifetime. Mask on
@@ -1519,16 +1564,23 @@ Vue.createApp({
     },
 
     handleSessionExpired() {
-      // Raw-mode 401s land here: the session is dead — mirror the api()
-      // wrapper's throwing-path cleanup (raw callers own their errors, so
-      // the wrapper skipped it). Any open overlay belonged to the dead
-      // session: close it so it cannot strand over the login view.
+      // THE canonical 401 teardown, shared by both expiry paths: raw-mode
+      // callers call it directly (they own their errors), and api()'s
+      // throwing path dispatches hcrm-session-expired after removing the
+      // tokens itself. Any open overlay belonged to the dead session:
+      // close it so it cannot strand over the login view.
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
       this.user = null;
       this.clearLogoff();
       this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
+      // The previous user's cart must die with their session exactly as
+      // in logout(): the next user can log in flagged (must_change_password
+      // skips loadCart), so a lingering cart would both display AND be
+      // mutable under the new token — a cross-user leak.
+      this.cart = { lines: [], total_qty: 0, total_cents: 0 };
+      this._cartImportedLegacy = false;
       location.hash = "#/login";
       this.route = "#/login";
       this.showToast("Session expired — please log in again.");
@@ -1695,8 +1747,10 @@ Vue.createApp({
 
     async finishLogoff() {
       this.clearLogoff();
-      await this.logout();   // best-effort: the server deadline already killed
-      this.showToast("Logged off"); // the token if the browser was throttled
+      const announcedSave = await this.logout();   // best-effort: the server
+      if (!announcedSave) {                        // deadline already killed
+        this.showToast("Logged off");              // the token if throttled
+      }
     },
 
     async cancelLogoff() {
@@ -1739,17 +1793,27 @@ Vue.createApp({
       });                                           //    foreign token never
                                                     //    trips the 401 redirect)
       if (auth.user.must_change_password) {
+        // P2: the incoming user's cart never loaded — drop the OUTGOING
+        // user's cart from the view so it can't linger in the UI.
+        this.cart = { lines: [], total_qty: 0, total_cents: 0 };
         location.hash = "#/account";
         this.route = "#/account";
         this.showToast(`Switched to ${auth.user.name} — change the password to continue`);
         return;
       }
       await this.loadCart();                        // 6. the incoming user's list
+      this._announceCartRestored();
       this.reloadItems();
       this.loadCategories();
       location.hash = "#/catalogue";
       this.route = "#/catalogue";
-      this.showToast(`Switched to ${auth.user.name} — ${oldName}'s list was saved`);
+      // The save-then-switch message: the outgoing list is durable and will
+      // be back when that user returns — surfaced on the greeting banner
+      // (not a 3 s toast) so the save is legible. Deliberately PERSISTENT
+      // (click-dismissible via dismissGreeting): no auto-dismiss timer —
+      // the reassurance must survive until the next user starts scanning.
+      this.greeting = `Switched to ${auth.user.name} — ${oldName}'s list was saved and will be back when ${oldName} signs in`;
+      clearTimeout(this._greetingTimer);
       await this.replayStagedScans();
     },
 
@@ -2404,14 +2468,12 @@ Vue.createApp({
       if (navigated) this._closeOverlays();
     });
 
-    // The api() wrapper broadcasts this when a request comes back 401:
-    // drop the in-memory session and show the login screen.
+    // The api() wrapper broadcasts this when a request comes back 401
+    // (it has already removed the tokens): run the canonical teardown —
+    // the SAME handleSessionExpired() the raw-mode 401 callers use, so
+    // the two expiry paths can never drift apart again.
     window.addEventListener("hcrm-session-expired", () => {
-      this.user = null;
-      this.clearLogoff();   // a pending countdown's timer must die here
-      this.dismissGreeting();  // the banner names a user whose session is dead
-      this._closeOverlays();  // ...and the dead session's modals with it
-      this.route = "#/login";
+      this.handleSessionExpired();
     });
 
     // The global HID scan capture: one document-level listener, always on
@@ -2433,6 +2495,7 @@ Vue.createApp({
       if (this.currentView === "admin") this.loadAdminData();
       if (this.currentView === "table") this.loadDataPage();
       if (this.currentView === "account") this.loadMyRequests();
+      if (this.currentView === "purchases") { this.loadMyOrders(); this.loadCalendar(); }
     }
 
     // Infinite scroll: load more items when the sentinel becomes visible.

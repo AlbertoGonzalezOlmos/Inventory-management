@@ -328,7 +328,9 @@ that adds SIMD-accelerated vector search:
   (LIKE wildcards `%`/`_` in `q` are escaped and matched literally)
 - `GET /api/items/vector-search?q=&category=&limit=&offset=` — **semantic
   search** (embeds the query, exact cosine scan via sqlite-vector, optional
-  category filter, returns `similarity` per item)
+  category filter, returns `similarity` per item). `limit` is optional: omit
+  it to rank **every** item in the shop by similarity (no threshold/cutoff);
+  pass it (e.g. `limit=5`) for a top-N slice.
 - `GET /api/items/categories` — distinct categories
 - `POST /api/items` / `PATCH /api/items/{id}` / `DELETE /api/items/{id}` —
   staff only; create/update automatically (re-)embed the description. If the
