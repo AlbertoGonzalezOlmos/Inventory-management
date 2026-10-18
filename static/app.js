@@ -1661,6 +1661,17 @@ Vue.createApp({
           break;
         case "setPill":
           this.scannerFeed = effect.mode;   // renders data-scanner-feed
+          if (effect.mode === "unpaired") {
+            // The popover mounts ONLY in the paired state. A server-side
+            // unpair (the poll's 401: the terminal was deleted) flips the
+            // pill while the popover is open — and an INVISIBLE
+            // pairOpen=true still counts as an open dialog in
+            // _modalOpen(), so every barcode scan would drop to "finish
+            // the current dialog first" with nothing on screen. Close it
+            // here, the ONE funnel every unpair passes through
+            // (unpairTerminal sets it too — a harmless duplicate).
+            this.pairOpen = false;
+          }
           break;
       }
     },

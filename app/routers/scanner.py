@@ -404,7 +404,7 @@ def pair_terminal_auto(request: Request,
 
     path = _pairing_file()
     try:
-        raw_file = path.read_text(encoding="utf-8")
+        raw_file = path.read_bytes()
     except FileNotFoundError:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -429,7 +429,14 @@ def pair_terminal_auto(request: Request,
         )
 
     try:
-        offer = json.loads(raw_file)
+        # Read BYTES and decode here, not in read_text(): a non-UTF-8 offer
+        # file raises UnicodeDecodeError, which is a ValueError — NOT an
+        # OSError — so decoding inside the read's try/except OSError would
+        # let it escape as an unhandled 500. A file that is not even text is
+        # the most malformed offer there is, and belongs in the 422 below
+        # (the settled failure surface), with the same "regenerate with
+        # --register" instruction.
+        offer = json.loads(raw_file.decode("utf-8"))
     except ValueError:
         offer = None
     if (not isinstance(offer, dict)
@@ -440,7 +447,7 @@ def pair_terminal_auto(request: Request,
         logger.warning("pairing file %s is malformed — regenerate it with "
                        "scanner_daemon.py --register", path)
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"status": "bad_pairing_file",
                     "message": "The pairing file is malformed — regenerate "
                                "it with scanner_daemon.py --register"},

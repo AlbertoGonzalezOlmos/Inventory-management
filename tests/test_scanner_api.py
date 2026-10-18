@@ -329,6 +329,27 @@ def test_auto_pair_malformed_file_is_422(client, loopback, tmp_path,
     assert path.exists()   # consumed on SUCCESS only
 
 
+def test_auto_pair_non_utf8_file_is_422_not_an_unhandled_500(
+        client, loopback, tmp_path, monkeypatch):
+    """A file that is not even text is the most malformed offer there is.
+
+    ``UnicodeDecodeError`` is a ``ValueError``, NOT an ``OSError`` — so
+    decoding inside the read's ``except OSError`` would let it escape as an
+    unhandled 500 with no ``detail.status`` envelope and no operator
+    instruction (the SPA would toast "Pairing failed (500)"). The endpoint
+    reads bytes and decodes inside the JSON ``except ValueError`` instead.
+    """
+    path = offer_file(tmp_path)
+    path.write_bytes(b'{"terminal_id": "counter-1", '
+                     b'"pairing_code": "ABCD2345"}\xff\xfe')
+    _point_at(monkeypatch, path)
+    r = auto_pair(client)
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["status"] == "bad_pairing_file"
+    assert "--register" in r.json()["detail"]["message"]
+    assert path.exists()   # consumed on SUCCESS only
+
+
 def test_auto_pair_wrong_code_is_byte_identical_to_pair(client, loopback,
                                                          tmp_path, monkeypatch):
     _, code = register(client)

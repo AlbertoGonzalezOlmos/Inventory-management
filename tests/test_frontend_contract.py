@@ -340,6 +340,18 @@ def test_pair_popover_cannot_strand_under_a_modal():
             f"{header} must close the pairing popover before raising its "
             "own overlay or navigating — the popover cannot survive under "
             "a modal (it paints below every .modal-backdrop)")
+    # Since the one-click change the popover mounts ONLY in the paired
+    # state: a server-side unpair (the poll's 401 — the terminal was
+    # deleted) flips the pill to unpaired with the popover open, and an
+    # INVISIBLE pairOpen=true still counts in _modalOpen() — every scan
+    # would drop to "finish the current dialog" with nothing on screen.
+    # The setPill effect is the one funnel every unpair passes through.
+    feed = _method_body("_applyFeedEffect(effect) {")
+    assert re.search(
+        r'effect\.mode === "unpaired"[\s\S]*?this\.pairOpen = false;',
+        feed), ("the setPill effect must close pairOpen when the pill goes "
+                "unpaired — otherwise the invisibly-open popover strands "
+                "the scan discipline")
 
 
 def test_unpair_is_operator_gated_and_the_pill_discloses():
