@@ -212,45 +212,93 @@ def test_feed_sink_is_the_existing_scan_bus():
 
 def test_scanner_feed_pill_and_pairing_markup_present():
     """The pill (data-scanner-feed) renders on every view (the topbar), so
-    the operator can always see which scan path is live. It is a BUTTON
-    now: the pairing affordance (terminal id + 8-char code form, and the
-    Unpair recovery) opens from it in a popover — the login screen's
-    pairing panel is gone (owner decision, login-screen cleanup)."""
+    the operator can always see which scan path is live. It is a BUTTON,
+    and since the one-click change the MANUAL pairing form must be gone
+    EVERYWHERE — the unpaired pill pairs from the daemon's offer file in
+    one click, so any reintroduced terminal-id/code form would fork the
+    flow (the whole-file tightening of the old login-section-only pin:
+    the form's last home was the pill popover, not the login screen)."""
     html = _read("index.html")
+    app = _read("app.js")
     assert 'data-scanner-feed' in html, (
         "the data-scanner-feed pill binding is missing from index.html")
     assert re.search(r'<button[^>]*class="feed-pill"', html), (
-        "the pill must be a button — it opens the pairing popover")
-    assert "pairTerminal" in html, (
-        "the pairing form is missing its submit handler")
+        "the pill must be a button — it pairs / manages the pairing")
     assert "unpairTerminal" in html, (
         "the unpair affordance is missing (recovery for a stale binding)")
-    # the LOGIN section itself must no longer carry the pairing form nor
-    # the removed badge field — they moved to the pill / were deleted
+    # the manual pairing form must not come back ANYWHERE (whole file, not
+    # just the login section — replaces the login-section absence entries
+    # for these three strings)
+    for absent in ("Terminal id", "Pairing code", "pair-form",
+                   "Pair this terminal"):
+        assert absent not in html, (
+            f"{absent!r} must not be anywhere in index.html — the manual "
+            "pairing form is gone; the pill pairs in one click")
+    assert not re.search(r"pairForm|pairError", app), (
+        "the manual pairing form's state must not come back (pairForm/"
+        "pairError) — the one-click flow has no form state")
+    # (?<!un): unpairTerminal is the intended survivor
+    assert not re.search(r"(?<!un)pairTerminal", app), (
+        "the manual pairing submit must be gone — autoPair is the path")
+    # the LOGIN section keeps its own absence pin for the removed badge
+    # field (the login-screen cleanup, PR #35)
     login = _html_section("login")
-    for absent in ("Terminal id", "Pair this terminal", "Pairing code",
-                   "Scan your QR badge here", "Use a badge code instead"):
+    for absent in ("Scan your QR badge here", "Use a badge code instead"):
         assert absent not in login, (
-            f"{absent!r} must not be on the login screen (moved to the "
-            "pill popover / removed)")
+            f"{absent!r} must not be on the login screen (removed, "
+            "login-screen cleanup)")
+
+
+def test_pill_is_one_click_pair_when_unpaired():
+    """The unpaired pill is a one-click PAIR BUTTON: @click routes through
+    onPillClick (a method, so these _method_body pins have a body to
+    read), which branches to autoPair() when unpaired. autoPair must call
+    the auto endpoint with raw: true (a 401 stale offer must never run
+    api()'s global session-expiry teardown) and carry the pairBusy
+    double-click guard — as a JS guard, NOT :disabled (disabling the
+    focused pill drops focus to <body> and greys a status indicator)."""
+    html = _read("index.html")
+    pill = re.search(r'<button[^>]*class="feed-pill"[^>]*>', html)
+    assert pill, "the feed pill button is missing"
+    assert '@click="onPillClick"' in pill.group(0), (
+        "the pill must route its click through onPillClick")
+    assert ":disabled" not in pill.group(0), (
+        "the pill must not carry :disabled — the busy guard is JS-side "
+        "(pairBusy), not a UA-disabled status pill")
+    app = _read("app.js")
+    click_body = _method_body("onPillClick() {")
+    assert 'this.scannerFeed === "unpaired"' in click_body \
+        and "autoPair()" in click_body, (
+            "onPillClick must branch to autoPair() when unpaired")
+    auto = _method_body("async autoPair() {")
+    assert '"/scanner/pair/auto"' in auto, (
+        "autoPair must call the one-click endpoint")
+    assert re.search(r'method: "POST", body: \{\}, raw: true,', auto), (
+        "autoPair must call the endpoint with raw: true (the exact call-"
+        "site form — a bare `raw: true` assert is satisfied by the comment "
+        "above the call, mutation-proven) — a 401 stale offer is not a "
+        "session expiry and must never log the kiosk out")
+    assert re.search(r"if \(this\.pairBusy\) return;", auto), (
+        "autoPair must carry the pairBusy double-click guard")
 
 
 def test_pair_popover_is_wired_to_the_pill():
-    """The popover wiring (login-screen cleanup): the pill's click toggle,
-    the backdrop's outside-click dismissal, the v-if mount, the pairOpen
-    state + autofocus watcher, and the _closeOverlays anti-stranding
-    reset. A bare `pairOpen in html` is satisfied by an HTML comment —
-    every pin here binds to real markup or code."""
+    """The PAIRED-state popover wiring: the pill's click toggle (via
+    onPillClick), the backdrop's outside-click dismissal, the
+    paired-only v-if mount (the unpaired pill is an action button, not a
+    disclosure), the pairOpen state + focus-management watcher, and the
+    _closeOverlays anti-stranding reset. A bare `pairOpen in html` is
+    satisfied by an HTML comment — every pin binds to real markup or
+    code."""
     html = _read("index.html")
-    # the pill BUTTON carries the toggle: class + @click on one tag, so a
-    # comment or a handler detached from the pill cannot satisfy it
     assert re.search(
-        r'<button[^>]*class="feed-pill"[^>]*@click="pairOpen = !pairOpen"',
-        html), "the pill must toggle the popover via @click"
+        r'<button[^>]*class="feed-pill"[^>]*@click="onPillClick"',
+        html), "the pill must route its click through onPillClick"
     assert '<div class="popover-backdrop" @click="pairOpen = false">' \
         in html, "the popover's outside-click backdrop is missing"
-    assert '<template v-if="pairOpen">' in html, (
-        "the popover's v-if mount is missing")
+    assert '<template v-if="pairOpen && scannerFeed !== \'unpaired\'">' \
+        in html, ("the popover must mount ONLY in the paired state — the "
+                  "unpaired pill pairs in one click and opens nothing")
     app = _read("app.js")
     assert re.search(r"^\s+pairOpen: false,", app, re.M), (
         "the pairOpen data flag is missing")
@@ -259,10 +307,10 @@ def test_pair_popover_is_wired_to_the_pill():
     # popover opens with focus nowhere and closes by dropping a keyboard
     # user on <body> (the detached popover was the focused element).
     watcher = _method_body("pairOpen(on) {")
-    assert ".pair-popover input" in watcher, (
-        "the pairOpen watcher must autofocus the form's first field — the "
-        "autofocus attribute only fires on initial page load, not on a "
-        "v-if mount")
+    assert ".pair-popover button" in watcher, (
+        "the pairOpen watcher must focus the popover's Unpair button — its "
+        "only focusable; the autofocus attribute only fires on initial "
+        "page load, not on a v-if mount")
     assert ".feed-pill" in watcher, (
         "the pairOpen watcher must return focus to the pill when the "
         "popover closes")
@@ -296,41 +344,41 @@ def test_pair_popover_cannot_strand_under_a_modal():
 
 def test_unpair_is_operator_gated_and_the_pill_discloses():
     """Unpair deletes the terminal token client-side and re-pairing needs a
-    FRESH single-use code printed by `scanner_daemon.py --register` on the
+    FRESH single-use offer written by `scanner_daemon.py --register` on the
     kiosk host — an operator-only recovery. The pill is on every view (the
     login-screen panel was logged-out-only), so a logged-in member must not
     get the button; `!user` preserves the logged-out first-install path.
-    The disclosure semantics are pinned with it: they are the only thing
-    telling an AT user that the pill opens something."""
+    The disclosure semantics are pinned with it — STATE-CONDITIONAL since
+    the one-click change: an unpaired pill is an action button and must
+    not announce a popup it does not have (the attrs bind to null)."""
     html = _read("index.html")
     assert re.search(
         r'<button[^>]*v-if="!user \|\| isStaff"[^>]*@click="unpairTerminal"',
         html), ("Unpair must be gated to logged-out or staff — otherwise any "
                 "logged-in member can disable the kiosk's scanner feed with "
                 "two clicks, recoverable only with shell access to the host")
-    assert ':aria-expanded="pairOpen' in html, (
-        "the pill must expose aria-expanded for the popover it toggles")
-    assert 'aria-haspopup="dialog"' in html, (
-        "the pill must announce that it opens a dialog")
+    assert re.search(r":aria-expanded=\"scannerFeed === 'unpaired' \? null", html), (
+        "aria-expanded must be state-conditional — absent (null) when the "
+        "pill is a one-click action button, present when it discloses")
+    assert re.search(r":aria-haspopup=\"scannerFeed === 'unpaired' \? null", html), (
+        "aria-haspopup must be state-conditional for the same reason")
     assert 'role="dialog" aria-label="Scanner pairing"' in html, (
         "the popover must be a labelled dialog")
 
 
-def test_unpair_recovery_loop_lands_on_the_form():
-    """Unpair deliberately keeps the popover open and it flips to the
-    pairing form (the recovery loop: Unpair → daemon --register → enter the
-    new code). But `pairOpen` does NOT change on that flip, so the pairOpen
-    watcher never re-fires — unpairTerminal has to land the focus itself or
-    the operator that comment describes is left hunting for the field with
-    the mouse. A stale pairError from a previous failed attempt must not
-    survive into the fresh form either."""
+def test_unpair_closes_the_popover_and_states_the_recovery():
+    """Replaces the old focus-into-the-re-pair-form pin (the form is gone —
+    the pill itself is the re-pair affordance now). Unpair must close the
+    popover (the pill flips to the one-click state; an open paired-state
+    popover over it would strand) and toast the recovery loop, so the
+    operator knows the next action is --register, not a form."""
     body = _method_body("unpairTerminal() {")
-    assert ".pair-popover input" in body, (
-        "unpairTerminal must focus the re-pair form's first field — the "
-        "pairOpen watcher cannot, the flag never changes on an unpair")
-    assert 'this.pairError = "";' in body, (
-        "unpairTerminal must clear a stale pairing error before showing "
-        "the fresh form")
+    assert "this.pairOpen = false;" in body, (
+        "unpairTerminal must close the popover — the pill becomes the "
+        "one-click re-pair button and an open paired popover over it strands")
+    assert "--register" in body, (
+        "the unpair toast must name the recovery (re-run --register, then "
+        "click the pill)")
 
 
 def test_terminal_token_key_is_the_persisted_binding():
