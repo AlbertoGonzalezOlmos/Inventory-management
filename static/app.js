@@ -146,10 +146,11 @@ Vue.createApp({
       // wedge capture above stays installed in EVERY mode — it is the
       // fallback whenever no daemon holds the grab.
       scannerFeed: "unpaired",
-      pairForm: { terminal_id: "", code: "" },   // the pill's pairing popover
-      pairOpen: false,      // the header pill button's popover
-      pairError: "",
-      pairBusy: false,
+      pairOpen: false,      // the header pill's PAIRED-state popover
+      pairBusy: false,      // the one-click pair in flight (a JS guard,
+                            // deliberately NOT :disabled — disabling the
+                            // focused pill would drop focus to <body> and
+                            // grey a status indicator)
 
       // data explorer
       allColumns: DATA_COLUMNS,
@@ -378,9 +379,10 @@ Vue.createApp({
     // yields the badge card alone (the repo's first @media print block).
     badgePrint(on) { this._printBadge(!!on); },
     memberBadge(on) { this._printBadge(!!on); },
-    // Disclosure focus management: opening focuses the pairing form's
-    // first field (the autofocus attribute only fires on initial page
-    // load, not on a v-if mount); closing returns focus to the pill.
+    // Disclosure focus management: opening focuses the popover's Unpair
+    // button (the paired popover's only focusable — the autofocus
+    // attribute only fires on initial page load, not on a v-if mount);
+    // closing returns focus to the pill.
     pairOpen(on) {
       if (!on) {
         // Disclosure return: the pill re-takes focus when its popover
@@ -392,7 +394,7 @@ Vue.createApp({
         return;
       }
       this.$nextTick(() => {
-        const el = document.querySelector(".pair-popover input");
+        const el = document.querySelector(".pair-popover button");
         if (el) el.focus();
       });
     },
@@ -575,7 +577,6 @@ Vue.createApp({
       // badgeSvg/badgePayload are the account view's rotated-badge display —
       // a credential, and the first thing to die with its session.
       this.pairOpen = false;
-      this.pairError = "";
       this.detailItem = null;
       this.scanIntake = null;
       this.memberBadge = null;
@@ -614,10 +615,6 @@ Vue.createApp({
       this.clearLogoff();
       this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
-      // A half-typed pairing form must not survive the session boundary
-      // (the terminal token itself is per-terminal and deliberately
-      // persists across users — only the form state dies here).
-      this.pairForm = { terminal_id: "", code: "" };
       // P2: drain any in-flight cart mutation before tearing the session
       // down, so a late write can never repopulate the login screen with
       // the previous user's cart. The cart itself is already durable
@@ -1601,9 +1598,6 @@ Vue.createApp({
       this.clearLogoff();
       this.dismissGreeting();   // the banner dies with its session
       this._closeOverlays();
-      // Same session-boundary rule as logout(): a half-typed pairing
-      // form must not survive into the next kiosk user's session.
-      this.pairForm = { terminal_id: "", code: "" };
       // The previous user's cart must die with their session exactly as
       // in logout(): the next user can log in flagged (must_change_password
       // skips loadCart), so a lingering cart would both display AND be
@@ -1699,46 +1693,51 @@ Vue.createApp({
       }
     },
 
-    async pairTerminal() {
-      // The pill-popover pairing form: the operator types the terminal id
-      // and the 8-char single-use code the daemon printed (round 4, T5).
-      // raw: true — a 401 here is a WRONG CODE, not a user-session expiry,
-      // and must not run api()'s global logout cleanup.
-      this.pairError = "";
-      const terminal_id = (this.pairForm.terminal_id || "").trim();
-      // The server mints UPPERCASE Crockford codes and hash-compares
-      // exactly; an operator typing lowercase at the kiosk must not get a
-      // misleading "wrong code" — normalise (safe: codes never contain
-      // lowercase).
-      const code = (this.pairForm.code || "").trim().toUpperCase();
-      if (!terminal_id || !/^[A-Z0-9]{8}$/.test(code)) {
-        this.pairError = "Enter the terminal id and the 8-character code the daemon printed";
-        return;
-      }
+    onPillClick() {
+      // The pill is a one-click PAIR BUTTON when unpaired (the server
+      // reads the offer file the daemon wrote — no code to type), and a
+      // disclosure toggle for the paired-state popover otherwise.
+      if (this.scannerFeed === "unpaired") return this.autoPair();
+      this.pairOpen = !this.pairOpen;
+    },
+
+    async autoPair() {
+      // One-click pairing: POST /api/scanner/pair/auto. raw: true is
+      // LOAD-BEARING — a 401 here is a stale offer file, not a
+      // user-session expiry, and must never run api()'s global logout
+      // cleanup (the manual-pairing path's comment, carried over).
+      // body: {} keeps the JSON content-type the endpoint's CSRF gate
+      // requires.
+      if (this.pairBusy) return;   // the badgeLogin double-fire precedent
       this.pairBusy = true;
       try {
-        const { status, data } = await api("/scanner/pair", {
-          method: "POST", body: { terminal_id, code }, raw: true,
+        const { status, data } = await api("/scanner/pair/auto", {
+          method: "POST", body: {}, raw: true,
         });
         if (status === 200 && data && data.token) {
           localStorage.setItem(TERMINAL_TOKEN_KEY, data.token);
-          this.pairForm = { terminal_id: "", code: "" };
-          // The pill flipping to live/off IS the success feedback; close
-          // the popover and say it once as a toast.
+          // The pill flipping to live/off IS the success feedback; say it
+          // once as a toast.
           this.pairOpen = false;
           this.showToast("Scanner paired — scans from this terminal now " +
                          "arrive here, even with this window unfocused");
           this._feedDispatch({ type: "paired", token: data.token });
-        } else if (status === 401) {
-          this.pairError = "Unknown terminal or wrong pairing code";
-        } else if (status === 409) {
-          this.pairError = "This terminal is already paired — a staff member " +
-            "must delete it, then re-register the daemon";
         } else {
-          this.pairError = "Pairing failed (" + status + ")";
+          // The server's messages ARE the operator instructions; fall
+          // back per status when the body carried none.
+          const detail = data && data.detail;
+          const fallbacks = {
+            403: "One-click pairing is loopback-only — use a browser on " +
+                 "the server host, or set HCRM_SCANNER_PAIR_ANY=1",
+            404: "No pairing file on the server — run " +
+                 "scanner_daemon.py --register on the kiosk host, then " +
+                 "click the pill again",
+          };
+          this.showToast((detail && detail.message) ||
+                         fallbacks[status] || ("Pairing failed (" + status + ")"));
         }
       } catch (e) {
-        this.pairError = e.message;
+        this.showToast(e.message);
       } finally {
         this.pairBusy = false;
       }
@@ -1747,14 +1746,12 @@ Vue.createApp({
     unpairTerminal() {
       localStorage.removeItem(TERMINAL_TOKEN_KEY);
       this._feedDispatch({ type: "unpair" });
-      this.pairError = "";
-      // Keep the popover open: it flips to the pairing form (the recovery
-      // loop — Unpair, daemon --register, enter the new code — is one
-      // flow), so land the operator on the first field.
-      this.$nextTick(() => {
-        const el = document.querySelector(".pair-popover input");
-        if (el) el.focus();
-      });
+      // Close the popover: the pill itself is now the re-pair affordance
+      // (one click once the daemon has re-registered) — the recovery
+      // loop is Unpair → DELETE + --register → click the pill.
+      this.pairOpen = false;
+      this.showToast("Unpaired — re-run scanner_daemon.py --register, " +
+                     "then click the pill to pair again");
     },
 
     /* ---------- kiosk logoff countdown (Task 4's server deadline) ---------- */
