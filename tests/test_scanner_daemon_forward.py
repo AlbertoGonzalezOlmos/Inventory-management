@@ -27,7 +27,9 @@ from scripts.scanner_daemon import (
     Forwarder,
     PostError,
     Spool,
+    default_pairing_file,
     main,
+    save_pairing_file,
 )
 from tests.test_scanner_daemon import _make_event_node, _input_class
 from tests.test_scanner_daemon_grab import FakeGrab
@@ -101,19 +103,32 @@ def write_config(tmp_path, terminal_id="counter-1", secret=None):
 
 # --- register + config ---------------------------------------------------------
 
-def test_register_prints_pairing_code_and_writes_0600_config(
-        tmp_path, scanner_sysfs, capsys):
+def test_register_writes_the_one_click_pairing_file(tmp_path, scanner_sysfs,
+                                                    capsys):
+    """Register writes the 0600 offer file and does NOT print the code.
+
+    The code is the file's business now (the kiosk browser pairs by
+    clicking the pill); printing it by default would put a single-use
+    credential in the journal/scrollback — the unit file's own NOTE calls
+    that the thing to avoid. --print-code opts in (next test).
+    """
     cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
     post = PostScript([{"pairing_code": PAIRING_CODE}])
     code = run(["--config", str(cfg), "--register",
-                "--terminal-id", "counter-1"],
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
                post, reader_yielding(), scanner_sysfs)
     assert code == 0
     out = capsys.readouterr().out
-    assert PAIRING_CODE in out
-    # The instruction must point at the header-pill flow (the login-screen
-    # pairing panel is gone — login-screen cleanup, PR #35).
+    assert PAIRING_CODE not in out            # off by default
+    assert str(offer) in out                  # the operator is pointed at it
+    # The PR-#35 pin intent survives: the instruction names the pill.
     assert "'no scanner' pill" in out
+
+    assert stat.S_IMODE(offer.stat().st_mode) == 0o600
+    saved_offer = json.loads(offer.read_text())
+    assert saved_offer == {"terminal_id": "counter-1",
+                           "pairing_code": PAIRING_CODE}
 
     assert cfg.exists()
     assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
@@ -122,16 +137,124 @@ def test_register_prints_pairing_code_and_writes_0600_config(
     assert len(saved["secret"]) >= 32  # the API's register schema floor
 
 
+def test_register_print_code_opt_in(tmp_path, scanner_sysfs, capsys):
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    post = PostScript([{"pairing_code": PAIRING_CODE}])
+    code = run(["--config", str(cfg), "--register",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer),
+                "--print-code"],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 0
+    assert PAIRING_CODE in capsys.readouterr().out
+
+
+def test_register_pairing_file_path_precedence(tmp_path, scanner_sysfs,
+                                                monkeypatch, capsys):
+    """--pairing-file > $HCRM_SCANNER_PAIRING_FILE > the data-dir default."""
+    cfg = tmp_path / "scanner.json"
+    via_env = tmp_path / "via-env.json"
+    via_flag = tmp_path / "via-flag.json"
+    post = PostScript([{"pairing_code": PAIRING_CODE}])
+
+    monkeypatch.setenv("HCRM_SCANNER_PAIRING_FILE", str(via_env))
+    code = run(["--config", str(cfg), "--register",
+                "--terminal-id", "counter-1", "--pairing-file", str(via_flag)],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert str(via_flag) in out and str(via_env) not in out
+    assert via_flag.exists() and not via_env.exists()
+
+    # env when no flag (second register round: DELETE happened server-side)
+    cfg2 = tmp_path / "scanner2.json"
+    post = PostScript([{"pairing_code": PAIRING_CODE}])
+    monkeypatch.setenv("HCRM_SCANNER_PAIRING_FILE", str(via_env))
+    code = run(["--config", str(cfg2), "--register",
+                "--terminal-id", "counter-2"],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 0
+    assert json.loads(via_env.read_text())["terminal_id"] == "counter-2"
+
+
+def test_default_pairing_file_matches_the_server_side(monkeypatch):
+    """Daemon and server resolve the SAME default path (env and plain).
+
+    The one-click flow dies silently if they drift: the daemon writes where
+    the server never looks, and the first click 404s. The app/scanshapes.py
+    ↔ scancapture.js cross-language parity-pin precedent.
+    """
+    from app.routers.scanner import _pairing_file
+
+    assert str(default_pairing_file()) == str(_pairing_file())
+    monkeypatch.setenv("HCRM_DATA_DIR", "/somewhere/else")
+    assert str(default_pairing_file()) == str(_pairing_file())
+    monkeypatch.setenv("HCRM_SCANNER_PAIRING_FILE", "/x/y.json")
+    assert str(default_pairing_file()) == str(_pairing_file())
+
+
+def test_failed_register_writes_no_pairing_file(tmp_path, scanner_sysfs):
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    post = PostScript([PostError("409: already registered")])
+    code = run(["--config", str(cfg), "--register",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs)
+    assert code != 0
+    assert not offer.exists()   # a failed register leaves no offer behind
+
+
+def test_re_register_overwrites_a_stale_pairing_file(tmp_path, scanner_sysfs):
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    offer.write_text("{garbage from an aborted round}")
+    post = PostScript([{"pairing_code": PAIRING_CODE}])
+    code = run(["--config", str(cfg), "--register",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 0
+    assert json.loads(offer.read_text())["pairing_code"] == PAIRING_CODE
+
+
+def test_unwritable_pairing_file_is_fatal(tmp_path, scanner_sysfs, capsys):
+    """A failed offer-file write exits non-zero with the recovery text.
+
+    With the code not printed, the file is its only copy — losing it
+    silently would strand the registration (nothing here exits silently).
+    Unwritable is simulated with a FILE where the parent directory should
+    be (mkdir raises NotADirectoryError) — chmod tricks are unreliable
+    under a root CI runner.
+    """
+    cfg = tmp_path / "scanner.json"
+    blocker = tmp_path / "blocker"
+    blocker.write_text("in the way")
+    offer = blocker / "scanner-pairing.json"
+    post = PostScript([{"pairing_code": PAIRING_CODE}])
+    code = run(["--config", str(cfg), "--register",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "could not write the pairing file" in err
+    assert "DELETE /api/scanner/terminals/counter-1" in err
+
+
 def test_existing_config_is_reused_no_register(tmp_path, scanner_sysfs):
     secret = "T" * 43
     cfg = write_config(tmp_path, secret=secret)
+    # An unconsumed offer from an earlier register must survive a normal
+    # start — the pill stays clickable; only --register rewrites the file.
+    offer = tmp_path / "scanner-pairing.json"
+    offer.write_text(json.dumps({"terminal_id": "counter-1",
+                                 "pairing_code": PAIRING_CODE}))
     post = PostScript([{}])  # one ingest; a register call needs a script entry
-    code = run(["--config", str(cfg)], post,
+    code = run(["--config", str(cfg), "--pairing-file", str(offer)], post,
                reader_yielding("8412345678905"), scanner_sysfs)
     assert code == 0
     # No register POST, and the ingest carried the CONFIG's secret.
     assert not any(c["url"].endswith("/terminals") for c in post.calls)
     assert post.calls[0]["headers"]["X-Scanner-Secret"] == secret
+    assert json.loads(offer.read_text())["pairing_code"] == PAIRING_CODE
 
 
 def test_register_conflict_exits_loud(tmp_path, scanner_sysfs, capsys):

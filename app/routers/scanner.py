@@ -74,7 +74,7 @@ from app.schemas import (
     TerminalScanOut,
 )
 from app.scanshapes import classify_scan
-from app.security import token_hash
+from app.security import _badge_data_dir, token_hash
 
 logger = logging.getLogger("hcrm")
 
@@ -136,13 +136,17 @@ def _pairing_file() -> Path:
     """The pairing offer file's path (env override, data-dir default).
 
     Read at CALL time (the SCANNER_EVENT_TTL_SECONDS precedent) so tests can
-    monkeypatch the env per-test. Mirror of scripts/scanner_daemon.py's
-    default_pairing_file() — the two must resolve the same path.
+    monkeypatch the env per-test. The data dir comes from
+    app.security._badge_data_dir (computed WITHOUT importing app.database —
+    the badge-key precedent) and the default mirrors
+    scripts/scanner_daemon.py's default_pairing_file() — the two must
+    resolve the same path (pinned by the daemon-side parity test; a drift
+    means the daemon writes where the server never looks and the first
+    click 404s).
     """
     return Path(os.environ.get(
         _PAIRING_FILE_ENV,
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                     "data", _PAIRING_FILE_NAME)))
+        os.path.join(_badge_data_dir(), _PAIRING_FILE_NAME)))
 
 
 def _mint_pairing_code() -> str:
