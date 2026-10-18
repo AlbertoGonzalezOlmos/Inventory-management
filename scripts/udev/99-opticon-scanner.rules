@@ -22,6 +22,17 @@
 #                       EVIOCGRAB grab daemon needs to OPEN the node, and the
 #                       stock node is root:input 0660 — without this line the
 #                       daemon needs root or `usermod -aG input`)
+#  * ModemManager ignore (both forms) — MM is `active` on stock Ubuntu and
+#                       probes every new /dev/ttyACM* (the M-10's USB-COM
+#                       personality is CDC-ACM), sending AT commands and
+#                       holding the port open. TWO lines on purpose: udev
+#                       ENV does NOT propagate from the usb parent to its
+#                       tty child, so the tty form is the one that stops
+#                       the port probe; the usb form additionally keeps MM
+#                       from considering the device at all on some versions.
+#                       NOT VERIFIABLE until the rule is installed AND the
+#                       unit is switched to the a002 personality (today it
+#                       enumerates as 065a:a001, HID — no ttyACM exists).
 #
 # One vendor-wide file on purpose: it is installed by hand with sudo, so a
 # second file would mean a second install step and two rules that can drift.
@@ -32,3 +43,5 @@ SUBSYSTEM=="tty",    ATTRS{idVendor}=="065a", MODE="0660", GROUP="plugdev"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="065a", MODE="0660", GROUP="plugdev"
 SUBSYSTEM=="usb",    ATTRS{idVendor}=="065a", MODE="0664", GROUP="plugdev"
 SUBSYSTEM=="input",  ATTRS{idVendor}=="065a", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="tty",    ATTRS{idVendor}=="065a", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb",    ATTRS{idVendor}=="065a", ENV{ID_MM_DEVICE_IGNORE}="1"
