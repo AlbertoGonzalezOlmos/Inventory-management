@@ -16,8 +16,10 @@ nothing happens":
    registered. So ``lsusb`` and ``opticon_detect.py`` still list the bus, but
    every physical port on it is dead: re-plugging a device produces **no
    kernel event at all** — which looks exactly like a charge-only cable or a
-   dead scanner. The fix is a controller rebind/reset (no reboot required) or
-   a reboot, or moving the device to a port on a *different* controller.
+   dead scanner. The recovery ladder (unbind/bind → PCI remove + rescan →
+   caveated reset → reboot, then the runtime-PM prevention) is emitted by
+   :func:`recovery_commands`; or move the device to a port on a *different*
+   controller.
 2. **Serial-port grabbers.** ModemManager probes/claims ``/dev/ttyACM*``
    (the M-10 USB-COM personality is CDC-ACM) and brltty claims many
    USB-serial adapters. Neither stops *detection*, but both can make the port
@@ -150,12 +152,45 @@ def dead_controllers(deaths: dict, last_enum: dict, bus_bdf: dict,
 
 
 def recovery_commands(bdf: str) -> list[str]:
-    """Shell commands to revive one xHCI controller (try in order)."""
+    """Shell commands to revive one xHCI controller, in order of force.
+
+    The order is the honest one measured on the 2026-10-10 host
+    (docs/m10-unreachable-2026-10-10.md §3): unbind/bind first, then the
+    PCI remove + rescan that actually worked there, then the function
+    reset — demoted with its caveat: ``reset_method`` may be ``pm`` (no
+    FLR), and a PM reset rarely revives a controller the kernel already
+    declared dead. Reboot is the reliable last resort. The prevention
+    step follows (the death was a runtime-PM resume failure), with the
+    permanent udev rule left as a <VENDOR> placeholder + the command that
+    fills it — this host's vendor id is deliberately NOT baked into a
+    generic script.
+    """
     return [
+        "# 1. rebind the driver (gentlest)",
         f"echo {bdf} | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind && "
+        "sleep 1 && "
         f"echo {bdf} | sudo tee /sys/bus/pci/drivers/xhci_hcd/bind",
+        "# 2. PCI-level remove + rescan (rebuilds the device from scratch — "
+        "this is what worked on the 2026-10-10 host)",
+        f"echo 1 | sudo tee /sys/bus/pci/devices/{bdf}/remove && "
+        "sleep 1 && "
+        "echo 1 | sudo tee /sys/bus/pci/rescan",
+        "# 3. function reset — CAVEAT: check "
+        f"cat /sys/bus/pci/devices/{bdf}/reset_method first; 'pm' means no "
+        "FLR, and a PM reset rarely revives a controller already declared "
+        "dead",
         f"echo 1 | sudo tee /sys/bus/pci/devices/{bdf}/reset",
-        "# last resort: reboot",
+        "# 4. last resort: reboot — the only guaranteed cure",
+        "# 5. prevention, once revived (the death was a runtime-PM resume "
+        "failure — pin the controller awake or it recurs):",
+        f"echo on | sudo tee /sys/bus/pci/devices/{bdf}/power/control",
+        "# make it permanent (fill <VENDOR> from the command below — do NOT "
+        "guess; this script is host-generic):",
+        f"cat /sys/bus/pci/devices/{bdf}/vendor",
+        "echo 'ACTION==\"add|change\", SUBSYSTEM==\"pci\", "
+        "ATTR{vendor}=\"<VENDOR>\", ATTR{power/control}=\"on\"' | "
+        "sudo tee /etc/udev/rules.d/98-usb-controller-nosuspend.rules",
+        "sudo udevadm control --reload-rules",
     ]
 
 

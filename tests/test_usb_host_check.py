@@ -120,6 +120,29 @@ def test_recovery_commands_name_the_controller():
     assert any("reboot" in c for c in cmds)
 
 
+def test_recovery_commands_honest_order_and_prevention():
+    """The ladder is the one measured on the 2026-10-10 host: PCI
+    remove+rescan BEFORE the function reset (reset_method may be 'pm' —
+    no FLR — and a PM reset rarely revives a declared-dead controller),
+    reboot last, and the runtime-PM prevention the old list omitted.
+    The permanent rule must carry a <VENDOR> placeholder — baking this
+    host's vendor id into a host-generic script would misfire on every
+    other machine.
+    """
+    cmds = recovery_commands("0000:c3:00.3")
+    text = "\n".join(cmds)
+    i = {key: text.index(key) for key in
+         ("unbind", "rescan", "/reset", "reboot", "power/control")}
+    assert i["unbind"] < i["rescan"] < i["/reset"] < i["reboot"] \
+        < i["power/control"], "the recovery ladder is out of order"
+    assert "remove" in text and "<VENDOR>" in text
+    # every emitted command references the bdf or is global/prevention
+    assert not any("0x1022" in c for c in cmds), (
+        "host-specific PCI vendor id baked into a generic script")
+    # the reset carries its caveat inline (reset_method may be 'pm')
+    assert any("reset_method" in c and "pm" in c for c in cmds)
+
+
 def test_gather_dmesg_must_use_plain_dmesg(monkeypatch):
     """Regression guard (qwen, 2026-10-10): `dmesg -T` is suspend-skewed
     (~+7 days) on this host. The detector relies on kmsg line ORDER, so it
@@ -156,6 +179,8 @@ def test_analyze_reports_dead_controller_as_error_with_fix(tmp_path):
     assert len(dead) == 1 and dead[0].severity == "error"
     assert "0000:c3:00.3" in dead[0].title
     assert any("unbind" in line for line in dead[0].fix)
+    # the dead-controller finding's fix now carries the prevention step too
+    assert any("power/control" in line for line in dead[0].fix)
 
 
 def test_analyze_warns_about_modemmanager(tmp_path):
