@@ -100,6 +100,20 @@
   fallback); the manual form is gone from the UI but the endpoint stays
   for split-host deployments. The double-mint race in the shared core is
   fixed by a conditional UPDATE (two racing clicks: exactly one 200).
+- **M-10 hardware finalization (2026-10-10 investigation, landed later)**:
+  the "plugged in but unreachable" episode was a **dead xHCI host
+  controller** (`0000:c3:00.3`, runtime-PM resume failure — the USB-A
+  jacks; root hubs stayed registered so it looked like a charge-only
+  cable), revived **without a reboot** via unbind/bind + PCI
+  remove/rescan. Landed: the dated diagnosis
+  (`docs/m10-unreachable-2026-10-10.md`), `scripts/usb_host_check.py`
+  (the dead-controller detector, honest recovery ladder + runtime-PM
+  prevention), `m10_scan_test.py`/`scanner_test.py` (can-it-read tests),
+  the ModemManager udev ignore (both forms), and the two-machine re-scope
+  of `docs/opticon-hardware.md`. Prevention is still outstanding on the
+  host (`power/control` is `auto` — expect a repeat on a future suspend),
+  and `065A:A001` stays `confirmed: False` until the USB COM Port sheet
+  is scanned.
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.
@@ -194,8 +208,9 @@ Inventory-management/
 │   ├── scanner-opn2001.md   # Opticon OPN-2001 scanner: connection + protocol
 │   │                      #   (+ §3.4 WSL2 kernel/driver specifics)
 │   ├── opticon-hardware.md # CANONICAL: Opticon USB personalities, host
-│   │                      #   connection (incl. WSL2/usbipd), HID reception,
-│   │                      #   device-node permissions, provenance
+│   │                      #   connection (native-Linux + WSL2/usbipd), HID
+│   │                      #   reception, device-node permissions, provenance
+│   ├── m10-unreachable-2026-10-10.md # the dated dead-xHC diagnosis
 │   └── barcodes.md        # GTIN/GS1 number systems; same-item vs new-entry rules
 ├── tests/             # pytest suite (~160 tests, ~25 s, no network/model;
 │                      #   scanner tests run offline w/o hardware)
@@ -206,10 +221,18 @@ Inventory-management/
 │   ├── load_test.py   # concurrent login/read availability check (KNOWN FLAWS, §7)
 │   ├── opticon_detect.py # the repo's ONE map of Opticon USB personalities:
 │   │                  #   sysfs/COM/PnP discovery + WSL2 probes (stdlib-only)
+│   ├── usb_host_check.py # host-layer preflight BELOW detect: dead xHCI
+│   │                  #   controllers, MM/brltty grabbers, udev, modules
+│   │                  #   (docs/m10-unreachable-2026-10-10.md)
 │   ├── opn2001.py     # Opticon OPN-2001 connector: serial + raw-USB (pyusb)
 │   │                  #   backends, detect (docs/scanner-opn2001.md)
 │   ├── scanner_hid.py # live capture from USB-HID keyboard-mode scanners
 │   │                  #   (docs/opticon-hardware.md §3)
+│   ├── m10_scan_test.py  # can the attached scanner READ? EAN/QR targets
+│   │                  #   (QR via the vendored encoder), Z1/Z2 on COM
+│   ├── scanner_test.py   # OPN-2001 end-to-end + HID capture + M-10 pointer
+│   ├── agent_note.py  # collision-safe append (flock + O_APPEND) for a
+│   │                  #   shared agent coordination file; guarded --mirror
 │   ├── scan_intake.py # scans → catalogue verdicts (same/new/invalid, read-only)
 │   └── udev/99-opticon-scanner.rules  # device-node permissions (one-time sudo)
 ├── PLAN.md            # round-4 remediation plan (historical; findings A–H, P-1…P-4)

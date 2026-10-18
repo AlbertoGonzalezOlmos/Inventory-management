@@ -174,6 +174,13 @@ that adds SIMD-accelerated vector search:
   **`docs/opticon-hardware.md`**.
 
 ### Barcode scanner (Opticon M-10)
+- **A plugged-in scanner that produces NOTHING at all?** Run
+  `uv run python scripts/usb_host_check.py` **first** — a dead USB host
+  controller looks exactly like a charge-only cable or a dead scanner (the
+  bus still lists; re-plugging produces no kernel event), and the tool
+  names the dead controller, which physical jacks that means, and the
+  recovery ladder (`docs/m10-unreachable-2026-10-10.md` is the dated
+  evidence).
 - **OS-level grab daemon (round 4, "option 2")**: in USB-HID keyboard mode
   the M-10 "types" into whatever window has focus —
   `scripts/scanner_daemon.py` exclusively grabs its evdev node
@@ -295,9 +302,20 @@ that adds SIMD-accelerated vector search:
 │   ├── _hcrm.py          # shared script contract: self-hosting, credentials,
 │   │                     # reporting, no password restore
 │   ├── opticon_detect.py # the repo's one map of Opticon USB personalities
+│   ├── usb_host_check.py # host-layer preflight BELOW opticon_detect: dead
+│   │                     # xHCI controllers (a dead one looks exactly like
+│   │                     # a charge-only cable), ModemManager/brltty
+│   │                     # grabbers, missing udev rules, kernel modules
 │   ├── scanner_hid.py    # receive scans from a USB-HID (keyboard-mode) scanner
+│   ├── m10_scan_test.py  # can the attached scanner actually READ? EAN/QR
+│   │                     # targets (QR generated + expected via the vendored
+│   │                     # encoder), Z1/Z2 round-trip on the COM personality
+│   ├── scanner_test.py   # OPN-2001 end-to-end (protocol, clock, batch) +
+│   │                     # HID capture + the M-10 pointer
 │   ├── scanner_daemon.py # round 4: EVIOCGRAB the scanner's evdev node (it
 │   │                     # stops typing into windows) + forward to the queue
+│   ├── agent_note.py     # collision-safe append (flock + O_APPEND) for a
+│   │                     # shared agent coordination file; guarded --mirror
 │   ├── systemd/          # scanner-daemon.service (Restart=always kiosk unit)
 │   ├── udev/             # one-time sudo install: device-node permissions
 │   ├── ui_check.py       # browser gate: renders the SPA + /docs in headless
