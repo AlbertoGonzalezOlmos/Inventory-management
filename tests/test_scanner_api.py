@@ -183,6 +183,50 @@ def test_pairing_code_is_single_use_by_construction(client, loopback):
     assert poll(client, token).status_code == 200
 
 
+def test_concurrent_pair_calls_mint_exactly_one_token(client, loopback):
+    """Two browsers racing one pairing code: exactly one 200, one 409.
+
+    The mint is a conditional UPDATE (``WHERE token_hash IS NULL``) — the
+    database decides the winner. The read-then-write this replaced let both
+    racers pass a NULL check and both commit; the loser then held a DEAD
+    token whose polls 401 and the feed silently went unpaired. The barrier
+    maximises the overlap; the assertion holds under any interleaving.
+    (Bare ``TestClient(app)`` per worker — no lifespan in worker threads,
+    the ``test_concurrency.py`` precedent.)
+    """
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    _, code = register(client)
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def racer():
+        c = TestClient(app)
+        barrier.wait(timeout=60)
+        r = c.post("/api/scanner/pair",
+                   json={"terminal_id": "counter-1", "code": code})
+        outcomes.append((r.status_code, r))
+
+    threads = [threading.Thread(target=racer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+        assert not t.is_alive(), "pair racer still running after 120s"
+
+    statuses = sorted(s for s, _ in outcomes)
+    assert statuses == [200, 409], outcomes
+    winner = next(r for s, r in outcomes if s == 200).json()["token"]
+    loser = next(r for s, r in outcomes if s == 409).json()
+    assert loser["detail"]["status"] == "already_paired"
+    # The winner's token actually reads the queue; the race minted no dud.
+    assert poll(client, winner).status_code == 200
+
+
 # --- ingest + server-side classification ------------------------------------------
 
 def test_kinds_are_derived_server_side(client, loopback):

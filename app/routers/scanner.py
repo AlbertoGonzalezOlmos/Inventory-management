@@ -54,7 +54,7 @@ from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials
-from sqlalchemy import delete, or_
+from sqlalchemy import delete, or_, update
 from sqlmodel import Session, select
 
 from app.database import get_session
@@ -239,22 +239,23 @@ def register_terminal(
     return TerminalRegisterOut(pairing_code=code)
 
 
-@router.post("/pair", response_model=TerminalPairOut)
-def pair_terminal(payload: TerminalPairIn, session: Session = Depends(get_session)):
-    """Bind this browser to a terminal (the operator types the daemon's
-    printed code once).
+def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
+    """The shared verify-and-mint core of ``/pair`` and ``/pair/auto``.
 
-    The code is verified constant-time against its hash; a wrong code and
-    an unknown terminal are indistinguishable (401, no enumeration). An
-    already-paired terminal answers 409 even with the correct code — that
-    IS the single-use rule (and why the code hash stays: its usability
-    ended with the pairing, and re-pairing after a cleared localStorage is
-    the DELETE + re-register recovery, not a second use of the same code).
+    One code path so the two endpoints can never drift: constant-time
+    code check against the hash, unknown-terminal and wrong-code answered
+    by the SAME 401 (no enumeration), the 409 single-use rule, and an
+    ATOMIC mint. The mint is a conditional UPDATE
+    (``WHERE token_hash IS NULL``) rather than the obvious
+    read-then-write: two concurrent pair calls would both pass a NULL
+    check and both commit, and the loser would hold a dead token whose
+    polls 401 — the feed silently going unpaired. ``rowcount != 1`` is
+    the loser's 409, decided by the database, not by a race.
     """
     terminal = session.exec(
-        select(Terminal).where(Terminal.terminal_id == payload.terminal_id)
+        select(Terminal).where(Terminal.terminal_id == terminal_id)
     ).first()
-    code_hash = token_hash(payload.code)
+    code_hash = token_hash(code)
     if (terminal is None or terminal.pairing_code_hash is None
             or not hmac.compare_digest(code_hash, terminal.pairing_code_hash)):
         raise HTTPException(
@@ -262,7 +263,16 @@ def pair_terminal(payload: TerminalPairIn, session: Session = Depends(get_sessio
             detail={"status": "bad_pairing",
                     "message": "Unknown terminal or wrong pairing code"},
         )
-    if terminal.token_hash is not None:
+    raw = secrets.token_urlsafe(32)
+    result = session.exec(
+        update(Terminal)
+        .where(Terminal.terminal_id == terminal_id,
+               Terminal.token_hash.is_(None))  # type: ignore[union-attr]
+        .values(token_hash=token_hash(raw))
+    )
+    if result.rowcount != 1:
+        # Someone else paired this terminal between our read and the
+        # UPDATE — the single-use rule, decided atomically.
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={"status": "already_paired",
@@ -270,11 +280,26 @@ def pair_terminal(payload: TerminalPairIn, session: Session = Depends(get_sessio
                                "(staff or loopback) and re-register to "
                                "re-pair"},
         )
-    raw = secrets.token_urlsafe(32)
-    terminal.token_hash = token_hash(raw)
-    session.add(terminal)
     session.commit()
-    return TerminalPairOut(token=raw)
+    return raw
+
+
+@router.post("/pair", response_model=TerminalPairOut)
+def pair_terminal(payload: TerminalPairIn, session: Session = Depends(get_session)):
+    """Bind this browser to a terminal (the manual path: an operator who
+    read the code from ``--print-code`` types it once).
+
+    The code is verified constant-time against its hash; a wrong code and
+    an unknown terminal are indistinguishable (401, no enumeration). An
+    already-paired terminal answers 409 even with the correct code — that
+    IS the single-use rule (and why the code hash stays: its usability
+    ended with the pairing, and re-pairing after a cleared localStorage is
+    the DELETE + re-register recovery, not a second use of the same code).
+    Verification and minting live in :func:`_pair_terminal`, shared with
+    the one-click ``/pair/auto`` path.
+    """
+    return TerminalPairOut(token=_pair_terminal(
+        session, payload.terminal_id, payload.code))
 
 
 @router.post("/events", response_model=TerminalScanOut,
