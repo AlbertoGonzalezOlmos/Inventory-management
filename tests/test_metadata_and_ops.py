@@ -176,6 +176,15 @@ def test_repo_hygiene():
     assert _git("check-ignore", "-q", "data/hcrm.db").returncode == 0
     assert _git("check-ignore", "-q", "data/hcrm.db-wal").returncode == 0
 
+    # The agent coordination lock files (agent_note.py creates <file>.lock
+    # beside its .md targets) must stay untracked — and the rule must stay
+    # SCOPED: a blanket *.lock would silently untrack uv.lock/poetry.lock,
+    # which the .gitignore's own UV/notes section keeps committable.
+    assert _git("check-ignore", "-q",
+                "SCANNER-AGENT-SYNC.md.lock").returncode == 0
+    assert _git("check-ignore", "-q", "notes.md.lock").returncode == 0
+    assert _git("check-ignore", "-q", "uv.lock").returncode != 0
+
 
 def test_shipped_artifacts_never_name_a_git_branch():
     """A shipped file must point at in-tree paths, not at unmerged branches.

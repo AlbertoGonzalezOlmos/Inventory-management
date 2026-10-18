@@ -222,3 +222,10 @@ __marimo__/
 # fixture DB must not be silently untracked (PLAN-v2 W1.2, review R4).
 /data/
 /fastembed_cache/
+
+# HCRM agent scratch: the flock(2) lock files scripts/agent_note.py
+# creates beside its shared coordination files (SCANNER-AGENT-SYNC.md.lock
+# etc.) — recreated on every append, zero information. Scoped on purpose —
+# NOT *.lock: the UV section above deliberately leaves uv.lock/poetry.lock
+# committable, and a blanket rule would silently untrack them.
+*.md.lock
