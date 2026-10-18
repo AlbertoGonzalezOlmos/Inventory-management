@@ -95,6 +95,9 @@ On first run the app seeds:
 | `HCRM_BADGE_SECRET` | unset | the QR-badge derivation master secret (32+ chars). Unset ⇒ a 32-byte key is auto-generated to `data/badge.key` (0600, announced at boot). **Back the key file up with the database** (`scripts/backup_db.sh` copies it) — losing it disables badge re-viewing (logins unaffected). A set-but-too-short value refuses to boot |
 | `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` for production |
 | `FASTEMBED_CACHE_PATH` | `$TMPDIR/fastembed_cache` | where the embedding model is cached — note this is `/tmp` by default, so a tmp-cleaner wipes it and the next boot re-downloads ~80 MB |
+| `HCRM_SCANNER_REGISTER_ANY` | unset | `1` opens terminal registration (`POST /api/scanner/terminals`) to LAN clients — loopback-only by default |
+| `HCRM_SCANNER_PAIR_ANY` | unset | `1` opens one-click pairing (`POST /api/scanner/pair/auto`) to non-loopback callers — loopback-only by default, and **independent** of `HCRM_SCANNER_REGISTER_ANY` (the two flags answer different questions) |
+| `HCRM_SCANNER_PAIRING_FILE` | `<repo>/data/scanner-pairing.json` | the one-click pairing offer file the daemon writes on `--register` and the server reads + consumes on the first successful pair (0600; the daemon and the server must resolve the SAME path — set this on both sides if you override it) |
 | `HCRM_BROWSER` | auto | browser binary for `scripts/ui_check.py` (it probes each candidate and refuses to run with one that cannot log console messages) |
 
 ## Vector search with sqlite-vector
@@ -181,12 +184,20 @@ that adds SIMD-accelerated vector search:
   **Install, once per kiosk**:
   1. `sudo cp scripts/udev/99-opticon-scanner.rules /etc/udev/rules.d/` +
      re-plug the scanner (the event node is `root:input 0660` otherwise);
-  2. register the terminal and pair the browser:
-     `uv run python scripts/scanner_daemon.py --config /etc/hcrm/scanner.json
-     --register` — it prints a **single-use 8-char pairing code**; in the
-     kiosk browser, click the **"no scanner"** pill in the header and enter
-     it (with the terminal id) once in the popover that opens
-     ("Pair this terminal");
+  2. register the terminal and pair the browser — **one click, no code
+     to type**: `uv run python scripts/scanner_daemon.py --config
+     /etc/hcrm/scanner.json --register` writes a **single-use pairing
+     offer file** (0600, `<repo>/data/scanner-pairing.json` by default);
+     in the kiosk browser, click the **"no scanner"** pill in the header
+     once — the server reads the offer file, pairs, and consumes it. The
+     pairing code is not printed (it must never touch a journal);
+     `--print-code` opts in for the manual fallback
+     (`curl -X POST /api/scanner/pair -H 'Content-Type: application/json'
+     -d '{"terminal_id": …, "code": …}'`) — e.g. a kiosk whose browser is
+     not on the server host. **Same-user caveat**: the daemon must write
+     the offer file as a user the server can read (under systemd, set
+     `User=` in the unit — a root-written 0600 file is unreadable and
+     /pair/auto answers 500 naming the fix);
   3. `sudo cp scripts/systemd/scanner-daemon.service /etc/systemd/system/ &&
      sudo systemctl enable --now scanner-daemon`.
   The daemon exits (even `kill -9`) → the kernel instantly releases the
@@ -195,13 +206,17 @@ that adds SIMD-accelerated vector search:
   never stops the grab — scans spool (`<config>.spool`, 0600, bounded) and
   replay with per-entry dedupe. Badge payloads are redacted in every
   daemon log line. **Config/env**: `--config` holds
-  `{terminal_id, secret}` (0600, written at register); `--forward URL`
-  (default `http://127.0.0.1:8000`) is the server base;
+  `{terminal_id, secret}` (0600, written at register); `--pairing-file`
+  overrides the offer file's location (default
+  `$HCRM_SCANNER_PAIRING_FILE`, else `<repo>/data/scanner-pairing.json` —
+  the SAME path the server reads; override on BOTH sides if you set it);
+  `--forward URL` (default `http://127.0.0.1:8000`) is the server base;
   `HCRM_SCANNER_REGISTER_ANY=1` opens terminal registration to LAN clients
-  (loopback-only by default); queued scans rest at most
-  `HCRM_SCANNER_EVENT_TTL_SECONDS` (default 300) server-side; `--dry-run`
-  decodes and prints (redacted) with zero HTTP — the hardware-checklist
-  mode (`docs/plans/r4-checklist.md`).
+  (loopback-only by default), and one-click pairing (`/pair/auto`) is
+  loopback-only under its own `HCRM_SCANNER_PAIR_ANY` flag; queued scans
+  rest at most `HCRM_SCANNER_EVENT_TTL_SECONDS` (default 300) server-side;
+  `--dry-run` decodes and prints (redacted) with zero HTTP — the
+  hardware-checklist mode (`docs/plans/r4-checklist.md`).
 - Hardware integration for the Opticon M-10 2D presentation scanner:
   stdlib-first serial driver (`app/scanner/`, pyserial optional — one reader
   thread owns the port, so a scan interleaved with a command ACK is delivered,

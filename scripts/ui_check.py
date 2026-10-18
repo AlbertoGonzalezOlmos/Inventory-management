@@ -297,14 +297,22 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
     # the topbar) — a JS error in installScanFeed fails here even if Vue
     # still mounted, and the operator loses the "which scan path is live"
     # signal (live = daemon-forwarded, off = paired but unreachable,
-    # unpaired = the wedge capture is the path). It is a BUTTON now: the
-    # pairing popover opens from it (the login-screen panel is gone).
+    # unpaired = the wedge capture is the path). It is a BUTTON, and since
+    # the one-click change it PAIRS when unpaired (no popover opens).
     if count(r'data-scanner-feed="(?:live|off|unpaired)"', dom) < 1:
         failures.append(f"[{label}] data-scanner-feed pill missing — "
                         "the round-4 scan feed did not install")
     if count(r'<button[^>]*class="[^"]*\bfeed-pill\b', dom) < 1:
-        failures.append(f"[{label}] feed pill is not a button — the "
-                        "pairing affordance must open from the pill")
+        failures.append(f"[{label}] feed pill is not a button — it pairs "
+                        "(unpaired) / manages the pairing (paired)")
+    # One-click pairing: the manual form's inputs must never render again
+    # (placeholders are what would actually show in a one-shot DOM dump).
+    # ui_check cannot click, so the runtime one-click path itself is
+    # covered by the contract pins + the /pair/auto router tests.
+    if count(r'placeholder="counter-1"', dom) != 0 \
+            or count(r'placeholder="8 characters"', dom) != 0:
+        failures.append(f"[{label}] manual pairing inputs rendered — the "
+                        "pill is one-click; the form must not come back")
     if copy == "Log in" and count(r'placeholder="Scan your QR badge here"', dom) != 0:
         failures.append(f"[{label}] badge login field rendered — the "
                         "removed fallback must not come back (scan "

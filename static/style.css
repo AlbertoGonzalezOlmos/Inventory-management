@@ -848,11 +848,7 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
   text-align: left;
 }
 
-/* The pairing form (terminal id + the daemon's 8-char code). */
-.pair-form label { display: block; margin-bottom: .7rem; }
-.pair-form input {
-  width: 100%;
-  box-sizing: border-box;
-  margin-top: .3rem;
-}
+/* The paired-state popover's action row (the manual pairing-form rules
+   are gone with the form — the unpaired pill is a one-click pair
+   button). */
 .pair-actions { display: flex; gap: .6rem; flex-wrap: wrap; }

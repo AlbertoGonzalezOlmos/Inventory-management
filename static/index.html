@@ -55,59 +55,43 @@
            paired and the queue poll succeeds; "off" = paired but the
            server is unreachable (polling continues); "unpaired" = the
            round-3 wedge capture is the scan path.
-           The pill is a BUTTON (the login-screen pairing panel is gone):
-           clicking it opens the pairing popover below — the terminal id +
-           the daemon's single-use code when unpaired, the status + Unpair
-           recovery when paired. -->
+           The pill is a ONE-CLICK PAIR BUTTON when unpaired: clicking it
+           calls POST /api/scanner/pair/auto, which reads the pairing
+           offer file the daemon wrote on --register (no code to type).
+           When paired, the same click opens the popover below (status +
+           the Unpair recovery). -->
       <button type="button" class="feed-pill" :data-scanner-feed="scannerFeed"
-              @click="pairOpen = !pairOpen"
-              :aria-expanded="pairOpen ? 'true' : 'false'"
-              aria-haspopup="dialog"
+              @click="onPillClick"
+              :aria-expanded="scannerFeed === 'unpaired' ? null : (pairOpen ? 'true' : 'false')"
+              :aria-haspopup="scannerFeed === 'unpaired' ? null : 'dialog'"
               :title="scannerFeed === 'live'
                 ? 'Scans arrive via the grab daemon (no window focus needed) — click to manage the pairing'
                 : scannerFeed === 'off'
                   ? 'Paired, but the server is unreachable — retrying — click to manage the pairing'
-                  : 'Not paired to a scanner daemon — click to pair this kiosk'">
+                  : 'Not paired — click to pair this kiosk from the pairing file the daemon wrote'">
         {{ scannerFeed === 'live' ? 'scanner' : scannerFeed === 'off' ? 'scanner offline' : 'no scanner' }}
       </button>
-      <!-- The pairing popover (the old login-screen panel, consolidated
-           into the pill). The backdrop closes it on any outside click;
-           z-order: backdrop under the popover, both above the page
-           content but below the modals (the topbar is its own stacking
-           context — modal-opening paths close it instead). -->
-      <template v-if="pairOpen">
+      <!-- The pairing popover, PAIRED-STATE ONLY (the unpaired pill is an
+           action button — it pairs in one click, no form, no popover; the
+           manual terminal-id + code form was removed with it). The
+           backdrop closes it on any outside click; z-order: backdrop
+           under the popover, both above the page content but below the
+           modals (the topbar is its own stacking context — modal-opening
+           paths close it instead). -->
+      <template v-if="pairOpen && scannerFeed !== 'unpaired'">
         <div class="popover-backdrop" @click="pairOpen = false"></div>
         <div class="pair-popover" role="dialog" aria-label="Scanner pairing">
-          <template v-if="scannerFeed === 'unpaired'">
-            <p class="muted">Pair this kiosk with its scanner terminal —
-              enter the terminal id and the single-use 8-character code the
-              daemon printed (<code>scanner_daemon --register</code>).</p>
-            <form @submit.prevent="pairTerminal" class="pair-form">
-              <label>Terminal id
-                <input type="text" v-model="pairForm.terminal_id"
-                       placeholder="counter-1" autocomplete="off" />
-              </label>
-              <label>Pairing code
-                <input type="text" v-model="pairForm.code" maxlength="8"
-                       placeholder="8 characters" autocomplete="off" />
-              </label>
-              <p v-if="pairError" class="error">{{ pairError }}</p>
-              <div class="pair-actions">
-                <button class="btn ghost" :disabled="pairBusy">Pair this terminal</button>
-              </div>
-            </form>
-          </template>
-          <template v-else>
-            <p class="muted">Paired — scans from this terminal now arrive
-              here, even with this window unfocused<template v-if="scannerFeed === 'off'">
-              (server unreachable — retrying)</template>.</p>
-            <p v-if="pairError" class="error">{{ pairError }}</p>
-            <div class="pair-actions">
-              <button type="button" class="btn ghost"
-                      v-if="!user || isStaff"
-                      @click="unpairTerminal">Unpair</button>
-            </div>
-          </template>
+          <p class="muted">Paired — scans from this terminal now arrive
+            here, even with this window unfocused<template v-if="scannerFeed === 'off'">
+            (server unreachable — retrying)</template>.</p>
+          <p class="muted">To re-pair: DELETE the terminal (staff or
+            loopback), re-run <code>scanner_daemon.py --register</code>,
+            then click the pill.</p>
+          <div class="pair-actions">
+            <button type="button" class="btn ghost"
+                    v-if="!user || isStaff"
+                    @click="unpairTerminal">Unpair</button>
+          </div>
         </div>
       </template>
       <template v-if="user">
@@ -156,10 +140,11 @@
         scan your QR badge or log in to add them to your list.
         <button class="btn tiny ghost" @click="discardStagedScans">Discard</button>
       </div>
-      <!-- Round 4, T6: kiosk pairing now lives in the header pill button
-           (pairOpen) — the login screen no longer carries the terminal-id /
-           pairing-code form. The stored token is per-TERMINAL: it survives
-           logins and logouts and is NOT cleared on logout. -->
+      <!-- Round 4, T6: kiosk pairing lives in the header pill (one click
+           when unpaired, via the server-read pairing file; the popover
+           when paired) — the login screen carries no pairing UI at all.
+           The stored token is per-TERMINAL: it survives logins and logouts
+           and is NOT cleared on logout. -->
       <p class="muted">No account yet? <a href="#/register">Create a member account</a></p>
     </section>
 

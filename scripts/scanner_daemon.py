@@ -799,6 +799,56 @@ def save_config(path, terminal_id: str, secret: str) -> None:
         os.close(fd)
 
 
+#: The one-click pairing offer file: this daemon writes it after a
+#: successful --register, the server (app/routers/scanner.py _pairing_file)
+#: reads and consumes it. Same env name, SAME default — the two sides must
+#: resolve the same path or the first click 404s (pinned by
+#: test_default_pairing_file_matches_the_server_side).
+_PAIRING_FILE_ENV = "HCRM_SCANNER_PAIRING_FILE"
+_PAIRING_FILE_NAME = "scanner-pairing.json"
+
+
+def default_pairing_file() -> Path:
+    """The offer file's path: $HCRM_SCANNER_PAIRING_FILE, else
+    <HCRM_DATA_DIR or <repo>/data>/scanner-pairing.json.
+
+    Stdlib-only on purpose (no app.* import — this is a standalone
+    kiosk script); the default mirrors app.database.DATA_DIR's, exactly
+    like app/security.py's _badge_data_dir()."""
+    data_dir = os.environ.get(
+        "HCRM_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data"))
+    return Path(os.environ.get(
+        _PAIRING_FILE_ENV, os.path.join(data_dir, _PAIRING_FILE_NAME)))
+
+
+def save_pairing_file(path, terminal_id: str, code: str) -> None:
+    """Write the one-click pairing offer 0600, ATOMICALLY.
+
+    A browser click can land at any moment, so a partially-written file
+    must never be observable: write a 0600 tempfile in the same directory
+    and os.replace() it into place (replace preserves the temp's mode).
+    Exactly the two keys the server validates — no secret, no token, ever:
+    the offer file is a single-use code, not a credential store.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)  # app.database does the same
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                                prefix=".scanner-pairing-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:  # mkstemp is 0600
+            out.write(json.dumps({"terminal_id": terminal_id,
+                                  "pairing_code": code}, indent=2))
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def register_terminal(post, base_url: str, terminal_id: str, secret: str) -> str:
     """POST /api/scanner/terminals → the single-use pairing code.
 
@@ -830,8 +880,14 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
 
     Modes:
       scanner_daemon --config PATH [--register] [--forward URL]
-        Register (first run, or ``--register``): POST the terminal, print
-        the single-use pairing code, persist the 0600 config — then run.
+        Register (first run, or ``--register``): POST the terminal, persist
+        the 0600 config, and write the one-click pairing offer file (0600,
+        atomic) that the server's POST /api/scanner/pair/auto reads — the
+        kiosk browser pairs by clicking the "no scanner" pill, no code to
+        type. The code itself is NOT printed by default (it must never
+        touch a journal); ``--print-code`` opts in for the manual
+        POST /api/scanner/pair fallback. A failed offer-file write is
+        FATAL: the code would be unrecoverable. Then run.
         Run: lock → grab (T3) → decode (T2) → forward each scan to
         POST /api/scanner/events, spooled and retried so a server outage
         never stops the grab and never drops a scan.
@@ -853,7 +909,8 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                              "(written 0600 on first register)")
     parser.add_argument("--register", action="store_true",
                         help="register the terminal (first run, or after a "
-                             "server-side DELETE) and print the pairing code")
+                             "server-side DELETE) and write the one-click "
+                             "pairing file")
     parser.add_argument("--forward", metavar="URL", default="http://127.0.0.1:8000",
                         help="HCRM base URL (default http://127.0.0.1:8000)")
     parser.add_argument("--dry-run", action="store_true",
@@ -865,6 +922,16 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                              "(re-discovery is always by VID/PID)")
     parser.add_argument("--spool", metavar="PATH", default=None,
                         help="delivery backlog file (default: <config>.spool)")
+    parser.add_argument("--pairing-file", metavar="PATH", default=None,
+                        help="one-click pairing offer file (default: "
+                             "$HCRM_SCANNER_PAIRING_FILE or <repo>/data/"
+                             "scanner-pairing.json — the SAME path the "
+                             "server reads; override on BOTH sides if set)")
+    parser.add_argument("--print-code", action="store_true",
+                        help="also print the pairing code — the manual "
+                             "POST /api/scanner/pair fallback for split-"
+                             "host deployments; off by default so the "
+                             "code never touches a journal or scrollback")
     args = parser.parse_args(argv)
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep
@@ -910,10 +977,27 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
             if args.register or config is None:
                 code = register_terminal(post_fn, args.forward,
                                          terminal_id, secret)
-                print(f"pair this terminal: in the kiosk browser, click "
-                      f"the 'no scanner' pill in the header and enter {code}",
-                      flush=True)
                 save_config(args.config, terminal_id, secret)
+                # Write-then-announce, and FATAL on failure: with the code
+                # no longer printed by default, the offer file is its only
+                # copy — losing it silently would strand the registration.
+                pairing_path = args.pairing_file or default_pairing_file()
+                try:
+                    save_pairing_file(pairing_path, terminal_id, code)
+                except OSError as exc:
+                    print(f"scanner_daemon: could not write the pairing "
+                          f"file {pairing_path}: {exc}\n"
+                          f"  The single-use code is unrecoverable — "
+                          f"recovery: DELETE /api/scanner/terminals/"
+                          f"{terminal_id} (staff or loopback), then re-run "
+                          f"with --register", file=sys.stderr)
+                    return 1
+                msg = (f"pair this terminal: pairing file written to "
+                       f"{pairing_path} (0600) — in the kiosk browser, "
+                       f"click the 'no scanner' pill in the header")
+                if args.print_code:
+                    msg += f" (pairing code: {code})"
+                print(msg, flush=True)
                 _log(f"registered terminal {terminal_id}")
 
             spool = Spool(args.spool or (str(args.config) + ".spool"),

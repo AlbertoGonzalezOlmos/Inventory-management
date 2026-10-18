@@ -23,6 +23,12 @@ Counter-session binding (the deferred "Phase B"): a TERMINAL is one kiosk
 * the **pairing code** — 8 chars (Crockford base32, no lookalikes) minted
   at registration, verified constant-time at pairing, single-use by
   construction: once the terminal holds a token, pairing answers 409.
+  The daemon does not print it by default: ``--register`` writes it to a
+  0600 offer file (``HCRM_SCANNER_PAIRING_FILE``, default
+  ``<data_dir>/scanner-pairing.json``) that ``POST /pair/auto`` reads and
+  consumes on the first successful pair — the kiosk browser pairs by
+  clicking the "no scanner" pill. ``--print-code`` opts into printing
+  for the manual ``/pair`` fallback (split-host deployments).
 
 Registration is loopback-gated by default (``127.0.0.1``/``::1`` — the
 default bind; ``HCRM_SCANNER_REGISTER_ANY=1`` opens it for a LAN
@@ -48,13 +54,16 @@ noted here because the append-only doctrine makes reviewers look for one.
 """
 
 import hmac
+import json
+import logging
 import os
 import secrets
 from datetime import timedelta
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials
-from sqlalchemy import delete, or_
+from sqlalchemy import delete, or_, update
 from sqlmodel import Session, select
 
 from app.database import get_session
@@ -71,7 +80,9 @@ from app.schemas import (
     TerminalScanOut,
 )
 from app.scanshapes import classify_scan
-from app.security import token_hash
+from app.security import _badge_data_dir, token_hash
+
+logger = logging.getLogger("hcrm")
 
 router = APIRouter(prefix="/api/scanner", tags=["scanner"])
 
@@ -89,6 +100,23 @@ _PAIRING_CODE_LEN = 8
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _REGISTER_ANY_ENV = "HCRM_SCANNER_REGISTER_ANY"
 
+#: Opens the one-click /pair/auto endpoint to non-loopback callers.
+#: Deliberately SEPARATE from _REGISTER_ANY_ENV: the two flags answer
+#: different questions ("may a LAN peer mint terminals?" vs "may a LAN peer
+#: claim this host's badge-queue read token in one click?"), and the sane
+#: LAN posture is the split — registration open, pairing loopback-only.
+_PAIR_ANY_ENV = "HCRM_SCANNER_PAIR_ANY"
+
+#: The one-click pairing offer file: written 0600 by the daemon after a
+#: successful --register, read here, consumed on the first successful pair.
+#: The default is the app's private data dir (server-owned, so both the read
+#: AND the success-unlink work for a non-root server; it already holds the
+#: other 0600 credential, data/badge.key). The daemon resolves the SAME
+#: default stdlib-only (scripts/scanner_daemon.py default_pairing_file) —
+#: keep the two in sync.
+_PAIRING_FILE_ENV = "HCRM_SCANNER_PAIRING_FILE"
+_PAIRING_FILE_NAME = "scanner-pairing.json"
+
 _AUTH_FAILED = {"status": "unknown_terminal",
                 "message": "Unknown terminal or bad credential"}
 
@@ -102,6 +130,29 @@ def _register_open() -> bool:
     """HCRM_SCANNER_REGISTER_ANY=1 admits LAN registrations (opt-in)."""
     return os.environ.get(_REGISTER_ANY_ENV, "").strip().lower() in (
         "1", "true", "yes", "on")
+
+
+def _pair_open() -> bool:
+    """HCRM_SCANNER_PAIR_ANY=1 admits LAN one-click pairing (opt-in)."""
+    return os.environ.get(_PAIR_ANY_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _pairing_file() -> Path:
+    """The pairing offer file's path (env override, data-dir default).
+
+    Read at CALL time (the SCANNER_EVENT_TTL_SECONDS precedent) so tests can
+    monkeypatch the env per-test. The data dir comes from
+    app.security._badge_data_dir (computed WITHOUT importing app.database —
+    the badge-key precedent) and the default mirrors
+    scripts/scanner_daemon.py's default_pairing_file() — the two must
+    resolve the same path (pinned by the daemon-side parity test; a drift
+    means the daemon writes where the server never looks and the first
+    click 404s).
+    """
+    return Path(os.environ.get(
+        _PAIRING_FILE_ENV,
+        os.path.join(_badge_data_dir(), _PAIRING_FILE_NAME)))
 
 
 def _mint_pairing_code() -> str:
@@ -239,22 +290,23 @@ def register_terminal(
     return TerminalRegisterOut(pairing_code=code)
 
 
-@router.post("/pair", response_model=TerminalPairOut)
-def pair_terminal(payload: TerminalPairIn, session: Session = Depends(get_session)):
-    """Bind this browser to a terminal (the operator types the daemon's
-    printed code once).
+def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
+    """The shared verify-and-mint core of ``/pair`` and ``/pair/auto``.
 
-    The code is verified constant-time against its hash; a wrong code and
-    an unknown terminal are indistinguishable (401, no enumeration). An
-    already-paired terminal answers 409 even with the correct code — that
-    IS the single-use rule (and why the code hash stays: its usability
-    ended with the pairing, and re-pairing after a cleared localStorage is
-    the DELETE + re-register recovery, not a second use of the same code).
+    One code path so the two endpoints can never drift: constant-time
+    code check against the hash, unknown-terminal and wrong-code answered
+    by the SAME 401 (no enumeration), the 409 single-use rule, and an
+    ATOMIC mint. The mint is a conditional UPDATE
+    (``WHERE token_hash IS NULL``) rather than the obvious
+    read-then-write: two concurrent pair calls would both pass a NULL
+    check and both commit, and the loser would hold a dead token whose
+    polls 401 — the feed silently going unpaired. ``rowcount != 1`` is
+    the loser's 409, decided by the database, not by a race.
     """
     terminal = session.exec(
-        select(Terminal).where(Terminal.terminal_id == payload.terminal_id)
+        select(Terminal).where(Terminal.terminal_id == terminal_id)
     ).first()
-    code_hash = token_hash(payload.code)
+    code_hash = token_hash(code)
     if (terminal is None or terminal.pairing_code_hash is None
             or not hmac.compare_digest(code_hash, terminal.pairing_code_hash)):
         raise HTTPException(
@@ -262,7 +314,16 @@ def pair_terminal(payload: TerminalPairIn, session: Session = Depends(get_sessio
             detail={"status": "bad_pairing",
                     "message": "Unknown terminal or wrong pairing code"},
         )
-    if terminal.token_hash is not None:
+    raw = secrets.token_urlsafe(32)
+    result = session.exec(
+        update(Terminal)
+        .where(Terminal.terminal_id == terminal_id,
+               Terminal.token_hash.is_(None))  # type: ignore[union-attr]
+        .values(token_hash=token_hash(raw))
+    )
+    if result.rowcount != 1:
+        # Someone else paired this terminal between our read and the
+        # UPDATE — the single-use rule, decided atomically.
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={"status": "already_paired",
@@ -270,11 +331,155 @@ def pair_terminal(payload: TerminalPairIn, session: Session = Depends(get_sessio
                                "(staff or loopback) and re-register to "
                                "re-pair"},
         )
-    raw = secrets.token_urlsafe(32)
-    terminal.token_hash = token_hash(raw)
-    session.add(terminal)
     session.commit()
-    return TerminalPairOut(token=raw)
+    return raw
+
+
+@router.post("/pair", response_model=TerminalPairOut)
+def pair_terminal(payload: TerminalPairIn, session: Session = Depends(get_session)):
+    """Bind this browser to a terminal (the manual path: an operator who
+    read the code from ``--print-code`` types it once).
+
+    The code is verified constant-time against its hash; a wrong code and
+    an unknown terminal are indistinguishable (401, no enumeration). An
+    already-paired terminal answers 409 even with the correct code — that
+    IS the single-use rule (and why the code hash stays: its usability
+    ended with the pairing, and re-pairing after a cleared localStorage is
+    the DELETE + re-register recovery, not a second use of the same code).
+    Verification and minting live in :func:`_pair_terminal`, shared with
+    the one-click ``/pair/auto`` path.
+    """
+    return TerminalPairOut(token=_pair_terminal(
+        session, payload.terminal_id, payload.code))
+
+
+@router.post("/pair/auto", response_model=TerminalPairOut)
+def pair_terminal_auto(request: Request,
+                       session: Session = Depends(get_session)):
+    """One-click pairing: bind this browser to the terminal whose offer
+    file the daemon just wrote (the "no scanner" pill's click).
+
+    A browser cannot read the kiosk's filesystem, so the server (same host
+    as the daemon in the default deployment) mediates: it reads
+    ``HCRM_SCANNER_PAIRING_FILE`` (0600, written by ``scanner_daemon.py
+    --register``), pairs through the SAME :func:`_pair_terminal` core as
+    the manual endpoint (constant-time, single-use, atomic mint), and
+    consumes the file on success only — the file is the operator's only
+    copy of the code now that it is not printed, and a stale one can only
+    ever produce 401/409, whose messages name the recovery (re-run
+    ``--register``, which overwrites it atomically).
+
+    Two gates beyond the code itself, because while a valid offer sits on
+    disk this endpoint is a token mint for the badge-bearing queue:
+
+    * **loopback-only** by default (``HCRM_SCANNER_PAIR_ANY=1`` opts in,
+      independently of ``HCRM_SCANNER_REGISTER_ANY``). Loopback is
+      semantic here, not just security: auto-pair binds THE CALLING
+      BROWSER to the terminal — only the kiosk's own browser should ever
+      do that, or the kiosk's scans (badge payloads included) route to
+      someone else's screen.
+    * ``Content-Type: application/json`` required (415): no CORS
+      middleware exists, so a cross-origin page cannot READ the token —
+      but from the kiosk browser (which IS loopback) it can fire a
+      CORS-simple POST that would consume the offer. JSON content-type is
+      never CORS-safelisted, forcing a preflight the app never answers.
+
+    No response or log line ever carries the pairing code.
+    """
+    if not (_is_loopback(request) or _pair_open()):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={"status": "loopback_only",
+                    "message": "One-click pairing is loopback-only by "
+                               "default (HCRM_SCANNER_PAIR_ANY=1 to open "
+                               "for a LAN deployment)"},
+        )
+    content_type = request.headers.get("content-type", "")
+    if not content_type.split(";", 1)[0].strip().lower() == "application/json":
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail={"status": "json_required",
+                    "message": "Content-Type: application/json is required"},
+        )
+
+    path = _pairing_file()
+    try:
+        raw_file = path.read_bytes()
+    except FileNotFoundError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"status": "no_pairing_file",
+                    "message": "No pairing file on this host — run "
+                               "scanner_daemon.py --register first"},
+        )
+    except OSError as exc:
+        # EACCES etc.: the classic cause is a root-run daemon writing a
+        # 0600 file the (non-root) server cannot read. A DIFFERENT operator
+        # action than "absent", hence 500 not 404.
+        logger.warning("pairing file %s unreadable: %s — the daemon and "
+                       "the server must run as the same user (systemd "
+                       "User=), or set HCRM_SCANNER_PAIRING_FILE", path, exc)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"status": "pairing_file_unreadable",
+                    "message": f"The pairing file {path} exists but cannot "
+                               "be read — the daemon and the server must "
+                               "run as the same user (systemd User=), or "
+                               "set HCRM_SCANNER_PAIRING_FILE"},
+        )
+
+    try:
+        # Read BYTES and decode here, not in read_text(): a non-UTF-8 offer
+        # file raises UnicodeDecodeError, which is a ValueError — NOT an
+        # OSError — so decoding inside the read's try/except OSError would
+        # let it escape as an unhandled 500. A file that is not even text is
+        # the most malformed offer there is, and belongs in the 422 below
+        # (the settled failure surface), with the same "regenerate with
+        # --register" instruction.
+        offer = json.loads(raw_file.decode("utf-8"))
+    except ValueError:
+        offer = None
+    if (not isinstance(offer, dict)
+            or not isinstance(offer.get("terminal_id"), str)
+            or not offer["terminal_id"].strip()
+            or not isinstance(offer.get("pairing_code"), str)
+            or len(offer["pairing_code"]) != 8):
+        logger.warning("pairing file %s is malformed — regenerate it with "
+                       "scanner_daemon.py --register", path)
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"status": "bad_pairing_file",
+                    "message": "The pairing file is malformed — regenerate "
+                               "it with scanner_daemon.py --register"},
+        )
+
+    terminal_id = offer["terminal_id"].strip()
+    try:
+        token = _pair_terminal(session, terminal_id, offer["pairing_code"])
+    except HTTPException as exc:
+        # 401 (stale offer) / 409 (already paired): log the mtime — that is
+        # the age evidence an operator needs — never the code.
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = "?"
+            logger.warning("one-click pairing refused for terminal %s "
+                           "(offer file mtime %s) — re-run --register",
+                           terminal_id, mtime)
+        raise
+
+    # Success: consume the offer (single-use file). A failed unlink must
+    # not fail a successful pairing — the DB single-use rule is the
+    # security boundary; a leftover file can only ever produce 409s.
+    try:
+        path.unlink()
+    except OSError as exc:
+        logger.warning("paired terminal %s but could not consume the offer "
+                       "file %s: %s", terminal_id, path, exc)
+    logger.info("one-click paired terminal %s (offer file %s consumed)",
+                terminal_id, path)
+    return TerminalPairOut(token=token)
 
 
 @router.post("/events", response_model=TerminalScanOut,

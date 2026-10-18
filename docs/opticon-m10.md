@@ -622,17 +622,25 @@ spool (`<config>.spool`, 0600, bounded) and replay in order, each entry
 delivered exactly once. A human keyboard can never be grabbed: the
 node's VID/PID is re-verified from sysfs immediately before every grab.
 
-**Pairing (once per kiosk).** The daemon registers a terminal
-(`--register` prints a **single-use 8-char pairing code**); the operator
-clicks the header's **"no scanner"** pill (it is a button) and enters that
-code plus the terminal id into the popover that opens — the browser stores
-its read token. The same popover carries the **Unpair** recovery for a
-stale binding. Credentials are
+**Pairing (once per kiosk) — one click, no code to type.** The daemon
+registers a terminal and writes a **single-use pairing offer file** (0600,
+`<repo>/data/scanner-pairing.json`; the pairing code is not printed — it
+must never touch a journal — `--print-code` opts in for the manual
+`POST /api/scanner/pair` fallback); the operator clicks the header's
+**"no scanner"** pill once — the server (same host as the daemon in the
+default deployment) reads the offer, pairs the browser, and consumes the
+file. The endpoint is loopback-only by default
+(`HCRM_SCANNER_PAIR_ANY=1` opens it — a flag independent of
+`HCRM_SCANNER_REGISTER_ANY`) and requires a JSON content-type (a CSRF
+gate: no CORS middleware exists, so a cross-origin CORS-simple POST must
+be forced through a preflight it can never pass). When paired, the same
+pill opens the popover with the **Unpair** recovery. Credentials are
 split: the daemon's **secret** writes to the queue, the browser's
 **token** only reads it — and neither works on the other's endpoint.
 
 **Install** (details in README's M-10 section): udev rule → `--register`
-→ pair in the browser → `systemctl enable --now scanner-daemon`.
+→ click the pill in the kiosk browser → `systemctl enable --now
+scanner-daemon`.
 `--dry-run` decodes and prints (redacted) with zero HTTP — step 1 of the
 hardware checklist, `docs/plans/r4-checklist.md`.
 
