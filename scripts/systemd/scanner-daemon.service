@@ -23,21 +23,34 @@
 # NOTE: the ExecStart below is the REAL T5 entrypoint. One-time setup,
 # in order:
 #   1. install the udev rule (see above) and re-plug the scanner;
-#   2. register the terminal once — it prints the single-use pairing code:
+#   2. register the terminal once — it writes the single-use pairing
+#      offer file (0600) the server's one-click endpoint reads:
 #        uv run python scripts/scanner_daemon.py \
 #             --config /etc/hcrm/scanner.json --register
-#      (that run also starts forwarding; Ctrl-C once you have the code —
+#      (that run also starts forwarding; Ctrl-C once it has registered —
 #      SIGTERM/SIGINT are clean exits and the config is already saved);
-#   3. type the pairing code into the kiosk browser's login screen (once);
+#   3. in the kiosk browser, click the "no scanner" pill in the header
+#      once — the server reads the offer file, pairs the browser and
+#      consumes the file. No code is typed, and none is printed (the
+#      pairing code must never touch a journal; --print-code opts in for
+#      the manual POST /api/scanner/pair fallback);
 #   4. systemctl start scanner-daemon — from here it forwards forever.
 # The unit itself never passes --register, but note the daemon's contract:
 # it registers itself whenever the config is ABSENT (spec: "no config →
-# register") — so a first `systemctl start` without step 2 still works and
-# prints the pairing code INTO THE JOURNAL (`journalctl -u scanner-daemon`,
-# root-only; the code is single-use). Once the config exists, restarts
-# never register again. Step 2 remains the recommended flow (the code never
-# touches a log). Adjust WorkingDirectory to the checkout/deployment being
-# run.
+# register") — so a first `systemctl start` without step 2 still works.
+# Once the config exists, restarts never register again. Step 2 remains
+# the recommended flow.
+#
+# ONE-CLICK PAIRING CAVEAT: the offer file's default location is
+# <WorkingDirectory>/data/scanner-pairing.json, and the SERVER must be
+# able to READ it. This unit runs as root (no User=), so a root-written
+# 0600 offer file is unreadable by a non-root server — /pair/auto would
+# answer 500 naming the fix. Either run the daemon as the app user
+# (User=hcrm + the SupplementaryGroups below is sufficient for EVIOCGRAB
+# on the root:input 0660 node), or set the same
+# HCRM_SCANNER_PAIRING_FILE on both the daemon and the server to a path
+# both can reach. Adjust WorkingDirectory to the checkout/deployment
+# being run.
 
 [Unit]
 Description=HCRM scanner grab daemon (Opticon M-10, USB-HID keyboard mode 065a:a001)

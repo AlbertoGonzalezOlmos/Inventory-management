@@ -23,6 +23,12 @@ Counter-session binding (the deferred "Phase B"): a TERMINAL is one kiosk
 * the **pairing code** — 8 chars (Crockford base32, no lookalikes) minted
   at registration, verified constant-time at pairing, single-use by
   construction: once the terminal holds a token, pairing answers 409.
+  The daemon does not print it by default: ``--register`` writes it to a
+  0600 offer file (``HCRM_SCANNER_PAIRING_FILE``, default
+  ``<data_dir>/scanner-pairing.json``) that ``POST /pair/auto`` reads and
+  consumes on the first successful pair — the kiosk browser pairs by
+  clicking the "no scanner" pill. ``--print-code`` opts into printing
+  for the manual ``/pair`` fallback (split-host deployments).
 
 Registration is loopback-gated by default (``127.0.0.1``/``::1`` — the
 default bind; ``HCRM_SCANNER_REGISTER_ANY=1`` opens it for a LAN

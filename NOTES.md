@@ -56,7 +56,8 @@
   grab impossible; replug triggers VID/PID re-discovery (node numbers are
   recycled). Scans flow daemon → per-terminal server queue
   (`app/routers/scanner.py`: terminal-secret writes, browser-token reads,
-  single-use 8-char pairing code, loopback-gated registration, kinds
+  single-use pairing offer file + one-click `/pair/auto`, loopback-gated
+  registration, kinds
   always re-derived server-side, 300 s TTL, **at-most-once** delivery via
   consume-on-poll) → the SPA's paced 1 s poll (`static/scanfeed.js`, a
   pure node-tested reducer; deliberately NO server-side hold — a hold
@@ -83,9 +84,22 @@
   browser badge path; the typed-badge fallback is deliberately gone —
   the browser path is capture-only, and `scripts/scanner_bridge.py` is
   the non-browser fallback), and the terminal-pairing panel moved off
-  the login screen into the header pill: the pill is a button that opens
-  the pairing popover (terminal id + the daemon's single-use code, and
-  the Unpair recovery) on every view.
+  the login screen into the header pill (Unpair recovery included) on
+  every view.
+- **One-click pairing**: the unpaired pill is now a plain pair button —
+  `--register` writes a 0600 `{terminal_id, pairing_code}` offer file
+  (`<repo>/data/scanner-pairing.json`), and the click POSTs
+  `/api/scanner/pair/auto`: the server reads the file, pairs through the
+  SAME constant-time/single-use core as the manual endpoint, and
+  consumes the file on success only. Three gates, because a valid offer
+  on disk makes the endpoint a mint for the badge-bearing queue:
+  loopback-only by default (its own `HCRM_SCANNER_PAIR_ANY`, independent
+  of `HCRM_SCANNER_REGISTER_ANY`), a JSON content-type requirement (415 —
+  the CSRF gate), and the consumed single-use file. The code is not
+  printed by default (`--print-code` opts in for the manual `/pair`
+  fallback); the manual form is gone from the UI but the endpoint stays
+  for split-host deployments. The double-mint race in the shared core is
+  fixed by a conditional UPDATE (two racing clicks: exactly one 200).
 - **Staff** input/edit catalogue items, create member accounts, use a
   table/data-explorer view with CSV/PDF export and analysis.
 - **Admins** do everything, including account deletion and password resets.

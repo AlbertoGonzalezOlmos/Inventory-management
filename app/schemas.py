@@ -589,16 +589,19 @@ class TerminalRegisterIn(_Stripped):
 
 
 class TerminalRegisterOut(BaseModel):
-    """The single-use pairing code, shown ONCE to the loopback registerer
-    (the daemon prints it; the operator types it into the kiosk browser
-    once). Stored only as its hash."""
+    """The single-use pairing code, shown ONCE to the loopback registerer.
+    The daemon does not print it by default — it writes the 0600 offer
+    file the server's POST /pair/auto reads (the kiosk browser pairs with
+    one click); --print-code opts into printing for the manual
+    POST /pair fallback. Stored only as its hash."""
 
     pairing_code: str
 
 
 class TerminalPairIn(_Stripped):
-    """The browser's half of pairing: the terminal it binds to plus the
-    8-char code the daemon printed."""
+    """The browser's half of MANUAL pairing (the split-host/curl fallback;
+    the default kiosk flow is the one-click POST /pair/auto): the terminal
+    it binds to plus the 8-char code from --print-code."""
 
     terminal_id: str = Field(min_length=1, max_length=64)
     code: str = Field(min_length=8, max_length=8)
