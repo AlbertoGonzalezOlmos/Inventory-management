@@ -8,6 +8,7 @@ per-terminal isolation, TTL/consumed pruning, and the capability split
 (secret writes, token reads, neither interchangeable).
 """
 
+import json
 import secrets
 from datetime import timedelta
 
@@ -46,6 +47,25 @@ def register(client, terminal_id="counter-1", secret=None):
 def pair(client, terminal_id, code):
     return client.post("/api/scanner/pair",
                        json={"terminal_id": terminal_id, "code": code})
+
+
+def offer_file(tmp_path, terminal_id="counter-1", code=None):
+    """Point HCRM_SCANNER_PAIRING_FILE at a tmp file; return its Path.
+
+    Written with the two keys the daemon writes — code defaults to None so
+    a test can register first and pass the real single-use code in.
+    """
+    path = tmp_path / "scanner-pairing.json"
+    if code is not None:
+        path.write_text(json.dumps(
+            {"terminal_id": terminal_id, "pairing_code": code}))
+    return path
+
+
+def auto_pair(client):
+    # body {}: api()'s SPA form always attaches the JSON content-type; the
+    # endpoint requires it (the CSRF gate), so the tests must too.
+    return client.post("/api/scanner/pair/auto", json={})
 
 
 def ingest(client, secret, code, *, header=True):
@@ -225,6 +245,175 @@ def test_concurrent_pair_calls_mint_exactly_one_token(client, loopback):
     assert loser["detail"]["status"] == "already_paired"
     # The winner's token actually reads the queue; the race minted no dud.
     assert poll(client, winner).status_code == 200
+
+
+# --- one-click pairing (/pair/auto) ---------------------------------------------
+
+
+def _point_at(monkeypatch, path):
+    monkeypatch.setenv("HCRM_SCANNER_PAIRING_FILE", str(path))
+
+
+def test_auto_pair_happy_path_consumes_the_file(client, loopback, tmp_path,
+                                                monkeypatch):
+    _, code = register(client)
+    path = offer_file(tmp_path, code=code)
+    _point_at(monkeypatch, path)
+
+    r = auto_pair(client)
+    assert r.status_code == 200, r.text
+    token = r.json()["token"]
+    assert poll(client, token).status_code == 200      # the token really reads
+    assert not path.exists()                            # single-use file
+
+    # The pairing code never appears in any response body.
+    assert code not in r.text
+
+
+def test_auto_pair_second_click_after_success_is_404(client, loopback,
+                                                      tmp_path, monkeypatch):
+    _, code = register(client)
+    path = offer_file(tmp_path, code=code)
+    _point_at(monkeypatch, path)
+    assert auto_pair(client).status_code == 200
+    assert auto_pair(client).status_code == 404
+
+
+def test_auto_pair_absent_file_is_404(client, loopback, tmp_path, monkeypatch):
+    _point_at(monkeypatch, tmp_path / "nope.json")
+    r = auto_pair(client)
+    assert r.status_code == 404
+    assert r.json()["detail"]["status"] == "no_pairing_file"
+
+
+def test_auto_pair_unreadable_file_is_500_not_404(client, loopback, tmp_path,
+                                                   monkeypatch):
+    # A permissions victim needs a DIFFERENT operator action than "absent"
+    # (re-registering as root reproduces the failure) — hence 500. The
+    # unreadable state is simulated with a directory at the file's path
+    # (read_text raises IsADirectoryError, an OSError that is not
+    # FileNotFoundError): chmod 000 is unreliable in CI — a root runner
+    # reads straight through it — and patching pathlib.Path globally is
+    # worse than the thing under test.
+    path = offer_file(tmp_path)
+    path.mkdir()
+    _point_at(monkeypatch, path)
+    r = auto_pair(client)
+    assert r.status_code == 500
+    detail = r.json()["detail"]
+    assert detail["status"] == "pairing_file_unreadable"
+    assert str(path) in detail["message"]
+
+
+@pytest.mark.parametrize("body", [
+    "not json at all",
+    '["terminal_id", "pairing_code"]',
+    '{"terminal_id": "counter-1"}',
+    '{"pairing_code": "ABCD2345"}',
+    '{"terminal_id": 7, "pairing_code": "ABCD2345"}',
+    '{"terminal_id": "counter-1", "pairing_code": null}',
+    '{"terminal_id": "   ", "pairing_code": "ABCD2345"}',
+    '{"terminal_id": "counter-1", "pairing_code": "SHORT"}',
+    '{"terminal_id": "counter-1", "pairing_code": "TOOLONGCODE9"}',
+], ids=["not_json", "json_array", "missing_code", "missing_terminal",
+       "non_string_terminal", "null_code", "blank_terminal",
+       "code_too_short", "code_too_long"])
+def test_auto_pair_malformed_file_is_422(client, loopback, tmp_path,
+                                         monkeypatch, body):
+    path = offer_file(tmp_path)
+    path.write_text(body)
+    _point_at(monkeypatch, path)
+    r = auto_pair(client)
+    assert r.status_code == 422, body
+    assert r.json()["detail"]["status"] == "bad_pairing_file"
+    assert path.exists()   # consumed on SUCCESS only
+
+
+def test_auto_pair_wrong_code_is_byte_identical_to_pair(client, loopback,
+                                                         tmp_path, monkeypatch):
+    _, code = register(client)
+    # A stale offer (code from an earlier registration round).
+    path = offer_file(tmp_path, code="ABCD2345")
+    _point_at(monkeypatch, path)
+    a = auto_pair(client)
+    b = pair(client, "counter-1", "ABCD2345")
+    assert a.status_code == b.status_code == 401
+    assert a.json() == b.json()   # the indistinguishability that matters
+    assert path.exists()          # not consumed on failure
+
+
+def test_auto_pair_unknown_terminal_matches_pairs_401(client, loopback,
+                                                       tmp_path, monkeypatch):
+    _, code = register(client)
+    path = offer_file(tmp_path, terminal_id="no-such-terminal", code=code)
+    _point_at(monkeypatch, path)
+    a = auto_pair(client)
+    b = pair(client, "no-such-terminal", code)
+    assert a.status_code == b.status_code == 401
+    assert a.json() == b.json()
+
+
+def test_auto_pair_already_paired_409_keeps_the_file(client, loopback,
+                                                      tmp_path, monkeypatch):
+    _, code = register(client)
+    assert pair(client, "counter-1", code).status_code == 200
+    path = offer_file(tmp_path, code=code)
+    _point_at(monkeypatch, path)
+    r = auto_pair(client)
+    assert r.status_code == 409
+    assert r.json()["detail"]["status"] == "already_paired"
+    assert path.exists()   # success-only consumption: the evidence stays
+
+
+def test_auto_pair_is_loopback_gated(client, tmp_path, monkeypatch):
+    # No `loopback` fixture: the TestClient host is not in _LOOPBACK_HOSTS.
+    # (No registration either — it is loopback-gated the same way; the
+    # gate runs before the file, so a dummy offer is enough.)
+    _point_at(monkeypatch, offer_file(tmp_path, code="ABCD2345"))
+    r = auto_pair(client)
+    assert r.status_code == 403
+    assert r.json()["detail"]["status"] == "loopback_only"
+
+
+def test_auto_pair_pair_any_env_admits_lan(client, tmp_path, monkeypatch):
+    # Registration itself needs its own env off-loopback — the two flags
+    # are set together here, but each is REQUIRED on its own merits below.
+    monkeypatch.setenv("HCRM_SCANNER_REGISTER_ANY", "1")
+    _, code = register(client)
+    _point_at(monkeypatch, offer_file(tmp_path, code=code))
+    monkeypatch.setenv("HCRM_SCANNER_PAIR_ANY", "1")
+    assert auto_pair(client).status_code == 200
+
+
+def test_auto_pair_register_any_does_not_open_pairing(client, tmp_path,
+                                                       monkeypatch):
+    # The two flags are independent by design: REGISTER_ANY opens terminal
+    # MINTING, not the one-click claim of the read token.
+    _point_at(monkeypatch, offer_file(tmp_path, code="ABCD2345"))
+    monkeypatch.setenv("HCRM_SCANNER_REGISTER_ANY", "1")
+    assert auto_pair(client).status_code == 403
+
+
+def test_auto_pair_requires_json_content_type(client, loopback, tmp_path,
+                                                monkeypatch):
+    _, code = register(client)
+    _point_at(monkeypatch, offer_file(tmp_path, code=code))
+    r = client.post("/api/scanner/pair/auto", content="",
+                    headers={"Content-Type": "text/plain"})
+    assert r.status_code == 415
+    assert r.json()["detail"]["status"] == "json_required"
+    # Nothing was minted and the offer survives (gates run before the file).
+    assert pair(client, "counter-1", code).status_code == 200
+
+
+def test_auto_pair_never_leaks_the_code_in_a_response(client, loopback,
+                                                        tmp_path, monkeypatch):
+    _, code = register(client)
+    path = offer_file(tmp_path, code=code)
+    _point_at(monkeypatch, path)
+    for _ in range(2):   # 200 then 404 — every body must stay code-free
+        r = auto_pair(client)
+        assert code not in r.text
 
 
 # --- ingest + server-side classification ------------------------------------------
