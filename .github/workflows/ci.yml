@@ -44,12 +44,28 @@ jobs:
       # FORWARD while reporting success — a gate that cannot run must fail.
       - name: suite in reverse node-id order
         run: |
-          TESTS="$(uv run pytest --collect-only -q | grep '::' | \
-            uv run python -c 'import sys; print("\n".join(reversed(sys.stdin.read().splitlines())))')"
+          # Reversed in Python (not `tac`, GNU-only — a macOS dev machine
+          # would silently run the suite FORWARD) and passed as argv (not an
+          # unquoted `$TESTS`): parametrize ids may contain SPACES —
+          # e.g. test_classify_qr_content[WIFI:T:WPA;S:ssid;P:pass;;-Wi-Fi
+          # network config] — and an unquoted shell expansion word-splits
+          # them into bogus file args ("ERROR: file or directory not found:
+          # world-plain"), which reports success-for-nothing as
+          # "no tests ran".
+          uv run python - <<'PY'
+          import subprocess, sys
+          ids = [l for l in subprocess.run(
+                     [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+                     capture_output=True, text=True, check=True).stdout.splitlines()
+                 if "::" in l]
           # An empty collection must fail the step, never degrade to a full
           # forward-order run (or worse, a vacuous pass).
-          test -n "$TESTS"
-          uv run pytest -q $TESTS
+          if not ids:
+              sys.exit("empty collection: refusing to degrade to a forward run")
+          ids.reverse()
+          sys.exit(subprocess.run(
+              [sys.executable, "-m", "pytest", "-q", *ids]).returncode)
+          PY
       # Round 3, Task B: the scan-capture reducer is pure JS, driven by
       # node:test with an injected clock (no DOM, no sleeps). ubuntu-latest
       # ships Node; a missing node fails the step (a gate that cannot run
