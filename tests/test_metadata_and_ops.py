@@ -15,6 +15,7 @@ silently drift back:
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -191,6 +192,134 @@ def test_repo_hygiene():
         "the lock rule must stay *.md.lock — a blanket *.lock would keep a "
         "NEW lock file (poetry.lock, a regenerated uv.lock after a delete) "
         "out of git status and out of `git add -A` forever")
+
+
+#: Vendored third-party assets: rewriting an upstream minified bundle to
+#: satisfy a style pin is a worse diff than the missing byte. A future
+#: vendored asset OUTSIDE this prefix needs the list extended.
+NEWLINE_EXEMPT_DIRS = ("static/vendor/",)
+
+#: In-tree path citations extracted from shipped files that deliberately do
+#: NOT resolve — each entry needs a reason (the ui_check.BENIGN_PREFIXES
+#: doctrine: a shrinking allowlist is the healthy direction).
+CITED_PATH_ALLOWLIST = {
+    # app/main.py:365 cites it as the MEASURED counter-example of the /docs
+    # CSP boundary ("a static/docs.html was served with no CSP header at
+    # all", PLAN-v2 §8.2 F3). The probe file was deliberately never
+    # committed — PLAN-v2:849 says do not create it in the real tree.
+    "static/docs.html",
+}
+
+#: A citation worth pinning carries its directory: one of these prefixes.
+#: Extending the list is a deliberate edit, not a cleanup.
+_CITED_PREFIXES = ("app", "docs", "scripts", "static", "tests")
+
+_CITED_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_./:-])"                   # not the tail of a URL or a
+    r"\b(?:app|docs|scripts|static|tests)/"    # longer path: kills https://…/docs/x.md
+    r"[A-Za-z0-9._/-]*[A-Za-z0-9]"             # path chars ONLY — no < > { } * $
+    r"\.[A-Za-z0-9]{1,8}\b")                   # must end in a real extension
+
+
+def test_shipped_files_cite_only_in_tree_paths():
+    """Every in-tree path cited by a shipped file must be IN GIT.
+
+    The defect class (it happened): tracked files cited 8 docs/plans/…
+    paths that existed on disk but were never committed — every local gate
+    stayed green for a whole round, and the citations dangled on every
+    fresh clone. Therefore resolution is against `git ls-files`, NEVER
+    `os.path.exists()`: a filesystem check would have passed then and is
+    worthless here.
+
+    The extractor is deliberately NARROW, because narrow and honest beats
+    broad and noisy: a citation must carry one of the pinned directory
+    prefixes and a real extension. What that excludes by construction, and
+    why that is right: bare filenames (unresolvable by name — the M-10
+    round's bare-name sweep produced 18 hits, mostly tmp_path fixtures);
+    globs (`tests/js/*.test.mjs` — a glob is not one tracked path); URLs
+    (the negative lookbehind rejects a match preceded by `/` or `:`);
+    placeholders (`<repo>/…`, `{bdf}` — no `<>`/`{}` in the path class);
+    bare directory mentions (no extension). Measured on this tree: 73
+    distinct citations, 0 accidental matches, 1 deliberate allowlist entry.
+
+    Exemptions (process notes talk about the work, including paths that
+    were renamed or never landed): docs/plans/** (the archive cites
+    never-implemented filenames and contains a typo — its dirname match is
+    EXACT, so a docs/plans/sub/ would NOT be exempt; the archive must stay
+    flat) and basenames PLAN*/REVIEW*. NOTES.md is deliberately NOT exempt
+    (see the comment at the exemption set): it is shipped documentation,
+    and the defect class was born there. PLAN*/REVIEW* stay exempt per
+    test_shipped_artifacts_never_name_a_git_branch's rationale.
+    """
+    if not _in_git_checkout():
+        pytest.skip("not a git checkout")
+    tracked = _git("ls-files").stdout.splitlines()
+    assert tracked, "git ls-files returned nothing"
+    in_git = set(tracked)
+    # PLAN*/REVIEW* are process notes (they talk about the work, including
+    # paths that were renamed or never landed). NOTES.md is NOT in the set,
+    # deliberately: it is shipped operator-facing documentation, and the
+    # M-10 defect this pin exists to catch lived THERE (NOTES.md cited
+    # docs/plans/r4-checklist.md while it was untracked) — exempting it
+    # would blind the pin to a recurrence in its birthplace. Verified
+    # zero-cost: every citation NOTES.md carries today resolves.
+    exempt_prefixes = ("PLAN", "REVIEW")
+    exempt_dirs = ("docs/plans",)
+    text_exts = (".py", ".md", ".sh", ".rules", ".service", ".css", ".html",
+                 ".mjs", ".js", ".json", ".toml", ".yml")
+    offenders = []
+    for path in tracked:
+        if not path.endswith(text_exts):
+            continue
+        if path.startswith(NEWLINE_EXEMPT_DIRS):
+            continue
+        if os.path.basename(path).startswith(exempt_prefixes):
+            continue
+        if os.path.dirname(path) in exempt_dirs:
+            continue
+        try:
+            text = open(os.path.join(REPO_ROOT, path), encoding="utf-8",
+                        errors="replace").read()
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for m in _CITED_PATH_RE.finditer(line):
+                cited = m.group(0).rstrip(".,;:)]}'\"")
+                if cited in in_git or cited in CITED_PATH_ALLOWLIST:
+                    continue
+                offenders.append(f"{path}:{lineno}: {cited}")
+    assert not offenders, (
+        "shipped files cite paths that are not in git (dangling on every "
+        "fresh clone — the M-10 defect class):\n  " + "\n  ".join(offenders))
+
+
+def test_text_files_end_with_exactly_one_newline():
+    """Every tracked text file terminates with exactly one ``\n``.
+
+    A missing final newline is invisible until it is not: every later diff
+    of the last line carries ``\\ No newline at end of file``, and ``cat``
+    concatenation mangles the file. Empty files are exempt (nothing to
+    terminate — which also makes the two empty ``app/__init__.py`` cases
+    natural, not special); vendored assets are exempt (we do not edit
+    upstream bytes). Exactly ONE: a doubled trailing blank is the same
+    class of drift in the other direction, and measured 0 files today.
+    """
+    if not _in_git_checkout():
+        pytest.skip("not a git checkout")
+    tracked = _git("ls-files").stdout.splitlines()
+    assert tracked, "git ls-files returned nothing"
+    exts = (".py", ".md", ".sh", ".rules", ".service", ".css", ".html",
+            ".mjs", ".js", ".json", ".toml", ".yml")
+    offenders = []
+    for path in tracked:
+        if not path.endswith(exts) or path.startswith(NEWLINE_EXEMPT_DIRS):
+            continue
+        data = open(os.path.join(REPO_ROOT, path), "rb").read()
+        if not data:                       # empty: nothing to terminate
+            continue
+        if not data.endswith(b"\n") or data.endswith(b"\n\n"):
+            offenders.append(path)
+    assert not offenders, f"fix the EOF newline (exactly one): {offenders}"
 
 
 def test_shipped_artifacts_never_name_a_git_branch():

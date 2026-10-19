@@ -124,7 +124,8 @@ Its recovery ladder (unbind/bind → PCI remove + rescan → the *caveated*
 reset — `reset_method` here is `pm`, no FLR, and a PM reset rarely revives
 a declared-dead controller → reboot) and the runtime-PM prevention
 (`power/control=on` — still `auto` on this host, so expect a repeat on a
-future suspend) are emitted by the tool itself; the command-for-command
+future suspend; `usb_host_check.py` now nags about it: an INFO finding
+when a healthy controller still reads `auto`) are emitted by the tool itself; the command-for-command
 evidence and the resolution are
 `docs/m10-unreachable-2026-10-10.md` §1–§4 (the controller was revived
 **without a reboot** by PCI remove + rescan).

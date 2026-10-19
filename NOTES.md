@@ -111,7 +111,10 @@
   prevention), `m10_scan_test.py`/`scanner_test.py` (can-it-read tests),
   the ModemManager udev ignore (both forms), and the two-machine re-scope
   of `docs/opticon-hardware.md`. Prevention is still outstanding on the
-  host (`power/control` is `auto` — expect a repeat on a future suspend),
+  host (`power/control` is `auto` — expect a repeat on a future suspend;
+  `usb_host_check.py` now says so itself: a healthy controller on `auto`
+  gets an INFO nag with the prevention commands, and the permanent rule
+  it emits carries the systemd ≥ 255 `add|change` caveat),
   and `065A:A001` stays `confirmed: False` until the USB COM Port sheet
   is scanned.
 - **Staff** input/edit catalogue items, create member accounts, use a
