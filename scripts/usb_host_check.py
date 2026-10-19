@@ -19,7 +19,10 @@ nothing happens":
    dead scanner. The recovery ladder (unbind/bind → PCI remove + rescan →
    caveated reset → reboot, then the runtime-PM prevention) is emitted by
    :func:`recovery_commands`; or move the device to a port on a *different*
-   controller.
+   controller. A controller that is ALIVE but still suspends at idle
+   (``power/control=auto`` — the mode that caused the death) gets an INFO
+   nag with the same prevention commands: the host works, but the next
+   suspend can repeat the incident.
 2. **Serial-port grabbers.** ModemManager probes/claims ``/dev/ttyACM*``
    (the M-10 USB-COM personality is CDC-ACM) and brltty claims many
    USB-serial adapters. Neither stops *detection*, but both can make the port
@@ -151,6 +154,42 @@ def dead_controllers(deaths: dict, last_enum: dict, bus_bdf: dict,
     return sorted(out, key=lambda d: d["bdf"])
 
 
+def prevention_runtime_command(bdf: str) -> str:
+    """Pin ONE controller awake until reboot. BDF-parameterised: never a
+    vendor id, never a host-specific constant."""
+    return f"echo on | sudo tee /sys/bus/pci/devices/{bdf}/power/control"
+
+
+def prevention_permanent_rule(bdf: str) -> list[str]:
+    """The vendor-wide permanent rule: the ``cat …/vendor`` fill-in, the
+    ``<VENDOR>``-placeholder rule (this host's vendor id is deliberately
+    NOT baked into a generic script), and the reload. Shared by the
+    recovery ladder and the healthy-but-auto INFO finding so the two
+    cannot drift."""
+    return [
+        "# make it permanent (fill <VENDOR> from the command below — do NOT "
+        "guess; this script is host-generic). Needs systemd >= 255 for the "
+        "add|change match-key alternation; on older systemd write two "
+        "rules, one per ACTION:",
+        f"cat /sys/bus/pci/devices/{bdf}/vendor",
+        "echo 'ACTION==\"add|change\", SUBSYSTEM==\"pci\", "
+        "ATTR{vendor}=\"<VENDOR>\", ATTR{power/control}=\"on\"' | "
+        "sudo tee /etc/udev/rules.d/98-usb-controller-nosuspend.rules",
+        "sudo udevadm control --reload-rules",
+    ]
+
+
+def prevention_commands(bdf: str) -> list[str]:
+    """The shared prevention tail of :func:`recovery_commands` — also the
+    fix list of the healthy-but-``auto`` INFO finding. One source."""
+    return [
+        "# prevention (the death was a runtime-PM resume failure — pin the "
+        "controller awake or it recurs):",
+        prevention_runtime_command(bdf),
+        *prevention_permanent_rule(bdf),
+    ]
+
+
 def recovery_commands(bdf: str) -> list[str]:
     """Shell commands to revive one xHCI controller, in order of force.
 
@@ -160,10 +199,10 @@ def recovery_commands(bdf: str) -> list[str]:
     reset — demoted with its caveat: ``reset_method`` may be ``pm`` (no
     FLR), and a PM reset rarely revives a controller the kernel already
     declared dead. Reboot is the reliable last resort. The prevention
-    step follows (the death was a runtime-PM resume failure), with the
-    permanent udev rule left as a <VENDOR> placeholder + the command that
-    fills it — this host's vendor id is deliberately NOT baked into a
-    generic script.
+    tail (:func:`prevention_commands`) follows: the runtime
+    ``power/control=on`` pin plus the permanent ``<VENDOR>``-placeholder
+    udev rule — which needs systemd >= 255 for its ``add|change`` match-key
+    alternation; on older systemd write two rules, one per ACTION.
     """
     return [
         "# 1. rebind the driver (gentlest)",
@@ -181,16 +220,7 @@ def recovery_commands(bdf: str) -> list[str]:
         "dead",
         f"echo 1 | sudo tee /sys/bus/pci/devices/{bdf}/reset",
         "# 4. last resort: reboot — the only guaranteed cure",
-        "# 5. prevention, once revived (the death was a runtime-PM resume "
-        "failure — pin the controller awake or it recurs):",
-        f"echo on | sudo tee /sys/bus/pci/devices/{bdf}/power/control",
-        "# make it permanent (fill <VENDOR> from the command below — do NOT "
-        "guess; this script is host-generic):",
-        f"cat /sys/bus/pci/devices/{bdf}/vendor",
-        "echo 'ACTION==\"add|change\", SUBSYSTEM==\"pci\", "
-        "ATTR{vendor}=\"<VENDOR>\", ATTR{power/control}=\"on\"' | "
-        "sudo tee /etc/udev/rules.d/98-usb-controller-nosuspend.rules",
-        "sudo udevadm control --reload-rules",
+        *prevention_commands(bdf),
     ]
 
 
@@ -219,7 +249,8 @@ def _module_present(modules_root: str, name: str) -> bool:
 def analyze(dmesg_lines, bus_bdf: dict, *, udev_rules: str,
             modemmanager_active: bool, opticon_ignore_rule: bool,
             brltty_active: bool, modules_root: str | None,
-            modules: dict[str, str] | None = None) -> list[Finding]:
+            modules: dict[str, str] | None = None,
+            power_control: dict[str, str] | None = None) -> list[Finding]:
     """Turn host facts into a ranked list of findings. Pure; no I/O."""
     findings: list[Finding] = []
 
@@ -245,6 +276,35 @@ def analyze(dmesg_lines, bus_bdf: dict, *, udev_rules: str,
                 detail=msg + " — a flaky controller may die on the next "
                              "suspend/resume; keep an eye on it.",
             ))
+
+    # Healthy-but-auto controllers: the host works, so this is a NAG, not
+    # an alarm — but runtime-PM resume failure is exactly what killed
+    # 0000:c3:00.3 on 2026-10-10, and nothing else reminded the operator
+    # that prevention was still unapplied. ONE aggregated finding for all
+    # affected BDFs (the permanent rule is vendor-wide — per-BDF would
+    # print N copies of it); the runtime pin is per-BDF because it is.
+    # Dead controllers are skipped: their error finding already carries
+    # the full ladder, prevention included.
+    dead_bdfs = {d["bdf"] for d in dead}
+    auto = sorted(b for b in dict.fromkeys(bus_bdf.values())
+                  if b not in dead_bdfs
+                  and (power_control or {}).get(b) == "auto")
+    if auto:
+        findings.append(Finding(
+            severity="info",
+            title=f"{len(auto)} xHCI controller(s) still suspend at idle "
+                  f"(power/control=auto): {', '.join(auto)}",
+            detail="Runtime-PM resume failure is what killed 0000:c3:00.3 "
+                   "on 2026-10-10 (docs/m10-unreachable-2026-10-10.md "
+                   "§1/§4): the controller dies on resume, the root hubs "
+                   "stay registered, and every port on it goes silently "
+                   "dead. 'auto' means it can happen again on the next "
+                   "suspend.",
+            fix=["# pin every affected controller awake (survives until "
+                  "reboot):"]
+                + [prevention_runtime_command(b) for b in auto]
+                + prevention_permanent_rule(auto[0]),
+        ))
 
     if modemmanager_active and not opticon_ignore_rule:
         findings.append(Finding(
@@ -381,12 +441,36 @@ MODULES = {
 }
 
 
+def gather_power_control(bdfs, root: str = "/sys/bus/pci/devices") -> dict[str, str]:
+    """``{bdf: "auto"|"on"}`` read from ``<root>/<bdf>/power/control``.
+
+    Default-argument root (the ``gather_bus_bdf`` convention) so tests
+    point it at a ``tmp_path`` fake tree. FAIL-SILENT per bdf: an
+    unreadable or absent node is OMITTED, never guessed — a container, a
+    non-Linux host or a permissions problem must produce no finding
+    rather than a false one.
+    """
+    out: dict[str, str] = {}
+    for bdf in bdfs:
+        try:
+            with open(os.path.join(root, bdf, "power", "control"),
+                      encoding="ascii") as fh:
+                value = fh.read().strip()
+        except OSError:
+            continue
+        if value:
+            out[bdf] = value
+    return out
+
+
 def gather() -> dict:
     uname = os.uname().release
     modules_root = f"/lib/modules/{uname}"
+    bus_bdf = gather_bus_bdf()
     return {
         "dmesg": gather_dmesg(),
-        "bus_bdf": gather_bus_bdf(),
+        "bus_bdf": bus_bdf,
+        "power_control": gather_power_control(set(bus_bdf.values())),
         "udev_rules": UDEV_RULES,
         "modemmanager_active": _service_active("ModemManager"),
         "opticon_ignore_rule": _opticon_mm_ignore(),
@@ -425,7 +509,8 @@ def main(argv=None) -> int:
         modemmanager_active=facts["modemmanager_active"],
         opticon_ignore_rule=facts["opticon_ignore_rule"],
         brltty_active=facts["brltty_active"],
-        modules_root=facts["modules_root"], modules=facts["modules"])
+        modules_root=facts["modules_root"], modules=facts["modules"],
+        power_control=facts.get("power_control"))
 
     if args.json:
         print(json.dumps({"kernel": facts["uname"],

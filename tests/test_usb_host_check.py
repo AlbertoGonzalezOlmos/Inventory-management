@@ -17,7 +17,11 @@ from scripts.usb_host_check import (
     analyze,
     dead_controllers,
     gather_bus_bdf,
+    gather_power_control,
     parse_host_events,
+    prevention_commands,
+    prevention_permanent_rule,
+    prevention_runtime_command,
     recovery_commands,
 )
 
@@ -167,6 +171,100 @@ def test_recovery_commands_honest_order_and_prevention():
         "host-specific PCI vendor id baked into a generic script")
     # the reset carries its caveat inline (reset_method may be 'pm')
     assert any("reset_method" in c and "pm" in c for c in cmds)
+
+
+def test_recovery_ladder_ends_with_the_shared_prevention():
+    """The no-drift pin: recovery_commands' tail IS prevention_commands —
+    the recovery ladder and the healthy-but-auto INFO finding share one
+    source, so the two paths cannot drift apart."""
+    tail = prevention_commands("0000:c3:00.3")
+    assert recovery_commands("0000:c3:00.3")[-len(tail):] == tail
+
+
+def test_prevention_commands_caveat_and_no_baked_vendor():
+    """The permanent rule needs systemd >= 255 for its add|change
+    match-key alternation (on older systemd it silently never matches) —
+    the caveat must ride along wherever the rule is emitted. And the
+    vendor id stays a <VENDOR> placeholder + fill-in, never 0x1022."""
+    cmds = prevention_commands("0000:c3:00.3")
+    assert prevention_runtime_command("0000:c3:00.3") == (
+        "echo on | sudo tee /sys/bus/pci/devices/0000:c3:00.3/power/control")
+    # the exact caveat phrase, not just the word 'systemd' (which appears
+    # twice in the same string — a substring assert on the word alone was
+    # mutation-proven vacuous)
+    assert any("systemd >= 255" in c and "alternation" in c for c in cmds), (
+        "the systemd >= 255 alternation caveat is missing")
+    assert any("one per ACTION" in c for c in cmds)
+    assert any("<VENDOR>" in c for c in cmds)
+    assert "cat /sys/bus/pci/devices/0000:c3:00.3/vendor" in cmds
+    assert not any("0x1022" in c for c in cmds)
+
+
+# --- the healthy-but-auto runtime-PM INFO nag (item 4) ------------------------
+
+
+def test_healthy_controller_on_auto_pm_nags_with_info(tmp_path):
+    findings = healthy_analyze(
+        tmp_path, power_control={"0000:c3:00.3": "auto"})
+    infos = [f for f in findings if f.severity == "info"]
+    assert len(infos) == 1
+    assert "0000:c3:00.3" in infos[0].title and "auto" in infos[0].title
+    assert prevention_runtime_command("0000:c3:00.3") in infos[0].fix
+    assert any("<VENDOR>" in line for line in infos[0].fix)
+    assert not any("0x1022" in line for line in infos[0].fix)
+
+
+def test_applied_prevention_is_silent(tmp_path):
+    """'on' means the operator applied the pin — no nag."""
+    assert healthy_analyze(
+        tmp_path, power_control={"0000:c3:00.3": "on"}) == []
+
+
+def test_missing_or_unknown_pm_fact_is_silent(tmp_path):
+    """Fail-silent: an unreadable sysfs (container, permissions, non-Linux)
+    must produce no finding, never a false one."""
+    assert healthy_analyze(tmp_path) == []                     # None default
+    assert healthy_analyze(tmp_path, power_control={}) == []
+    assert healthy_analyze(
+        tmp_path, power_control={"0000:ff:00.0": "auto"}) == []  # unknown BDF
+
+
+def test_pm_nag_names_only_the_auto_controllers(tmp_path):
+    mixed = {"0000:c3:00.3": "auto", "0000:c3:00.4": "on"}
+    findings = healthy_analyze(tmp_path, power_control=mixed)
+    infos = [f for f in findings if f.severity == "info"]
+    assert len(infos) == 1
+    assert "0000:c3:00.3" in infos[0].title
+    assert "0000:c3:00.4" not in infos[0].title
+
+
+def test_dead_controller_owns_prevention_no_info(tmp_path):
+    """A dead controller already carries the full ladder (prevention
+    included) in its error's fix — the INFO must not duplicate it."""
+    findings = analyze(
+        DEAD_CONTROLLER_LOG, BUS_BDF,
+        udev_rules=str(tmp_path / "present.rules"),
+        modemmanager_active=False, opticon_ignore_rule=False,
+        brltty_active=False,
+        modules_root=write_modules(str(tmp_path / "modules")), modules=MODULES,
+        power_control={"0000:c3:00.3": "auto"})
+    assert not [f for f in findings if f.severity == "info"]
+    dead = next(f for f in findings if "is dead" in f.title)
+    assert any("power/control" in line for line in dead.fix)
+
+
+def test_gather_power_control_reads_an_injected_sysfs(tmp_path):
+    """The gather_bus_bdf convention: a default-argument root, so the
+    sysfs read is testable offline against a tmp_path fake tree."""
+    for bdf, mode in (("0000:c3:00.3", "auto\n"), ("0000:c5:00.4", "on\n")):
+        node = tmp_path / bdf / "power"
+        node.mkdir(parents=True)
+        (node / "control").write_text(mode)
+    out = gather_power_control(["0000:c3:00.3", "0000:c5:00.4"],
+                               root=str(tmp_path))
+    assert out == {"0000:c3:00.3": "auto", "0000:c5:00.4": "on"}
+    # fail-silent per bdf: a missing node is omitted, never guessed
+    assert gather_power_control(["0000:ff:00.0"], root=str(tmp_path)) == {}
 
 
 def test_gather_dmesg_must_use_plain_dmesg(monkeypatch):
