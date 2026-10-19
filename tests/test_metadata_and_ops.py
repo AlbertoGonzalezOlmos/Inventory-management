@@ -178,12 +178,19 @@ def test_repo_hygiene():
 
     # The agent coordination lock files (agent_note.py creates <file>.lock
     # beside its .md targets) must stay untracked — and the rule must stay
-    # SCOPED: a blanket *.lock would silently untrack uv.lock/poetry.lock,
-    # which the .gitignore's own UV/notes section keeps committable.
-    assert _git("check-ignore", "-q",
+    # SCOPED. --no-index on all three: git check-ignore consults the index
+    # by default, and uv.lock IS tracked, so without --no-index the
+    # assertion passes under ANY rule (measured: `*.lock` still reports
+    # "not ignored" for a tracked path) — a vacuous pin. --no-index tests
+    # the RULES, which is what "scoped on purpose" means.
+    assert _git("check-ignore", "-q", "--no-index",
                 "SCANNER-AGENT-SYNC.md.lock").returncode == 0
-    assert _git("check-ignore", "-q", "notes.md.lock").returncode == 0
-    assert _git("check-ignore", "-q", "uv.lock").returncode != 0
+    assert _git("check-ignore", "-q", "--no-index",
+                "notes.md.lock").returncode == 0
+    assert _git("check-ignore", "-q", "--no-index", "uv.lock").returncode != 0, (
+        "the lock rule must stay *.md.lock — a blanket *.lock would keep a "
+        "NEW lock file (poetry.lock, a regenerated uv.lock after a delete) "
+        "out of git status and out of `git add -A` forever")
 
 
 def test_shipped_artifacts_never_name_a_git_branch():

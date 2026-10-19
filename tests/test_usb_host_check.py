@@ -131,10 +131,36 @@ def test_recovery_commands_honest_order_and_prevention():
     """
     cmds = recovery_commands("0000:c3:00.3")
     text = "\n".join(cmds)
-    i = {key: text.index(key) for key in
-         ("unbind", "rescan", "/reset", "reboot", "power/control")}
-    assert i["unbind"] < i["rescan"] < i["/reset"] < i["reboot"] \
-        < i["power/control"], "the recovery ladder is out of order"
+
+    def step(pred, what):
+        """The ELEMENT index of one ladder step — not a substring index.
+
+        ``text.index(key)`` is fooled by the ladder's own comments, which
+        carry the same words: "rescan" first appears in the ``# 2. PCI-level
+        remove + rescan`` COMMENT, ``/reset`` first appears in the caveat's
+        ``cat …/reset_method``, and ``power/control`` also appears in the
+        permanent rule's ``ATTR{power/control}``. Mutation-probed: inserting
+        the reset COMMAND ahead of the remove+rescan command left every
+        substring index green, because the comments did not move.
+        """
+        hits = [i for i, c in enumerate(cmds) if pred(c)]
+        assert hits, f"the recovery ladder lost its {what} step"
+        return hits[0]
+
+    i_unbind = step(lambda c: "xhci_hcd/unbind" in c, "unbind/bind")
+    i_remove = step(lambda c: c.startswith("echo 1 |") and "/remove" in c,
+                    "PCI remove + rescan")
+    i_reset = step(lambda c: c.endswith("/reset"), "function reset")
+    i_reboot = step(lambda c: "reboot" in c, "reboot")
+    # The RUNTIME prevention command, matched by its own form: the
+    # permanent rule's ATTR{power/control}="on" also contains the substring
+    # "power/control", so deleting `echo on | …/power/control` alone once
+    # left every assert green (mutation-probed).
+    i_prevent = step(lambda c: c.startswith("echo on |"),
+                     "runtime power/control=on prevention")
+    i_permanent = step(lambda c: "<VENDOR>" in c, "permanent udev rule")
+    assert i_unbind < i_remove < i_reset < i_reboot < i_prevent < i_permanent, (
+        "the recovery ladder is out of order")
     assert "remove" in text and "<VENDOR>" in text
     # every emitted command references the bdf or is global/prevention
     assert not any("0x1022" in c for c in cmds), (
