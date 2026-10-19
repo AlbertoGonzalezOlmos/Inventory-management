@@ -242,21 +242,28 @@ def test_shipped_files_cite_only_in_tree_paths():
     bare directory mentions (no extension). Measured on this tree: 73
     distinct citations, 0 accidental matches, 1 deliberate allowlist entry.
 
-    Exemptions, reusing test_shipped_artifacts_never_name_a_git_branch's
-    exact sets (same rationale — process notes talk about the work,
-    including paths that were renamed or never landed): docs/plans/** (the
-    archive cites never-implemented filenames and contains a typo — its
-    dirname match is EXACT, so a docs/plans/sub/ would NOT be exempt; the
-    archive must stay flat) and basenames PLAN*/REVIEW*/NOTES*. Measured
-    cost of the basename exemption: zero — no unresolved citation is cited
-    only by those files.
+    Exemptions (process notes talk about the work, including paths that
+    were renamed or never landed): docs/plans/** (the archive cites
+    never-implemented filenames and contains a typo — its dirname match is
+    EXACT, so a docs/plans/sub/ would NOT be exempt; the archive must stay
+    flat) and basenames PLAN*/REVIEW*. NOTES.md is deliberately NOT exempt
+    (see the comment at the exemption set): it is shipped documentation,
+    and the defect class was born there. PLAN*/REVIEW* stay exempt per
+    test_shipped_artifacts_never_name_a_git_branch's rationale.
     """
     if not _in_git_checkout():
         pytest.skip("not a git checkout")
     tracked = _git("ls-files").stdout.splitlines()
     assert tracked, "git ls-files returned nothing"
     in_git = set(tracked)
-    exempt_prefixes = ("PLAN", "REVIEW", "NOTES")
+    # PLAN*/REVIEW* are process notes (they talk about the work, including
+    # paths that were renamed or never landed). NOTES.md is NOT in the set,
+    # deliberately: it is shipped operator-facing documentation, and the
+    # M-10 defect this pin exists to catch lived THERE (NOTES.md cited
+    # docs/plans/r4-checklist.md while it was untracked) — exempting it
+    # would blind the pin to a recurrence in its birthplace. Verified
+    # zero-cost: every citation NOTES.md carries today resolves.
+    exempt_prefixes = ("PLAN", "REVIEW")
     exempt_dirs = ("docs/plans",)
     text_exts = (".py", ".md", ".sh", ".rules", ".service", ".css", ".html",
                  ".mjs", ".js", ".json", ".toml", ".yml")

@@ -238,6 +238,35 @@ def test_pm_nag_names_only_the_auto_controllers(tmp_path):
     assert "0000:c3:00.4" not in infos[0].title
 
 
+def test_pm_nag_is_one_aggregated_finding_with_one_permanent_rule(tmp_path):
+    """ONE finding for every affected controller, and the vendor-wide
+    permanent rule emitted exactly ONCE.
+
+    The 2026-10-10 host has FOUR ``auto`` controllers, so a per-BDF finding
+    would print four copies of a rule that is not per-BDF (``ATTR{vendor}``
+    matches every controller of that vendor). The runtime pin IS per-BDF,
+    because it writes a per-BDF sysfs node. This also pins the dedupe:
+    ``BUS_BDF`` maps two buses to each controller, and a controller must be
+    named once, not once per bus. Mutation-probed: emitting one finding per
+    BDF left every other test green, because each of them feeds a single
+    ``auto`` BDF — aggregation was the one unpinned decision here.
+    """
+    findings = healthy_analyze(
+        tmp_path, power_control={"0000:c3:00.3": "auto",
+                                 "0000:c3:00.4": "auto"})
+    infos = [f for f in findings if f.severity == "info"]
+    assert len(infos) == 1, "the nag must aggregate, not repeat per controller"
+    title = infos[0].title
+    assert "2 xHCI controller(s)" in title
+    assert title.count("0000:c3:00.3") == 1, "two buses, one mention"
+    assert title.count("0000:c3:00.4") == 1, "two buses, one mention"
+    for bdf in ("0000:c3:00.3", "0000:c3:00.4"):
+        assert prevention_runtime_command(bdf) in infos[0].fix
+    rule = [line for line in infos[0].fix
+            if "98-usb-controller-nosuspend" in line]
+    assert len(rule) == 1, f"the vendor-wide rule must appear once: {rule}"
+
+
 def test_dead_controller_owns_prevention_no_info(tmp_path):
     """A dead controller already carries the full ladder (prevention
     included) in its error's fix — the INFO must not duplicate it."""
