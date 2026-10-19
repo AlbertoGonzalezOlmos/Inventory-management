@@ -193,6 +193,41 @@ def test_repo_hygiene():
         "out of git status and out of `git add -A` forever")
 
 
+#: Vendored third-party assets: rewriting an upstream minified bundle to
+#: satisfy a style pin is a worse diff than the missing byte. A future
+#: vendored asset OUTSIDE this prefix needs the list extended.
+NEWLINE_EXEMPT_DIRS = ("static/vendor/",)
+
+
+def test_text_files_end_with_exactly_one_newline():
+    """Every tracked text file terminates with exactly one ``\n``.
+
+    A missing final newline is invisible until it is not: every later diff
+    of the last line carries ``\ No newline at end of file``, and ``cat``
+    concatenation mangles the file. Empty files are exempt (nothing to
+    terminate — which also makes the two empty ``app/__init__.py`` cases
+    natural, not special); vendored assets are exempt (we do not edit
+    upstream bytes). Exactly ONE: a doubled trailing blank is the same
+    class of drift in the other direction, and measured 0 files today.
+    """
+    if not _in_git_checkout():
+        pytest.skip("not a git checkout")
+    tracked = _git("ls-files").stdout.splitlines()
+    assert tracked, "git ls-files returned nothing"
+    exts = (".py", ".md", ".sh", ".rules", ".service", ".css", ".html",
+            ".mjs", ".js", ".json", ".toml", ".yml")
+    offenders = []
+    for path in tracked:
+        if not path.endswith(exts) or path.startswith(NEWLINE_EXEMPT_DIRS):
+            continue
+        data = open(os.path.join(REPO_ROOT, path), "rb").read()
+        if not data:                       # empty: nothing to terminate
+            continue
+        if not data.endswith(b"\n") or data.endswith(b"\n\n"):
+            offenders.append(path)
+    assert not offenders, f"fix the EOF newline (exactly one): {offenders}"
+
+
 def test_shipped_artifacts_never_name_a_git_branch():
     """A shipped file must point at in-tree paths, not at unmerged branches.
 
