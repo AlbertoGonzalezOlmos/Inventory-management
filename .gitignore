@@ -222,3 +222,14 @@ __marimo__/
 # fixture DB must not be silently untracked (PLAN-v2 W1.2, review R4).
 /data/
 /fastembed_cache/
+
+# HCRM agent scratch: the flock(2) lock files scripts/agent_note.py
+# creates beside its shared coordination files (SCANNER-AGENT-SYNC.md.lock
+# etc.) — recreated on every append, zero information. Scoped on purpose —
+# NOT *.lock: an ignore rule never untracks a file that is already tracked
+# (uv.lock is), but a blanket rule would keep every FUTURE lock file
+# (poetry.lock, a regenerated uv.lock) out of `git status` and out of
+# `git add -A` forever, silently. Pinned with `git check-ignore --no-index`
+# in tests/test_metadata_and_ops.py — without --no-index the pin is
+# vacuous, because check-ignore reports a TRACKED path as not-ignored.
+*.md.lock

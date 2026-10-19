@@ -1,6 +1,8 @@
-# Opticon scanners on this host — personalities, connection, permissions
+# Opticon scanners — personalities, connection, permissions
 
-The repository talks to Opticon barcode scanners. One vendor ID, several
+The repository talks to Opticon barcode scanners on two dev machines (a
+native Ubuntu ThinkPad — the primary host — and a WSL2 laptop; §2 keeps
+their facts separate). One vendor ID, several
 **personalities**: the same physical family can present itself as a vendor
 serial device, as a CDC-ACM virtual COM port, or as a USB-HID keyboard, and
 each presentation needs a different transport, a different reception tool and
@@ -77,15 +79,60 @@ settings and interpreting binary protocol bytes as "barcodes".
 
 ## 2. Getting the device to the OS
 
-### Linux (native)
+Two dev machines, two different stories — a claim below is only true for
+the machine it names:
+
+* the **primary host** is a native Ubuntu ThinkPad (2026-10-10 survey:
+  `grep -qi microsoft /proc/version` fails — not WSL; no usbipd layer, the
+  kernel builds every Opticon module, and `opticon_detect.py`'s "usbipd:
+  nothing attached" path is unreachable);
+* the **second machine** is a WSL2 laptop (Windows 11 + usbipd), surveyed
+  2026-09-29 — its three-layer material is scoped below, unchanged.
+
+### Linux (native) — the primary host
 
 * Serial personalities bind a kernel driver: `065A:0009` → the in-kernel
   `opticon` usb-serial driver → `/dev/ttyUSB*`; `065A:A002` → `cdc_acm` →
-  `/dev/ttyACM*`. If the device enumerates but no node appears, the module is
-  missing or unloaded (`sudo modprobe opticon`; check `dmesg`).
+  `/dev/ttyACM*` (all present on disk here: `CONFIG_HIDRAW=y`,
+  `CONFIG_USB_ACM=m`, `CONFIG_USB_SERIAL_OPTICON=m`). If the device
+  enumerates but no node appears, the module is missing or unloaded
+  (`sudo modprobe opticon`; check `dmesg`).
 * The HID personality needs `CONFIG_HIDRAW` (set in stock distro kernels) →
   `/dev/hidraw*`.
-* Nodes are root-owned by default → §4.
+* Nodes are root-owned by default → §4 — and on this host that is NOT
+  rescued by the seat: see §4 for the corrected mechanism.
+
+**The native-host failure mode the WSL2 framing cannot even express: a
+dead USB host controller.** When an xHCI controller dies (journal markers:
+`xHC is not running`, `Port resume timed out`, `xHCI host not responding,
+assume dead`, `HC died; cleaning up` — typically after a suspend/resume),
+the kernel keeps the controller's *root hubs* registered, so `lsusb` and
+`opticon_detect.py` still list the bus and report "nothing attached" —
+while every physical port on that controller is dead: **re-plugging
+produces no kernel event at all**, which looks exactly like a charge-only
+cable or a dead scanner. Measured on this host, 2026-10-10: controller
+`0000:c3:00.3` (the two external USB-A jacks) died on a runtime-PM resume;
+the USB-C jacks (`c5:00.3` / `c5:00.4`) stayed alive — the port→controller
+map (`readlink /sys/bus/usb/devices/usbN`) is how you tell which physical
+jacks a dead BDF means.
+
+```bash
+uv run python scripts/usb_host_check.py    # the detector: dead xHC, MM/brltty, udev, modules
+```
+
+Its recovery ladder (unbind/bind → PCI remove + rescan → the *caveated*
+reset — `reset_method` here is `pm`, no FLR, and a PM reset rarely revives
+a declared-dead controller → reboot) and the runtime-PM prevention
+(`power/control=on` — still `auto` on this host, so expect a repeat on a
+future suspend) are emitted by the tool itself; the command-for-command
+evidence and the resolution are
+`docs/m10-unreachable-2026-10-10.md` §1–§4 (the controller was revived
+**without a reboot** by PCI remove + rescan).
+
+> **`dmesg -T` is skewed ~+7 days on this host** (suspend clock drift) —
+> diagnose from `dmesg` (monotonic timestamps) or the journal, never
+> `dmesg -T`. `usb_host_check.py` uses plain `dmesg` for exactly this
+> reason (regression-pinned).
 
 ### Windows
 
@@ -101,10 +148,10 @@ personality does work through `hidapi`:
 `uv run --with hid python scripts/scanner_hid.py`. For the serial
 personalities, use a Linux host/VM with USB passthrough.
 
-### WSL2 — three layers, and who handles each
+### WSL2 (the second dev machine) — three layers, and who handles each
 
-**This repository's dev machine is WSL2 (Ubuntu on Windows 11)**, so all
-three layers apply. Verified facts, 2026-09-29:
+**The project's other dev machine is WSL2 (Ubuntu on Windows 11)**, so all
+three layers apply *there*. Verified facts, 2026-09-29:
 
 1. **USB belongs to the Windows host.** WSL2 only sees a device after a
    `usbipd-win` passthrough. Installed here with
@@ -131,7 +178,7 @@ three layers apply. Verified facts, 2026-09-29:
 3. **Or skip WSL entirely**: install the driver on Windows (§2 Windows) and
    run the same tools there against `COMx`.
 
-**Device state log (this machine, 2026-09-29).** A USB device on root-hub
+**Device state log (the WSL2 dev machine, 2026-09-29).** A USB device on root-hub
 port **HS05** fails enumeration — Windows problem 43, *"Unknown USB Device
 (Device Descriptor Request Failed)"*, reported as `VID_0000&PID_0002` because
 its descriptor was never read. For an OPN-2001 that is the documented
@@ -185,10 +232,24 @@ device actually is.
 ## 4. Device-node permissions (one-time, needs sudo)
 
 `/dev/ttyUSB*`, `/dev/ttyACM*`, `/dev/hidraw*` and `/dev/bus/usb/*` are
-root-owned. On a desktop session `logind` grants the active user an ACL
-(`uaccess`) automatically — but **WSL sessions have no seat**, so that never
-fires, and the alternative (`usermod -aG dialout`) does not cover `hidraw` or
-`usbfs`. Hence one vendor-wide rule file:
+root-owned. The conclusion is the same on both machines — install the
+vendor-wide rule — but the *mechanism* differs (corrected 2026-10-10, the
+m10 diagnosis §6; an earlier revision wrongly claimed the missing-udev
+warning was a false positive on the native host):
+
+* **WSL2**: sessions have **no seat**, so `logind`'s `uaccess` ACL never
+  fires, and `usermod -aG dialout` does not cover `hidraw` or `usbfs`.
+* **Native Ubuntu**: `seat0` **does** exist with an active session — but
+  it still does not help, because stock Ubuntu tags **no generic `hidraw`
+  or `usbfs` node with `uaccess`** (the only stock hidraw uaccess line,
+  `70-uaccess.rules:89`, is gated on `ID_AV_PRODUCTION_CONTROLLER="1"`;
+  every other is vendor-pinned gamepad/VR/FIDO). `/dev/ttyACM0` *is*
+  covered separately (`root:dialout 0660`, and the user is in `dialout`);
+  `/dev/hidraw*` and `/dev/bus/usb/*` are not. Note `dialout` covers
+  `ttyACM`, never `hidraw` — "add yourself to dialout" cannot fix a
+  hidraw EACCES.
+
+Hence one vendor-wide rule file:
 
 ```bash
 sudo cp scripts/udev/99-opticon-scanner.rules /etc/udev/rules.d/
@@ -196,8 +257,9 @@ sudo udevadm control --reload-rules
 # then re-plug, or on WSL2: usbipd detach --busid <id> && usbipd attach --wsl --busid <id>
 ```
 
-It grants `plugdev` access to all three subsystems for VID `065a` — one file,
-one install step, every personality. `GROUP=plugdev` matches stock
+It grants `plugdev` access to the tty/hidraw/usb/input nodes for VID `065a`
+and carries the two ModemManager-ignore lines (§2's grabber check) — one
+file, one install step, every personality. `GROUP=plugdev` matches stock
 Ubuntu/Debian WSL images (the default user is already a member; verify with
 `id`); use `dialout` or `users` elsewhere.
 
@@ -207,11 +269,14 @@ Ubuntu/Debian WSL images (the default user is already a member; verify with
 
 | Symptom | Cause → fix |
 |---|---|
+| **Linux: plugged in, nothing at all — no kernel event, no node, the survey says "nothing attached"** | A **dead xHCI host controller** looks exactly like a charge-only cable (§2 native): the root hubs stay registered so the bus still lists. Run `scripts/usb_host_check.py` — it names the dead BDF, the buses, and the recovery ladder. Full evidence: `docs/m10-unreachable-2026-10-10.md`. |
+| Linux: ModemManager holds/AT-probes the new `/dev/ttyACM*` | Install the repo udev rule (§4 — it carries both MM-ignore forms) or `systemctl stop ModemManager` while scanning. |
+| Linux: timestamps look days off in `dmesg -T` | `dmesg -T` is suspend-skewed on this host (~+7 days, 2026-10-10) — diagnose from plain `dmesg` or the journal. |
 | Windows: **"Unknown USB Device (Device Descriptor Request Failed)"** (problem 43) | The device never enumerated — it is *not talking to the host at all*. Almost always power/cable: deeply-discharged battery (leave on the cable ≥ 30 min; steady red LED = charging) or a **charge-only cable** (swap for a known-good data cable). Re-plug; Windows re-enumerates automatically. |
 | WSL2: `usbipd attach` says no device / lost after reboot | `attach` is not persistent — re-run it. `usbipd list` shows STATE=Shared/Attached. |
 | WSL2: device attached but no `/dev/ttyUSB*` | The guest kernel lacks the driver for that personality (§2 layer 2). The HID personality is unaffected. |
 | Device enumerates but the survey reports no node | Missing kernel module, or a permission problem on the node — §4. |
-| `/dev/hidraw0` permission denied | Root-only node and no seat in WSL → install the udev rule (§4) or run with sudo once. |
+| `/dev/hidraw0` permission denied | Root-only node: on WSL no seat fires, on native no generic hidraw `uaccess` exists (§4) — either way, install the udev rule (§4) or run with sudo once. |
 | `Permission denied: '/dev/ttyUSB0'` | Your user is not in `dialout` (group membership or the udev rule, §4), then re-login. |
 | HID scans go to the wrong window | That is keyboard-wedge behaviour by design; use `scripts/scanner_hid.py`, which owns the stream (§3). |
 | Wrong device opened / garbage "barcodes" | Two Opticon personalities can be attached at once and their line settings differ (9600 **8O1** for `0009`, 9600 **8N1** for `A002`). Always select by VID:PID via `scripts/opticon_detect.py`, never by "first serial port". |
@@ -227,7 +292,11 @@ Ubuntu/Debian WSL images (the default user is already a member; verify with
 | M-10 USB-COM = CDC-ACM, VID `065A` PID `A002` | Opticon M-10 Specifications Manual SS13063 §18.5 (downloaded PDF) |
 | M-10 factory default = USB-HID mode; personality switched by configuration sheet | Opticon wiki, *M-10* page ("USB COM Port" / "USB Keyboard (HID)" / "RS232" sheets) |
 | `065A:0001` = OPR-2001 / NLV-1001 keyboard mode | Opticon documentation for those models |
-| `065A:A001` = *this machine's* HID-mode device | **Observed**, 2026-09-29, WSL2 + `usbipd-win` → `/dev/hidraw0`. Not in any public Opticon document we could find — see §1 |
-| WSL2 kernel lacks `CONFIG_USB_SERIAL_OPTICON`; `CONFIG_HIDRAW=y` | `/proc/config.gz` and the module directory on this machine, 2026-09-29 |
+| `065A:A001` = the **WSL2 dev machine's** HID-mode device | **Observed**, 2026-09-29, WSL2 + `usbipd-win` → `/dev/hidraw0`. Not in any public Opticon document we could find — see §1 |
+| `065A:A001` also observed on the native ThinkPad | **Observed**, 2026-10-10, `/dev/hidraw1`, `iProduct="Opticon USB Barcode Reader"`, HID personality — **still unconfirmed as an M-10** (the §1 hedge is unchanged; `opticon_detect.py` reports `confirmed: False`) |
+| Native ThinkPad: xHCI `0000:c3:00.3` died on a runtime-PM resume, revived by unbind/bind + PCI remove + rescan **without reboot**; `reset_method=pm` (no FLR); `power/control` still `auto` | `docs/m10-unreachable-2026-10-10.md` §1–§4/§8 (the dated diagnosis; the journal markers are quoted there) |
+| Stock Ubuntu (24.04) tags no generic hidraw/usbfs node with `uaccess`; `70-uaccess.rules:89` is gated on `ID_AV_PRODUCTION_CONTROLLER` | Read from `/usr/lib/udev/rules.d/` on the native host, 2026-10-10 (m10 diagnosis §5 #3–#4) |
+| `dmesg -T` suspend-skewed ~+7 days on the native host | Measured 2026-10-10; `usb_host_check.py`'s plain-`dmesg` requirement is regression-pinned (`test_gather_dmesg_must_use_plain_dmesg`) |
+| WSL2 kernel lacks `CONFIG_USB_SERIAL_OPTICON`; `CONFIG_HIDRAW=y` | `/proc/config.gz` and the module directory **on the WSL2 dev machine**, 2026-09-29 (the native host builds every Opticon module — `=m`, on disk) |
 | usbipd `bind` persists, `attach` does not | usbipd-win documentation (learn.microsoft.com) + observed here |
 | `files.opticonusa.com` / `wiki.opticonusa.com` serve a broken TLS chain | observed; use `curl -k` — the content itself is genuine |
