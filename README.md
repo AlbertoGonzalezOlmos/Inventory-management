@@ -117,6 +117,61 @@ that adds SIMD-accelerated vector search:
   that, switch to the extension's quantized ANN scans (`vector_quantize` +
   `vector_quantize_scan`), which can be wired in without schema changes
 
+## Biogan supplier catalogue: crawl → import → serve
+
+The shop's own catalogue is refreshed from the supplier master CSV in three steps. Everything lives in
+`data/` — **git-ignored and never committed** (the CSV, `data/Catalogue-images/` and `data/hcrm.db`), so
+`git status` cannot show what a run changed. The crawler leaves a pre-first-run copy of the CSV
+(`data/Biogan - masterdata - Sheet.csv.bak`, written only when absent) to diff the CSV against; the database
+has no such copy, so take one first (`scripts/backup_db.sh`) if you need to compare before/after.
+
+```bash
+# 1. crawl: resolve one photo per SKU, download it, fill the CSV's "URL to photo" column
+uv run python scripts/biogan_photos.py --report /tmp/crawl.json    # ~1 req/s, resumable, --dry-run safe
+# 2. import: idempotent upsert of the 240 supplier rows into the catalogue
+uv run python scripts/import_biogan.py --report /tmp/import.json   # a second run is a no-op
+# 3. serve: the app already mounts GET /catalogue-images/<EAN>.<ext>
+uv run uvicorn app.main:app --port 8000
+```
+
+**Crawler** (`scripts/biogan_photos.py`, stdlib only): name search → exact `ProductID` → SKU-search rescue →
+flagged first result; it downloads the full-size `-p` image (`-t` fallback), magic-byte-checked, named
+`<EAN-13>.<ext>` in `data/Catalogue-images/`, and rewrites the CSV atomically after every row that fills a
+cell (EOL/EOF shape and file mode preserved, a BOM is tolerated but never written; a failed byte self-check
+aborts instead of writing). Options: `--limit`, `--only-sku`, `--size {p,t}`, `--no-download`, `--dry-run`
+(requests but no writes), `--force`, `--lock/--no-lock`, `--abort-after`, `--max-requests`. Exit codes: **0**
+every selected row ok/cached/downloaded/skipped · **1** at least one failing row **or** a row written on a
+flagged `first_result` match (the report lists both) · **2** lock held, breaker tripped, request budget
+exhausted or Ctrl-C · **3** usage or an unusable CSV.
+
+**Importer** (`scripts/import_biogan.py`): one transaction, upsert keyed on the exact `sku` string (`1709c` ≠
+`1709C`), CSV-verbatim names, `Sp3-Vejl.Pris` → `price_cents`, `EAN-nummer` → canonical GTIN-14 `barcode`
+(GS1-checked), `category="Biogan"`, `description=""`, and `stock` never reset on update (`--stock N` applies
+to creates only). A GTIN owned by another SKU refuses that row (a barcode is never stolen), and a blank or
+invalid supplier EAN never clears a stored barcode. `image_url` prefers the local
+`/catalogue-images/<EAN>.<ext>`, falls back to the CSV's remote photo URL (a `-p` URL for every row the
+current crawl filled), else `""`. Options: `--no-update`,
+`--dry-run` (no DDL, no commit), `--prune-demo` (removes only the 12 seeded `EX-*` demo items and their cart
+lines), `--crawl-report` (advisory provenance), `--category`, `--stock`, `--db`. Exit codes: **0** clean,
+including rows with no photo and deferred embeddings · **1** rows refused (GTIN conflict / bad price) while
+the rest commit · **2** unexpected error, whole run rolled back · **3** usage/precondition.
+
+**Photos**: `GET /catalogue-images/{name}` serves `data/Catalogue-images/` through an allowlist
+(`<13-digit EAN>.<jpg|jpeg|png|webp>` plus a magic-byte check), answers one uniform 404 for everything else
+(traversal, NUL, `.bak`/`.lock`/`.part-*`, zero-byte or non-image content, missing dir), and sets
+`Cache-Control: public, max-age=3600`. It is **unauthenticated by necessity** (an `<img>` cannot send a
+bearer), read-only, and never creates the directory. Root order: `$HCRM_CATALOGUE_IMAGES_DIR` →
+`$HCRM_DATA_DIR/Catalogue-images` → `<repo>/data/Catalogue-images`.
+
+**Known gaps**: 14 supplier SKUs have **no photo on the site**, so their `URL to photo` cell and DB
+`image_url` stay empty — `1327, 1709c, 1717B, 1773, 1842, 1989, 2223A, 2401, 2962, 2974, 4219, 4270, 4472,
+6700` (the crawler reports them as `no_result`; nothing is invented). Prices are stored as the supplier's DKK
+amounts while `static/app.js` still formats them as EUR — a display-only follow-up, deliberately not changed
+here. If the embedding model is unavailable the importer defers a row rather than writing text without a
+vector (the API enforces the same rule), so boot the app once (or run `uv run python -c "from app.embeddings
+import warm_up; warm_up()"`) before the first import; `app/seed.py::backfill_embeddings()` repairs any NULL
+embedding at boot.
+
 ## Features
 
 ### Catalogue (members)
@@ -289,6 +344,7 @@ that adds SIMD-accelerated vector search:
 │   └── routers/
 │       ├── auth.py       # /api/auth/*      register, login, QR badge, logout, me
 │       ├── items.py      # /api/items/*     browse, vector-search, input
+│       ├── media.py      # /catalogue-images/<EAN>.<ext>  validated supplier photos
 │       └── members.py    # /api/members/*   account management
 ├── static/               # Vue 3 SPA (index.html, app.js, style.css, vendored libs)
 ├── data/                 # SQLite database (runtime only — git-ignored)
@@ -322,7 +378,11 @@ that adds SIMD-accelerated vector search:
 │   │                     # Chrome and fails on console errors / missing DOM
 │   ├── smoke_test.py     # end-to-end API test (self-hosts by default)
 │   ├── load_test.py      # availability check: concurrent logins must not lock the DB
-│   └── scanner_bridge.py # Opticon M-10 → catalogue lookup / stock bridge
+│   ├── scanner_bridge.py # Opticon M-10 → catalogue lookup / stock bridge
+│   ├── _biogan.py        # supplier-CSV helpers: byte-faithful read/write, price,
+│   │                     # GTIN, image sniffing, result-page parser
+│   ├── biogan_photos.py  # supplier crawl: photo per SKU → CSV column + images dir
+│   └── import_biogan.py  # supplier CSV → catalogue (idempotent, sku-keyed upsert)
 ├── tests/                # pytest suite (per-test fresh DB, fake embeddings)
 └── pyproject.toml        # uv-managed dependencies
 ```
@@ -525,6 +585,7 @@ touching `./data`).
 | **Refunds / voids / receipt re-issue** | Checkout exists (`POST /api/orders`: snapshots, clamp-and-report stock, immutable receipts); what remains open is the after-sale: refunds, voiding an order, re-sending a receipt. |
 | **`PRAGMA foreign_keys` is OFF** | `auth_tokens.user_id` is declarative only; enforcing it needs a table rebuild. The only user-deleting path removes tokens first. |
 | **Quantized ANN scans** (`vector_quantize`) | Exact `vector_full_scan` is comfortable to ~100k items; see the measurements above. |
+| **Supplier prices displayed as EUR** | The Biogan catalogue is priced in DKK (`price_cents` holds the supplier amount) but `static/app.js` formats every price with the EUR symbol. Display-only; changing it would touch all price rendering, so it is a separate, deliberate change. |
 
 ## Next steps (barebones placeholders)
 
