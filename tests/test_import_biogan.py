@@ -335,7 +335,8 @@ def test_report_path_refusals_and_db_mismatch(tmp_path):
     csv_path = write_csv(tmp_path / "master.csv", [supplier("A", ean=ean13(150))])
     bad_paths = [csv_path, csv_path.with_name(csv_path.name + ".bak"),
                  csv_path.with_name(csv_path.name + ".lock"),
-                 tmp_path / "report.txt", tmp_path / "import.db"]
+                 tmp_path / "report.txt", tmp_path / "import.db",
+                 tmp_path / "images" / "r.json"]  # inside the images dir
     for path in bad_paths:
         assert invoke(tmp_path, engine, [], "--report", str(path)) == 3
     assert not (tmp_path / "import.db").exists()
@@ -362,3 +363,31 @@ def test_crawl_report_provenance_and_expected_missing(tmp_path):
     bad = tmp_path / "bad-crawl.json"
     bad.write_text('{"hits": "not-a-list"}', encoding="utf-8")
     assert invoke(tmp_path, engine, [], "--crawl-report", str(bad)) == 3
+
+
+def test_blank_or_invalid_supplier_ean_never_clears_a_stored_barcode(tmp_path):
+    """A row that states no usable EAN must not destroy the GTIN we know.
+
+    D7's "never destroy knowledge": a blank cell, or a typo'd check digit, says
+    nothing about the product's barcode, so the stored GTIN stays. Deliberate
+    removal is an API action (ItemPatch's ""-clears convention), never a side
+    effect of a supplier refresh.
+    """
+    engine = make_engine(tmp_path)
+    good = ean13(170)
+    assert invoke(tmp_path, engine, [supplier("KEEP", "Name", ean=good)]) == 0
+    stored = items(engine)[0].barcode
+    assert stored == "0" + good
+
+    for stated in ("", "4260563290219"):  # blank cell, then a bad check digit
+        assert invoke(tmp_path, engine, [supplier("KEEP", "Name", ean=stated)],
+                      "--report", str(tmp_path / "report.json")) == 0
+        assert items(engine)[0].barcode == stored
+        row = report_at(tmp_path)["rows"][1]
+        assert row["action"] == "unchanged"
+        assert "barcode_kept" in row["review"]
+
+    # positive control: a different *valid* EAN still replaces the stored one
+    other = ean13(171)
+    assert invoke(tmp_path, engine, [supplier("KEEP", "Name", ean=other)]) == 0
+    assert items(engine)[0].barcode == "0" + other

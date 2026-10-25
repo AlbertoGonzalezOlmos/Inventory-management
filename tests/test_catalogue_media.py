@@ -19,6 +19,9 @@ Load-bearing details pinned here:
 All tests run offline against tmp dirs; nothing depends on real ``data/``.
 """
 
+import builtins
+import os
+
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from starlette.routing import Mount
@@ -186,6 +189,35 @@ def test_symlink_escaping_root_404(monkeypatch, tmp_path):
     r = client.get(f"/catalogue-images/{EAN}.jpg")
     assert r.status_code == 404
     assert MARKER not in r.content
+
+
+def test_unreadable_file_is_the_uniform_404(monkeypatch, tmp_path):
+    """A legal, existing image that cannot be read is a 404, never a 500.
+
+    Any OSError on the header read (EACCES, EIO) must not turn an <img>
+    request into a 500: §A.3 pins ONE uniform 404 for every failure class.
+    """
+    _use_root(monkeypatch, tmp_path)
+    _put(tmp_path, f"{EAN}.jpg")
+
+    def unreadable(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(media, "open", unreadable, raising=False)
+    _assert_uniform_404(client.get(f"/catalogue-images/{EAN}.jpg"))
+
+
+def test_vanishing_file_is_the_uniform_404(monkeypatch, tmp_path):
+    """A file removed between the stat and the header read is also a 404."""
+    _use_root(monkeypatch, tmp_path)
+    _put(tmp_path, f"{EAN}.jpg")
+
+    def vanish(path, *args, **kwargs):
+        os.unlink(path)  # a re-crawl replacing/removing it mid-request
+        return builtins.open(path, *args, **kwargs)
+
+    monkeypatch.setattr(media, "open", vanish, raising=False)
+    _assert_uniform_404(client.get(f"/catalogue-images/{EAN}.jpg"))
 
 
 # --- wiring: route before the catch-all static mount ------------------------

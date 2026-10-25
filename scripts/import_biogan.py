@@ -3,7 +3,8 @@
 
 The supplier CSV is read-only. SKU and name are exact strings (never casefolded,
 stripped, or passed through ``clean_name``), stock/description/created_at of an
-existing item are preserved, and all changes are applied in one transaction.
+existing item are preserved (and so is a stored barcode when the supplier row
+states none), and all changes are applied in one transaction.
 
 Unlike the crawler's input gate, this importer deliberately accepts blank EANs
 and case-distinct SKUs: section B requires ``barcode=None`` for blank/invalid
@@ -336,7 +337,14 @@ def _plan_row(session: Session, row: bio.Row, args, images_dir: Path,
         create_values = {"sku": row.sku, **values, "description": "", "stock": args.stock}
         return result, item, create_values, blob
 
-    changed = [field for field in _MANAGED_FIELDS if getattr(item, field) != values[field]]
+    changed = [field for field in _MANAGED_FIELDS
+               if not (field == "barcode" and values[field] is None)
+               and getattr(item, field) != values[field]]
+    if values["barcode"] is None and item.barcode:
+        # A blank or GS1-invalid supplier EAN states nothing about the product:
+        # never clear a stored GTIN (D7 "never destroy knowledge"). Deliberate
+        # removal stays an API action (ItemPatch's ""-clears convention).
+        result["review"].append("barcode_kept")
     result["changed"] = changed
     result["would_update"] = bool(changed)
     if args.no_update or not changed:

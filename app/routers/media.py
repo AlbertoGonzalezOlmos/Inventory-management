@@ -145,8 +145,13 @@ def catalogue_image(name: str, request: Request) -> Response:
         raise _not_found()  # missing dir or missing file — never a mkdir
     if not S_ISREG(st.st_mode) or st.st_size == 0:
         raise _not_found()
-    with open(real, "rb") as fh:
-        head = fh.read(_SNIFF_HEAD)
+    try:
+        with open(real, "rb") as fh:
+            head = fh.read(_SNIFF_HEAD)
+    except OSError:
+        # Unreadable file (EACCES/EIO), or it vanished between stat and open:
+        # still ONE uniform 404, never a 500 on an <img> request (§A.3).
+        raise _not_found()
     if _magic_ext(head) != _MAGIC_CLASS[suffix]:
         raise _not_found()  # non-magic / lying content (§A.7)
 
