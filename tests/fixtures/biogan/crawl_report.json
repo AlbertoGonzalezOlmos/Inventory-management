@@ -1,0 +1,42 @@
+{
+  "csv": "synthetic-masterdata.csv",
+  "requests": 6,
+  "counts": {
+    "downloaded": 2,
+    "no_result": 2
+  },
+  "hits": [
+    {
+      "rec_index": 2,
+      "sku": "10005",
+      "ean": "5901234123457",
+      "status": "downloaded",
+      "match_via": "exact_id",
+      "review": []
+    },
+    {
+      "rec_index": 3,
+      "sku": "1134",
+      "ean": "4006381333931",
+      "status": "cached",
+      "match_via": "prefilled",
+      "review": []
+    },
+    {
+      "rec_index": 4,
+      "sku": "1509b",
+      "ean": "4260563290218",
+      "status": "no_result",
+      "match_via": "",
+      "review": []
+    },
+    {
+      "rec_index": 5,
+      "sku": "1709c",
+      "ean": "5700000000017",
+      "status": "no_result",
+      "match_via": "",
+      "review": []
+    }
+  ]
+}
