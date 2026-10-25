@@ -121,8 +121,9 @@ that adds SIMD-accelerated vector search:
 
 The shop's own catalogue is refreshed from the supplier master CSV in three steps. Everything lives in
 `data/` — **git-ignored and never committed** (the CSV, `data/Catalogue-images/` and `data/hcrm.db`), so
-verify a run by diffing against the copy the crawler keeps (`data/Biogan - masterdata - Sheet.csv.bak`), not
-with `git status`.
+`git status` cannot show what a run changed. The crawler leaves a pre-first-run copy of the CSV
+(`data/Biogan - masterdata - Sheet.csv.bak`, written only when absent) to diff the CSV against; the database
+has no such copy, so take one first (`scripts/backup_db.sh`) if you need to compare before/after.
 
 ```bash
 # 1. crawl: resolve one photo per SKU, download it, fill the CSV's "URL to photo" column
@@ -135,19 +136,21 @@ uv run uvicorn app.main:app --port 8000
 
 **Crawler** (`scripts/biogan_photos.py`, stdlib only): name search → exact `ProductID` → SKU-search rescue →
 flagged first result; it downloads the full-size `-p` image (`-t` fallback), magic-byte-checked, named
-`<EAN-13>.<ext>` in `data/Catalogue-images/`, and rewrites the CSV atomically after every row (BOM/EOL/EOF
-shape and file mode preserved; a failed byte self-check aborts instead of writing). Options: `--limit`,
-`--only-sku`, `--size {p,t}`, `--no-download`, `--dry-run` (requests but no writes), `--force`,
-`--lock/--no-lock`, `--abort-after`, `--max-requests`. Exit codes: **0** every selected row
-ok/cached/downloaded/skipped · **1** at least one unresolved row (the report lists it) · **2** lock held,
-breaker tripped, request budget exhausted or Ctrl-C · **3** usage or an unusable CSV.
+`<EAN-13>.<ext>` in `data/Catalogue-images/`, and rewrites the CSV atomically after every row that fills a
+cell (EOL/EOF shape and file mode preserved, a BOM is tolerated but never written; a failed byte self-check
+aborts instead of writing). Options: `--limit`, `--only-sku`, `--size {p,t}`, `--no-download`, `--dry-run`
+(requests but no writes), `--force`, `--lock/--no-lock`, `--abort-after`, `--max-requests`. Exit codes: **0**
+every selected row ok/cached/downloaded/skipped · **1** at least one failing row **or** a row written on a
+flagged `first_result` match (the report lists both) · **2** lock held, breaker tripped, request budget
+exhausted or Ctrl-C · **3** usage or an unusable CSV.
 
 **Importer** (`scripts/import_biogan.py`): one transaction, upsert keyed on the exact `sku` string (`1709c` ≠
 `1709C`), CSV-verbatim names, `Sp3-Vejl.Pris` → `price_cents`, `EAN-nummer` → canonical GTIN-14 `barcode`
 (GS1-checked), `category="Biogan"`, `description=""`, and `stock` never reset on update (`--stock N` applies
 to creates only). A GTIN owned by another SKU refuses that row (a barcode is never stolen), and a blank or
 invalid supplier EAN never clears a stored barcode. `image_url` prefers the local
-`/catalogue-images/<EAN>.<ext>`, falls back to the CSV's remote `-p` URL, else `""`. Options: `--no-update`,
+`/catalogue-images/<EAN>.<ext>`, falls back to the CSV's remote photo URL (a `-p` URL for every row the
+current crawl filled), else `""`. Options: `--no-update`,
 `--dry-run` (no DDL, no commit), `--prune-demo` (removes only the 12 seeded `EX-*` demo items and their cart
 lines), `--crawl-report` (advisory provenance), `--category`, `--stock`, `--db`. Exit codes: **0** clean,
 including rows with no photo and deferred embeddings · **1** rows refused (GTIN conflict / bad price) while
