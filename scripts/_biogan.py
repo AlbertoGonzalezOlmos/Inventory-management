@@ -538,10 +538,14 @@ def parse_products(html_text: str) -> tuple[list[SiteProduct], bool]:
 
 def pick(products: list[SiteProduct], sku: str,
          name: str) -> tuple[SiteProduct | None, str]:
-    wanted = (sku or "").strip().casefold()
+    # G2: ProductID identity is exact (contract [C4]); casefolding here would
+    # accept the case-variant sibling (1134B for 1134b) as "exact_id" and write
+    # its photo with a fully-resolved status. F10's casefold stays in the
+    # duplicate-SKU check only.
+    wanted = (sku or "").strip()
     if wanted:
         for product in products:
-            if (product.product_id or "").strip().casefold() == wanted:
+            if (product.product_id or "").strip() == wanted:
                 return product, "exact_id"
     wanted_name = clean_name(name).casefold()
     if wanted_name:

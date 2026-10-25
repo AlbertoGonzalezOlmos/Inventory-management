@@ -62,6 +62,25 @@ def search_url(keyword: str) -> str:
     return f"{BASE}{bio.SEARCH_PATH}?keyword={quote_plus(keyword)}"
 
 
+def product_page(product_id: str, name: str, img: str) -> str:
+    """A one-product result page in the site's shape (for probe pages)."""
+    return ('<html><body><ul class="ProductList_Custom_UL"><li>'
+            f'<input type="hidden" name="ProductID" value="{product_id}">'
+            f'<div class="image"><img src="{img}"></div>'
+            f'<div class="name"><a href="/shop/{product_id}-p.html" '
+            f'title="{name}">{name}</a></div>'
+            f'<div class="productnumber">{product_id}</div>'
+            '<div class="price">10,00 DKK</div></li></ul></body></html>')
+
+
+def prefilled_csv(tmp_path: Path, cell: str) -> Path:
+    """The fixture CSV with row 1134's prefilled cell replaced by `cell`."""
+    csv_path = make_csv(tmp_path)
+    csv_path.write_bytes(csv_path.read_bytes().replace(PREFILLED.encode(),
+                                                       cell.encode()))
+    return csv_path
+
+
 def image_url(path: str, *, big: bool = True) -> str:
     thumb = bio.canonical_image_url(path, BASE + bio.SEARCH_PATH)
     return bio.big_variant(thumb) if big else thumb
@@ -74,6 +93,8 @@ T_10005 = image_url("/images/10005 Mosaik flaske-t.jpg", big=False)
 P_1509B = image_url("/images/1509b_300ppi-t.png")
 P_1134 = image_url("/images/produktbilleder/1134_web-t.jpg")
 PREFILLED = "https://shop.biogan.dk/images/produktbilleder/1134_web-p.jpg"
+# the -t sibling of the prefilled cell (same host as the cell, not BASE)
+PREFILLED_T = "https://shop.biogan.dk/images/produktbilleder/1134_web-t.jpg"
 
 
 class FakeResponse:
@@ -805,3 +826,140 @@ def test_f14_cli_on_real_shape_changes_only_photo_cells(tmp_path):
     # prefilled 1134 row are byte-identical
     assert [i for i, (x, y) in enumerate(zip(a, b)) if x != y] == [2, 4]
     assert cell(csv_path, "1134") == PREFILLED           # prefilled cell kept
+
+
+# --------------------------------------------------------------------------- #
+# round-3 fixes (G1-G6, G11)
+# --------------------------------------------------------------------------- #
+
+def test_g1_report_path_cannot_overwrite_the_csv(tmp_path):
+    """G1: --report on the CSV/bak/lock, or a non-.json path, is usage error 3."""
+    csv_path = make_csv(tmp_path)
+    before = csv_path.read_bytes()
+    for bad in (csv_path, csv_path.with_name(csv_path.name + ".bak"),
+                csv_path.with_name(csv_path.name + ".lock"),
+                tmp_path / "report.txt"):
+        code, fake = run(tmp_path, {}, "--report", str(bad))
+        assert code == 3, bad
+        assert fake.calls == []
+    assert csv_path.read_bytes() == before          # the master CSV is intact
+    assert not (tmp_path / "report.txt").exists()
+    assert not csv_path.with_name(csv_path.name + ".bak").exists()
+
+
+def test_g2_case_variant_product_id_is_not_exact_id(tmp_path):
+    """G2: a '1509B' hit is never accepted as the identity of SKU '1509b'."""
+    csv_path = make_csv(tmp_path)
+    name_page = product_page("1134B", "Sibling Product", "/img/sib-t.jpg")
+    sku_page = product_page("1509B", "Sibling Product", "/img/case-t.jpg")
+    p_case = image_url("/img/case-t.jpg")
+    routes = {
+        search_url(NAME_1509B): (name_page, 200, "text/html"),
+        search_url("1509b"): (sku_page, 200, "text/html"),
+        p_case: (JPEG, 200, "image/jpeg"),
+    }
+    code, fake = run(tmp_path, routes, "--only-sku", "1509b", "--report",
+                     str(tmp_path / "report.json"))
+    assert len(fake.calls) == 3            # name search, SKU search, image
+    assert code == 1                       # flagged first_result, never resolved
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["match_via"] == "first_result"
+    assert hit["site_id"] == "1509B"       # the case variant, not an identity
+    assert "first_result flagged" in hit["review"]
+
+
+@pytest.mark.parametrize("extra", [["--size", "nope"], ["--no-such-flag"],
+                                   ["--csv"]])
+def test_g3_usage_errors_exit_3(tmp_path, extra):
+    """G3: argparse failures are exit 3, never the aborted code 2."""
+    make_csv(tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        run(tmp_path, {}, *extra)
+    assert excinfo.value.code == 3
+
+
+def test_g4_limit_window_sits_above_the_data_gates(tmp_path):
+    """G4: a bad-EAN row outside --limit must not report or change the exit."""
+    rows = [("90001", "Alpha One"), ("90002", "Beta Two")]
+    csv_path = make_row_csv(tmp_path, rows)
+    second_ean = ean13("570000000002")
+    csv_path.write_bytes(csv_path.read_bytes().replace(
+        second_ean.encode(), b"4260563290219"))     # invalid check digit
+    p_alpha = image_url("/img/alpha-t.jpg")
+    routes = {
+        search_url("Alpha One"): (product_page("90001", "Alpha One",
+                                               "/img/alpha-t.jpg"),
+                                  200, "text/html"),
+        p_alpha: (JPEG, 200, "image/jpeg"),
+    }
+    code, fake = run(tmp_path, routes, "--limit", "1", "--report",
+                     str(tmp_path / "report.json"), csv_path=csv_path)
+    assert code == 0
+    assert len(fake.calls) == 2
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert [h["sku"] for h in report["hits"]] == ["90001"]
+    assert report["skipped_by_limit"] == 1
+    assert cell(csv_path, "90001") == p_alpha
+
+
+def test_g5_failed_replace_keeps_the_previous_image(tmp_path, monkeypatch):
+    """G5: the stale other-ext image is only dropped after the replace lands."""
+    images = tmp_path / "images"
+    images.mkdir()
+    old = images / "5901234123457.png"
+    old.write_bytes(PNG)
+
+    def boom(_src, _dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mod.os, "replace", boom)
+    with pytest.raises(OSError):
+        mod._write_image(images, "5901234123457", JPEG, ".jpg")
+    assert old.read_bytes() == PNG               # the old photo survived
+    assert not (images / "5901234123457.jpg").exists()
+    assert not list(images.glob("*.part-*"))     # part file cleaned up
+
+
+def test_g6_prefilled_p_cell_falls_back_to_the_thumb(tmp_path):
+    """G6: a prefilled -p cell whose -p URL 404s still tries -t."""
+    csv_path = prefilled_csv(tmp_path, PREFILLED)
+    routes = {PREFILLED_T: (JPEG, 200, "image/jpeg")}   # PREFILLED -> 404
+    code, fake = run(tmp_path, routes, "--only-sku", "1134", "--report",
+                     str(tmp_path / "report.json"))
+    assert code == 0
+    assert fake.calls == [PREFILLED, PREFILLED_T]
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["variant"] == "t" and hit["detail"] == "p_missing_used_thumb"
+    assert cell(csv_path, "1134") == PREFILLED_T
+
+
+def test_g6_prefilled_t_cell_honours_size_p(tmp_path):
+    """G6: a -t cell re-downloaded with --size p asks for -p first."""
+    csv_path = prefilled_csv(tmp_path, PREFILLED_T)
+    routes = {PREFILLED: (JPEG, 200, "image/jpeg")}
+    code, fake = run(tmp_path, routes, "--only-sku", "1134", "--size", "p",
+                     "--report", str(tmp_path / "report.json"))
+    assert code == 0
+    assert fake.calls == [PREFILLED]              # not the -t cell URL
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["variant"] == "p"
+    assert cell(csv_path, "1134") == PREFILLED
+
+
+def test_g6_prefilled_t_cell_falls_back_to_big(tmp_path):
+    """G6: a prefilled -t cell whose -t URL 404s still tries -p."""
+    csv_path = prefilled_csv(tmp_path, PREFILLED_T)
+    routes = {PREFILLED: (JPEG, 200, "image/jpeg")}     # -t -> 404
+    code, fake = run(tmp_path, routes, "--only-sku", "1134", "--size", "t",
+                     "--report", str(tmp_path / "report.json"))
+    assert code == 0
+    assert fake.calls == [PREFILLED_T, PREFILLED]
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["variant"] == "p" and hit["detail"] == "t_missing_used_p"
+    assert cell(csv_path, "1134") == PREFILLED
+
+
+def test_g11_max_image_bytes_is_assigned_once():
+    """G11: the duplicated max_image_bytes assignment is gone."""
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    assert src.count("max_image_bytes = args.max_bytes") == 1

@@ -369,3 +369,23 @@ def test_f14_bom_fixture_is_tolerated_and_dropped(tmp_path):
     out = path.read_bytes()
     assert not out.startswith(b"\xef\xbb\xbf")
     assert out.endswith(b"\n") and b"\r" not in out
+
+
+def test_g2_case_variant_product_id_is_not_an_exact_match():
+    """G2: ProductID identity is exact; a case-variant sibling is not exact_id."""
+
+    def product(pid: str) -> bio.SiteProduct:
+        return bio.SiteProduct(product_id=pid, number=pid, name=f"Name {pid}",
+                               href="", images=("/x-t.jpg",), price_text="1")
+
+    products = [product("1134B"), product("1134b")]
+    # the exact-case product wins even though the case-variant comes first
+    chosen, via = bio.pick(products, "1134b", "no such name")
+    assert via == "exact_id" and chosen.product_id == "1134b"
+    # a lone case-variant sibling is never an exact match
+    alone = [product("1134B")]
+    chosen, via = bio.pick(alone, "1134b", "no such name")
+    assert via == "first_result" and chosen.product_id == "1134B"
+    # surrounding whitespace is still tolerated, case is not
+    assert bio.pick(alone, "  1134b  ", "no such name")[1] == "first_result"
+    assert bio.pick(alone, "  1134B  ", "no such name")[1] == "exact_id"

@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -269,11 +269,13 @@ class Fetcher:
 
 
 def _exact(products: list[bio.SiteProduct], sku: str) -> bio.SiteProduct | None:
-    wanted = (sku or "").strip().casefold()
+    # G2: exact ProductID equality, no casefolding — a case-variant sibling is
+    # a different product, so it may only ever be a flagged first_result.
+    wanted = (sku or "").strip()
     if not wanted:
         return None
     for product in products:
-        if (product.product_id or "").strip().casefold() == wanted:
+        if (product.product_id or "").strip() == wanted:
             return product
     return None
 
@@ -385,14 +387,47 @@ def resolve(fetcher: Fetcher, row: bio.Row, *, size: str,
         return hit
 
 
-def _attempts(hit: Hit) -> list[tuple[str, str, str]]:
-    attempts = [(hit.photo_url, hit.variant, "")]
-    if hit.variant == "p" and hit.thumb_url and hit.thumb_url != hit.photo_url:
-        attempts.append((hit.thumb_url, "t", "p_missing_used_thumb"))
-    elif hit.variant == "t" and hit.photo_url:
-        big = bio.big_variant(hit.photo_url)
-        if big != hit.photo_url:
-            attempts.append((big, "p", "t_missing_used_p"))
+_SMALL_VARIANT_RE = re.compile(r"-p(\.[A-Za-z0-9]+)$", re.I)
+
+
+def _swap_to(url: str, size: str) -> str:
+    """`url` adjusted to the requested size when it carries a p/t suffix.
+
+    size "p" maps -t<ext> -> -p<ext>; size "t" maps -p<ext> -> -t<ext>. A URL
+    without the suffix (or already at the requested size) is returned as is, so
+    prefilled cells work here as well as resolved thumbs (G6).
+    """
+    if size == "p":
+        return bio.big_variant(url)
+    parts = urlsplit(url)
+    head, _, seg = parts.path.rpartition("/")
+    new_seg = _SMALL_VARIANT_RE.sub(r"-t\1", seg)
+    if new_seg == seg:
+        return url
+    path = f"{head}/{new_seg}" if head else new_seg
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query,
+                       parts.fragment))
+
+
+def _attempts(hit: Hit, size: str) -> list[tuple[str, str, str]]:
+    """(url, variant, detail) download attempts, first choice by `size`.
+
+    The base URL is `photo_url` (set for resolved hits and for prefilled cells
+    alike), so the first attempt honours --size and the second swaps -p/-t on
+    the actual URL once — prefilled `download_only` rows therefore get the same
+    404/not-an-image fallback as resolved ones (G6).
+    """
+    base = hit.photo_url or hit.thumb_url
+    if not base:
+        return []
+    first = _swap_to(base, size)
+    other = _swap_to(first, "t" if size == "p" else "p")
+    attempts = [(first, size, "")]
+    if other and other != first:
+        if size == "p":
+            attempts.append((other, "t", "p_missing_used_thumb"))
+        else:
+            attempts.append((other, "p", "t_missing_used_p"))
     return attempts
 
 
@@ -407,6 +442,9 @@ def _write_image(images_dir: Path, ean: str, body: bytes,
             fh.write(body)
             fh.flush()
             os.fsync(fh.fileno())
+        # G5: land the new image first; only then drop the stale siblings, so a
+        # failed replace can never leave the row with no image at all.
+        os.replace(tmp, dest)
         for stale in list(images_dir.glob(f"{ean}.*")):
             if stale != dest and stale.suffix.lower() in bio.IMAGE_EXTS:
                 stale.unlink(missing_ok=True)
@@ -414,7 +452,6 @@ def _write_image(images_dir: Path, ean: str, body: bytes,
             for stale in list(images_dir.glob(pattern)):
                 if stale != tmp:
                     stale.unlink(missing_ok=True)
-        os.replace(tmp, dest)
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -441,7 +478,7 @@ def download(fetcher: Fetcher, hit: Hit, images_dir: Path, *,
         return hit
 
     last_status, last_detail = "http_404", "404"
-    for url, variant, fallback_detail in _attempts(hit):
+    for url, variant, fallback_detail in _attempts(hit, size):
         try:
             body, ctype, etag = fetcher.get_bytes(url)
         except TooLarge:
@@ -583,10 +620,26 @@ class Lock:
             self._owned = False
 
 
-def _check_report_path(report: Path, images_dir: Path) -> None:
+def _check_report_path(report: Path, images_dir: Path,
+                       csv_path: Path | None = None) -> None:
     report, images = report.resolve(), images_dir.resolve()
     if report == images or images in report.parents:
         raise ValueError("report path must be outside the images directory")
+    # G1: a report is JSON; refusing other suffixes keeps a mistyped --report
+    # from landing on an unrelated file (e.g. the master CSV itself).
+    if report.suffix.lower() != ".json":
+        raise ValueError(f"report path must end in .json: {report}")
+    if csv_path is not None:
+        csv = Path(csv_path).resolve()
+        reserved = {csv, csv.with_name(csv.name + ".bak"),
+                    csv.with_name(csv.name + ".lock")}
+        if report in reserved:
+            # G1: writing the report over the CSV would destroy every row this
+            # run just crawled, and over the .bak would destroy the recovery
+            # copy. Both are usage errors (exit 3) before any work starts.
+            raise ValueError(
+                f"report path {report} would overwrite the master CSV, its "
+                "backup or its lock")
 
 
 def _account_breaker(fetcher: Fetcher, hit: Hit, abort_after: int) -> bool:
@@ -605,7 +658,8 @@ def _account_breaker(fetcher: Fetcher, hit: Hit, abort_after: int) -> bool:
 
 def write_report(path: Path, hits: list[Hit], meta: dict) -> None:
     path = Path(path)
-    _check_report_path(path, Path(meta["images_dir"]))
+    _check_report_path(path, Path(meta["images_dir"]),
+                       Path(meta["csv"]) if meta.get("csv") else None)
     payload = dict(meta)
     payload["hits"] = [asdict(h) for h in hits]
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
@@ -629,8 +683,21 @@ def summarise(hits: list[Hit], *, requests: int, elapsed: float) -> str:
             f"bytes={total} elapsed={elapsed:.1f}s")
 
 
+class _UsageParser(argparse.ArgumentParser):
+    """G3: CLI usage errors are exit 3, never argparse's default 2.
+
+    Exit 2 is the *aborted* code (lock/breaker/budget/interrupt), so a mistyped
+    flag must not be confusable with a real abort.
+    """
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        print(f"error: {message}", file=sys.stderr)
+        raise SystemExit(EXIT_USAGE)
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _UsageParser(description=__doc__)
     parser.add_argument("--csv", default=str(bio.default_csv_path()))
     parser.add_argument("--images-dir", default=str(bio.default_images_dir()))
     parser.add_argument("--base-url", default=bio.SITE_BASE)
@@ -686,7 +753,7 @@ def main(argv: list[str] | None = None, *, opener=None, sleep=None,
         return EXIT_USAGE
     if args.report:
         try:
-            _check_report_path(Path(args.report), images_dir)
+            _check_report_path(Path(args.report), images_dir, csv_path)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return EXIT_USAGE
@@ -718,10 +785,10 @@ def main(argv: list[str] | None = None, *, opener=None, sleep=None,
                       sleep=sleep or time.sleep, clock=clock or time.monotonic)
     fetcher.max_image_bytes = args.max_bytes
     fetcher.max_requests = args.max_requests  # F7: enforced before each request
-    fetcher.max_image_bytes = args.max_bytes
     hits: list[Hit] = []
     aborted = False
     work = 0
+    over_limit = 0
     lock: Lock | None = None
     try:
         if args.lock and not args.dry_run:
@@ -731,11 +798,25 @@ def main(argv: list[str] | None = None, *, opener=None, sleep=None,
             bio.backup_once(csv_path)
         for row in selected:
             try:
-                bio.ean_to_gtin14(row.ean)  # F2: before any filename/glob/request
+                gtin = bio.ean_to_gtin14(row.ean)  # F2: before any glob/request
+                ean_error = ""
             except ValueError as exc:
+                gtin, ean_error = "", str(exc)
+            existing = bio.find_image(images_dir, row.ean)[0] if gtin else None
+            state = row_state(row.photo, existing, force_resolve)
+            # G4: the --limit window sits above the data gates, so a row outside
+            # it is never validated-and-reported and can never decide the exit
+            # code; it is only counted in the report meta. F2 still holds: the
+            # EAN is validated before the glob, and a bad EAN skips the glob.
+            if state != "skip" and args.limit:
+                if work >= args.limit:
+                    over_limit += 1
+                    continue
+                work += 1
+            if ean_error:
                 hit = _hit(row)
                 hit.status = "bad_ean"
-                hit.detail = str(exc)
+                hit.detail = ean_error
                 hits.append(hit)
                 _account_breaker(fetcher, hit, args.abort_after)  # resets
                 if args.verbose and not args.quiet:
@@ -759,12 +840,6 @@ def main(argv: list[str] | None = None, *, opener=None, sleep=None,
                     if args.verbose and not args.quiet:
                         print(f"[bad_cell] {row.sku} {row.ean} {hit.detail}")
                     continue
-            existing = bio.find_image(images_dir, row.ean)[0] if row.ean else None
-            state = row_state(row.photo, existing, force_resolve)
-            if args.limit and state != "skip":
-                if work >= args.limit:
-                    break
-                work += 1
             if state == "skip":
                 hit = _hit(row)
                 hit.status = "skipped"
@@ -836,6 +911,8 @@ def main(argv: list[str] | None = None, *, opener=None, sleep=None,
                                "md.records[rec_index] addresses the row)"),
             "images_dir": str(images_dir), "requests": fetcher.requests,
             "counts": dict(Counter(h.status for h in hits)),
+            # G4: rows that needed work but fell outside the --limit window.
+            "skipped_by_limit": over_limit,
             # F11: the pinned vocabularies, so a consumer can validate the
             # report against FINAL-APPROACH-1.md.
             "status_vocabulary": sorted(STATUS_VOCABULARY),
