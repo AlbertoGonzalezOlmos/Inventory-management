@@ -694,14 +694,20 @@ def test_f11_report_meta_unresolved_and_vocabulary(tmp_path):
         assert hit["status"] in contract_statuses
         assert hit["match_via"] in contract_vias
         assert "first_result flagged" in hit["review"]
+    # G8: the top-level aggregates, with exact content
+    assert report["match_via"] == {"first_result": 1}
+    assert report["review"] == [
+        {"rec_index": 4, "sku": "1509b", "notes": ["first_result flagged"]}
+    ]
 
 
 def test_f12_pinned_api_surface():
     import inspect
     from html.parser import HTMLParser
     assert issubclass(bio.ProductListParser, HTMLParser)     # a real subclass
+    # G7: the complete pinned signature, not just its first two parameters
     params = list(inspect.signature(bio.sniff_image).parameters)
-    assert params[:2] == ["body", "content_type"]            # two positionals
+    assert params == ["body", "content_type"]
     assert bio.sniff_image(JPEG, "image/jpeg") == (".jpg", None)
     assert list(inspect.signature(mod.write_report).parameters) == [
         "path", "hits", "meta"]
@@ -709,6 +715,87 @@ def test_f12_pinned_api_surface():
     assert {"opener", "sleep", "clock"} <= set(main_params)
     assert all(main_params[k].kind is inspect.Parameter.KEYWORD_ONLY
                for k in ("opener", "sleep", "clock"))
+
+
+def test_g7_url_suffix_tier_is_the_callers_last_resort(tmp_path):
+    """G7: sniff_image is pinned to two parameters, so tier 3 (URL suffix)
+    lives in the caller. No magic and no Content-Type -> the suffix decides;
+    a markup body with no Content-Type is still refused (no blank check)."""
+    csv_path = make_csv(tmp_path)
+    unknown = b"NO-MAGIC-BYTES" + b"x" * 32     # not markup, >= 12 bytes
+    routes = {
+        search_url(NAME_10005): (read_fixture("search_10005.html"), 200, "text/html"),
+        P_10005: (unknown, 200, None),           # no Content-Type at all
+    }
+    code, _fake = run(tmp_path, routes, "--only-sku", "10005", "--report",
+                      str(tmp_path / "report.json"))
+    assert code == 0
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["status"] == "downloaded"
+    assert hit["detail"] == "no_magic"
+    assert (tmp_path / "images" / "5901234123457.jpg").read_bytes() == unknown
+
+    sub = tmp_path / "m2"
+    sub.mkdir()
+    make_csv(sub)
+    routes = {
+        search_url(NAME_10005): (read_fixture("search_10005.html"), 200, "text/html"),
+        P_10005: (HTML404, 200, None),            # markup, no Content-Type
+        T_10005: (HTML404, 200, None),
+    }
+    code, _fake = run(sub, routes, "--only-sku", "10005")
+    assert code == 1
+    assert not list((sub / "images").glob("*"))  # never written
+
+
+def test_g9_failed_pid_write_leaves_no_lock_file(tmp_path, monkeypatch):
+    """G9: if writing the pid payload fails after os.open created the file,
+    the pidfile is removed before the error propagates — no residue blocking
+    every later crawl until the grace window passes."""
+    lock_path = tmp_path / "m.csv.lock"
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full while writing the pidfile")
+
+    monkeypatch.setattr(mod.os, "fdopen", boom)
+    with pytest.raises(OSError, match="disk full"):
+        mod.Lock(lock_path).__enter__()
+    monkeypatch.undo()
+    assert not lock_path.exists()
+    with mod.Lock(lock_path):                     # the next acquisition works
+        assert lock_path.exists()
+    assert not lock_path.exists()
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory mode bits")
+def test_g10_lock_and_backup_oserror_is_usage_not_a_traceback(tmp_path):
+    """G10: a read-only CSV directory makes the lock open (or backup_once)
+    fail with OSError; that is a usage-class exit 3, never a traceback."""
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    csv_path = ro / "masterdata.csv"
+    csv_path.write_bytes((FIXTURES / "masterdata.csv").read_bytes())
+    images = tmp_path / "images"                 # writable, outside ro/
+    ro.chmod(0o555)
+    try:
+        fake = FakeOpener(clean_routes())
+        code = mod.main(["--csv", str(csv_path), "--images-dir", str(images),
+                         "--base-url", BASE, "--delay", "0",
+                         "--only-sku", "10005"],
+                        opener=fake, sleep=lambda _s: None)
+        assert code == 3                          # lock open fails: usage
+        assert fake.calls == []
+        assert not (ro / "masterdata.csv.lock").exists()
+        fake = FakeOpener(clean_routes())
+        code = mod.main(["--csv", str(csv_path), "--images-dir", str(images),
+                         "--base-url", BASE, "--delay", "0",
+                         "--only-sku", "10005", "--no-lock"],
+                        opener=fake, sleep=lambda _s: None)
+        assert code == 3                          # backup_once fails: usage
+        assert fake.calls == []
+    finally:
+        ro.chmod(0o755)
 
 
 def test_f13_dry_run_with_report_and_save_html_writes_nothing(tmp_path):

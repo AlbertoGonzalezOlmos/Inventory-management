@@ -495,7 +495,14 @@ def download(fetcher: Fetcher, hit: Hit, images_dir: Path, *,
             # row is still flushed before main() aborts with exit 2.
             hit.status, hit.detail = "error", str(exc)
             return hit
-        ext, note = bio.sniff_image(body, ctype, url)
+        ext, note = bio.sniff_image(body, ctype)
+        if ext is None and note == "no_magic" and not ctype:
+            # G7: the contract's third tier (URL suffix), applied here because
+            # sniff_image is pinned to two parameters. Only reachable when the
+            # server claimed nothing at all and the body is not markup.
+            suffix = Path(urlsplit(url).path).suffix.lower()
+            if suffix in bio.IMAGE_EXTS:
+                ext = ".jpg" if suffix == ".jpeg" else suffix
         if ext is None:
             last_status, last_detail = "not_an_image", note or ""
             continue
@@ -607,9 +614,23 @@ class Lock:
                 except OSError:
                     pass
                 continue
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(f"{os.getpid()}\n{datetime.now(timezone.utc).isoformat()}\n"
-                         f"{' '.join(sys.argv)}\n")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(f"{os.getpid()}\n{datetime.now(timezone.utc).isoformat()}\n"
+                             f"{' '.join(sys.argv)}\n")
+            except BaseException:
+                # G9: the pidfile exists but carries no owner; leaving it would
+                # block every later crawl until the grace window passes. Close
+                # the fd (if still open) and remove the file before re-raising.
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                try:
+                    self.path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
             self._owned = True
             return self
         raise LockHeld(f"{self.path} could not be acquired")
@@ -791,11 +812,17 @@ def main(argv: list[str] | None = None, *, opener=None, sleep=None,
     over_limit = 0
     lock: Lock | None = None
     try:
-        if args.lock and not args.dry_run:
-            lock = Lock(csv_path.with_name(csv_path.name + ".lock"))
-            lock.__enter__()
-        if not args.dry_run and not args.no_backup:
-            bio.backup_once(csv_path)
+        # G10: a precondition failure here (read-only CSV directory, unwritable
+        # lock/backup) is a usage-class exit (3), never a traceback.
+        try:
+            if args.lock and not args.dry_run:
+                lock = Lock(csv_path.with_name(csv_path.name + ".lock"))
+                lock.__enter__()
+            if not args.dry_run and not args.no_backup:
+                bio.backup_once(csv_path)
+        except OSError as exc:
+            print(f"error: cannot prepare the run: {exc}", file=sys.stderr)
+            return EXIT_USAGE
         for row in selected:
             try:
                 gtin = bio.ean_to_gtin14(row.ean)  # F2: before any glob/request
@@ -913,6 +940,13 @@ def main(argv: list[str] | None = None, *, opener=None, sleep=None,
             "counts": dict(Counter(h.status for h in hits)),
             # G4: rows that needed work but fell outside the --limit window.
             "skipped_by_limit": over_limit,
+            # G8: top-level aggregates — match_via counts and the review notes
+            # that flag rows a human must look at.
+            "match_via": dict(Counter(h.match_via for h in hits)),
+            "review": [
+                {"rec_index": h.rec_index, "sku": h.sku, "notes": list(h.review)}
+                for h in hits if h.review
+            ],
             # F11: the pinned vocabularies, so a consumer can validate the
             # report against FINAL-APPROACH-1.md.
             "status_vocabulary": sorted(STATUS_VOCABULARY),

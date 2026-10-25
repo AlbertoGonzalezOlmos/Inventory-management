@@ -347,8 +347,15 @@ def _looks_like_markup(body: bytes) -> bool:
     return head[:1] == b"<"
 
 
-def sniff_image(body: bytes, content_type: str | None,
-                url: str | None = None) -> tuple[str | None, str | None]:
+def sniff_image(body: bytes, content_type: str | None) -> tuple[str | None, str | None]:
+    """Decide the extension from the bytes, never from a claim.
+
+    Pinned two-parameter surface (FINAL-APPROACH-1.md / G7): the URL-suffix
+    tier lives in the caller (`biogan_photos.download`), which is the only
+    place that knows the URL. A body with no magic and no Content-Type gets
+    the note "no_magic" so that caller can apply the suffix as its last
+    resort; a *present* non-image Content-Type is a firm "not_an_image".
+    """
     body = body or b""
     ctype = (content_type or "").split(";")[0].strip().lower()
     ct_ext = EXT_BY_CONTENT_TYPE.get(ctype)
@@ -374,11 +381,9 @@ def sniff_image(body: bytes, content_type: str | None,
         return None, "not_an_image"  # a lying image/* CT cannot save markup
     if ct_ext:
         return ct_ext, "no_magic"
-    if url and not content_type:
-        suffix = Path(urlsplit(url).path).suffix.lower()
-        if suffix in IMAGE_EXTS:
-            return (".jpg" if suffix == ".jpeg" else suffix), "no_magic"
-    return None, "not_an_image"
+    if not ctype:
+        return None, "no_magic"  # nothing claimed: the caller may consult the URL
+    return None, "not_an_image"  # the server said it is not an image
 
 
 def find_image(images_dir: Path, ean: str) -> tuple[Path | None, list[Path]]:
