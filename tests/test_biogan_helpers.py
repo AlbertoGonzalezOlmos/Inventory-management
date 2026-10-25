@@ -104,6 +104,47 @@ def test_write_aborts_before_replace_on_a_short_write(tmp_path, monkeypatch):
     assert not list(tmp_path.glob("*.tmp-*"))
 
 
+def test_write_verifies_the_eol_shape_of_the_written_bytes(tmp_path, monkeypatch):
+    path = make_csv(tmp_path)                      # CRLF, no final newline
+    original = path.read_bytes()
+    md = bio.read_masterdata(path)
+    records = [list(r) for r in md.records]
+    records[2][md.photo_idx] = "https://shop.test/x.jpg"
+    real = bio.serialise
+    monkeypatch.setattr(
+        bio, "serialise",
+        lambda recs, snap: real(recs, snap).replace(b"\r\n", b"\n"))
+    with pytest.raises(bio.CsvFidelityError):
+        bio.write_masterdata_atomic(path, md, records)
+    assert path.read_bytes() == original           # LF never replaces a CRLF file
+    assert not list(tmp_path.glob("*.tmp-*"))
+
+
+def test_write_serialises_from_a_copy_and_keeps_the_baseline_pristine(
+        tmp_path, monkeypatch):
+    path = make_csv(tmp_path)
+    md = bio.read_masterdata(path)
+    baseline = [list(r) for r in md.records]
+    records = [list(r) for r in md.records]
+    url = "https://shop.test/photo-p.jpg"
+    records[2][md.photo_idx] = url
+    real = bio.serialise
+
+    def serialise_then_tamper(recs, snap):
+        data = real(recs, snap)
+        recs[2][1] = "tampered after serialisation"
+        return data
+
+    monkeypatch.setattr(bio, "serialise", serialise_then_tamper)
+    bio.write_masterdata_atomic(path, md, records)
+    monkeypatch.undo()                             # the tamper must not follow us
+    assert md.records == baseline                  # baseline never mutated
+    assert records[2][1] == baseline[2][1]         # caller's copy untouched
+    written = bio.read_masterdata(path)
+    assert written.records[2][written.photo_idx] == url
+    assert written.records[2][1] == baseline[2][1]
+
+
 def test_read_rejects_duplicate_ean_and_ragged(tmp_path):
     raw = (FIXTURES / "masterdata.csv").read_bytes()
     dup = raw.replace(b"4006381333931", b"5901234123457", 1)
@@ -172,8 +213,24 @@ def test_sniff_image_precedence():
     assert bio.sniff_image(jpeg, "image/jpeg") == (".jpg", None)
     assert bio.sniff_image(png, "image/jpeg") == (".png", "content_type_mismatch:image/jpeg")
     assert bio.sniff_image(b"not an image", "text/html") == (None, "not_an_image")
-    assert bio.sniff_image(b"no magic", "image/png") == (".png", "no_magic")
+    assert bio.sniff_image(b"no magic bytes here", "image/png") == (".png", "no_magic")
     assert bio.sniff_image(png, "image/png") == (".png", None)
+
+
+def test_sniff_image_rejects_short_and_markup_bodies():
+    jpeg = b"\xff\xd8\xff\xe0" + b"0" * 16
+    # empty / truncated bodies are never images, whatever the header claims
+    assert bio.sniff_image(b"", "image/jpeg") == (None, "not_an_image")
+    assert bio.sniff_image(b"\xff\xd8\xff\xe0", "image/jpeg") == (None, "not_an_image")
+    # a lying image/* Content-Type cannot turn markup into an image
+    assert bio.sniff_image(b"<!DOCTYPE html><html>x</html>", "image/jpeg") == \
+        (None, "not_an_image")
+    assert bio.sniff_image(b"  \r\n<html><body>x</body></html>", "image/png") == \
+        (None, "not_an_image")
+    # magic still wins over a lying CT (and is flagged), and needs no CT at all
+    assert bio.sniff_image(jpeg, "text/html") == (
+        ".jpg", "content_type_mismatch:text/html")
+    assert bio.sniff_image(jpeg, None) == (".jpg", None)
 
 
 def test_find_image_preference_and_duplicates(tmp_path):

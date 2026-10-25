@@ -39,6 +39,7 @@ EXT_BY_CONTENT_TYPE = {
     "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
     "image/webp": ".webp", "image/gif": ".gif", "image/avif": ".avif",
 }
+MIN_IMAGE_BYTES = 12  # no real image header is shorter than this
 REQUIRED_HEADERS = ("Varenummer", "Varenavn", "EAN-nummer", "Sp3-Vejl.Pris")
 
 
@@ -239,9 +240,18 @@ def self_check(md: MasterData) -> None:
 
 def write_masterdata_atomic(path: Path, md: MasterData,
                             records: list[list[str]]) -> None:
+    """Write `records` atomically, verified against the pristine baseline.
+
+    The payload is serialised from a deep copy, and the temp file is re-read and
+    compared cell-by-cell against `md.records` (the load-time baseline, which
+    callers must leave untouched), so an in-memory drift in any non-photo cell
+    raises before `os.replace`. The EOL/EOF shape of the bytes actually written
+    is verified too, not only the parsed records.
+    """
     path = Path(path)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    data = serialise(records, md.snap)
+    payload = [list(rec) for rec in records]
+    data = serialise(payload, md.snap)
     try:
         with open(tmp, "wb") as fh:
             fh.write(data)
@@ -252,15 +262,17 @@ def write_masterdata_atomic(path: Path, md: MasterData,
         temp_records = list(csv.reader(io.StringIO(temp_text, newline="")))
         eol = md.snap.eol.encode("utf-8")
         problems: list[str] = []
-        if len(temp_records) != len(records):
+        if len(temp_records) != len(md.records):
             problems.append("record count")
-        if any(len(r) != len(records[0]) for r in temp_records):
+        elif any(len(r) != len(md.records[0]) for r in temp_records):
             problems.append("record width")
-        if len(temp_records) == len(records):
+        else:
             for i, (before, after) in enumerate(zip(md.records, temp_records)):
                 for j, (a, b) in enumerate(zip(before, after)):
                     if j != md.photo_idx and a != b:
                         problems.append(f"cell {i}:{j}")
+        if (b"\r\n" in temp_raw) != (md.snap.eol == "\r\n"):
+            problems.append("EOL shape")
         if temp_raw.endswith(eol) != md.snap.eof_newline:
             problems.append("EOF newline")
         if problems:
@@ -327,8 +339,18 @@ def is_skin_src(src: str) -> bool:
     return any(marker.lower() in low for marker in SKIN_SRC_MARKERS)
 
 
+def _looks_like_markup(body: bytes) -> bool:
+    head = body.lstrip().removeprefix(b"\xef\xbb\xbf").lstrip()
+    return head[:1] == b"<"
+
+
 def sniff_image(body: bytes, content_type: str | None,
                 url: str | None = None) -> tuple[str | None, str | None]:
+    body = body or b""
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    ct_ext = EXT_BY_CONTENT_TYPE.get(ctype)
+    if len(body) < MIN_IMAGE_BYTES:
+        return None, "not_an_image"  # empty/truncated: never a real image
     ext: str | None = None
     if body.startswith(b"\xff\xd8\xff"):
         ext = ".jpg"
@@ -340,13 +362,13 @@ def sniff_image(body: bytes, content_type: str | None,
         ext = ".gif"
     elif body[4:12] in (b"ftypavif", b"ftypavis"):
         ext = ".avif"
-    ctype = (content_type or "").split(";")[0].strip().lower()
-    ct_ext = EXT_BY_CONTENT_TYPE.get(ctype)
     if ext:
         note = None
-        if ct_ext and ct_ext != ext:
+        if ctype and ct_ext != ext:
             note = f"content_type_mismatch:{content_type}"
         return ext, note
+    if _looks_like_markup(body):
+        return None, "not_an_image"  # a lying image/* CT cannot save markup
     if ct_ext:
         return ct_ext, "no_magic"
     if url and not content_type:

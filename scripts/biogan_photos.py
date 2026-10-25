@@ -39,6 +39,8 @@ FAILING_STATUSES = {
     "error", "parse_failure", "bad_ean", "bad_cell",
 }
 OK_STATUSES = {"ok", "cached", "downloaded", "skipped"}
+# The row-level breaker (F6) counts only these; every other outcome resets it.
+HARD_FAILURE_STATUSES = {"error", "parse_failure"}
 
 
 class FetchError(RuntimeError):
@@ -139,6 +141,10 @@ class Fetcher:
         self.sleep = sleep
         self.clock = clock
         self.requests = 0
+        # Row-level breaker streak, owned by main(): +1 for an `error` or
+        # `parse_failure` row and reset by every other row outcome. The
+        # transport layer must never touch it — a single successful GET inside
+        # a failing row would otherwise erase the streak (F6).
         self.consecutive_hard = 0
         self.max_image_bytes: int | None = None
         self._last: float | None = None
@@ -169,7 +175,6 @@ class Fetcher:
                 try:
                     status = getattr(response, "status", 200)
                     if status == 404:
-                        self.consecutive_hard = 0
                         raise Http404(url)
                     if status == 429 or status >= 500:
                         last = FetchError(f"HTTP {status} for {url}")
@@ -190,7 +195,6 @@ class Fetcher:
                     body = b"".join(chunks)
                     ctype = response.headers.get("Content-Type")
                     etag = response.headers.get("ETag")
-                    self.consecutive_hard = 0
                     return body, ctype, etag, response.geturl() or url
                 finally:
                     close = getattr(response, "close", None)
@@ -200,7 +204,6 @@ class Fetcher:
                 raise
             except urllib.error.HTTPError as exc:
                 if exc.code == 404:
-                    self.consecutive_hard = 0
                     raise Http404(url) from exc
                 if exc.code == 429 or exc.code >= 500:
                     last = FetchError(f"HTTP {exc.code} for {url}")
@@ -208,14 +211,12 @@ class Fetcher:
                         self._backoff(attempt, _retry_after(
                             exc.headers.get("Retry-After")))
                     continue
-                self.consecutive_hard += 1
                 raise FetchError(f"HTTP {exc.code} for {url}") from exc
             except (urllib.error.URLError, TimeoutError, socket.timeout,
                     OSError) as exc:
                 last = FetchError(f"{type(exc).__name__}: {exc}")
                 if attempt < self.retries:
                     self._backoff(attempt, None)
-        self.consecutive_hard += 1
         raise last or FetchError(url)
 
     @staticmethod
@@ -284,19 +285,24 @@ def resolve(fetcher: Fetcher, row: bio.Row, *, size: str,
             products2, no2 = bio.parse_products(html2)
             if not products2 and not no2:
                 raise bio.ParseError("SKU search page has no products and no marker")
-            exact = _exact(products2, row.sku)
-            if exact is not None:
-                chosen, via = exact, "sku_search"
-            elif products2:
-                chosen, via = products2[0], "first_result"
+            if products2:
+                exact = _exact(products2, row.sku)
+                if exact is not None:
+                    chosen, via = exact, "sku_search"
+                else:
+                    chosen, via = products2[0], "first_result"
+                hit.query, hit.rung = row.sku, "sku"
+                hit.n_hits = len(products2)
+                hit.candidates = [(p.product_id or p.number, p.name)
+                                  for p in products2[:5]]
+                final = final2
             else:
-                hit.status = "no_result"
-                return hit
-            hit.query, hit.rung = row.sku, "sku"
-            hit.n_hits = len(products2)
-            hit.candidates = [(p.product_id or p.number, p.name)
-                              for p in products2[:5]]
-            final = final2
+                # F1: the SKU search found nothing, but the name search did.
+                # Never downgrade a known hit to no_result: keep the rung-1
+                # first hit (still flagged, so the run fails) and keep its
+                # query/hits so the report says where the photo came from.
+                chosen, via = products[0], "first_result"
+                hit.review.append("sku_search_no_hits")
 
         if via == "first_result" and strict:
             hit.status = "no_result"
@@ -495,6 +501,20 @@ def _check_report_path(report: Path, images_dir: Path) -> None:
         raise ValueError("report path must be outside the images directory")
 
 
+def _account_breaker(fetcher: Fetcher, hit: Hit, abort_after: int) -> bool:
+    """F6: row-level breaker streak; True when the run must abort.
+
+    Only an `error`/`parse_failure` row extends the streak. Every other
+    outcome — including a skipped row or a data error such as `bad_ean` —
+    proves the site answered, so it resets the streak.
+    """
+    if hit.status in HARD_FAILURE_STATUSES:
+        fetcher.consecutive_hard += 1
+    else:
+        fetcher.consecutive_hard = 0
+    return fetcher.consecutive_hard >= abort_after
+
+
 def write_report(path: Path, hits: list[Hit], meta: dict) -> None:
     path = Path(path)
     _check_report_path(path, Path(meta["images_dir"]))
@@ -597,6 +617,9 @@ def main(argv: list[str] | None = None) -> int:
         and r.sku.casefold() not in skip
     ]
     force = args.force or not args.resume
+    # Working copy; md.records stays the pristine load-time baseline that
+    # write_masterdata_atomic verifies the written temp against (F4).
+    records = [list(rec) for rec in md.records]
     fetcher = Fetcher(opener=urllib.request.urlopen, delay=args.delay,
                       timeout=args.timeout, retries=args.retries,
                       user_agent=args.user_agent, base_url=args.base_url)
@@ -612,6 +635,35 @@ def main(argv: list[str] | None = None) -> int:
         if not args.dry_run and not args.no_backup:
             bio.backup_once(csv_path)
         for row in selected:
+            try:
+                bio.ean_to_gtin14(row.ean)  # F2: before any filename/glob/request
+            except ValueError as exc:
+                hit = _hit(row)
+                hit.status = "bad_ean"
+                hit.detail = str(exc)
+                hits.append(hit)
+                _account_breaker(fetcher, hit, args.abort_after)  # resets
+                if args.verbose and not args.quiet:
+                    print(f"[bad_ean] {row.sku} {row.ean} {hit.detail}")
+                continue
+            if row.photo and not force:
+                try:
+                    # F5: a prefilled cell is trusted only after it validates;
+                    # on failure the cell is left exactly as it is. `--force`/
+                    # `--no-resume` re-resolve the row from scratch and never
+                    # read the cell, so they may repair a garbage cell instead
+                    # of being blocked by it.
+                    bio.canonical_image_url(row.photo, fetcher.base_url)
+                except ValueError as exc:
+                    hit = _hit(row)
+                    hit.status = "bad_cell"
+                    hit.detail = str(exc)
+                    hit.match_via = "prefilled"
+                    hits.append(hit)
+                    _account_breaker(fetcher, hit, args.abort_after)  # resets
+                    if args.verbose and not args.quiet:
+                        print(f"[bad_cell] {row.sku} {row.ean} {hit.detail}")
+                    continue
             existing = bio.find_image(images_dir, row.ean)[0] if row.ean else None
             state = row_state(row.photo, existing, force)
             if args.limit and state != "skip":
@@ -622,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
                 hit = _hit(row)
                 hit.status = "skipped"
                 hits.append(hit)
+                _account_breaker(fetcher, hit, args.abort_after)  # resets
                 continue
             if state == "download_only":
                 hit = _hit(row)
@@ -637,11 +690,11 @@ def main(argv: list[str] | None = None) -> int:
                 hit = download(fetcher, hit, images_dir, size=args.size,
                                max_bytes=args.max_bytes, force=force)
             new_cell = hit.photo_url or row.photo
-            if md.records[row.rec_index][md.photo_idx].strip() != new_cell.strip():
-                md.records[row.rec_index][md.photo_idx] = new_cell
+            if records[row.rec_index][md.photo_idx].strip() != new_cell.strip():
+                records[row.rec_index][md.photo_idx] = new_cell
                 if not args.dry_run:
                     try:
-                        bio.write_masterdata_atomic(csv_path, md, md.records)
+                        bio.write_masterdata_atomic(csv_path, md, records)
                     except (bio.CsvShapeError, bio.CsvFidelityError, OSError) as exc:
                         print(f"error: cannot write CSV: {exc}", file=sys.stderr)
                         return EXIT_USAGE
@@ -649,7 +702,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.verbose and not args.quiet:
                 print(f"[{hit.status}] {row.sku} {row.ean} {hit.match_via} "
                       f"{hit.photo_url}")
-            if fetcher.consecutive_hard >= args.abort_after:
+            if _account_breaker(fetcher, hit, args.abort_after):
                 print(f"error: {fetcher.consecutive_hard} consecutive hard "
                       f"failures; aborting", file=sys.stderr)
                 aborted = True

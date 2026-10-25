@@ -36,6 +36,26 @@ def make_csv(tmp_path: Path, *, eol: str = "\r\n", eof: bool = False) -> Path:
     return path
 
 
+def ean13(body12: str) -> str:
+    """A valid EAN-13: the 12-digit body plus its check digit."""
+    total = sum(int(c) * (3 if i % 2 else 1) for i, c in enumerate(body12))
+    return body12 + str((10 - total % 10) % 10)
+
+
+def make_row_csv(tmp_path: Path, rows: list[tuple[str, str]], *,
+                 photo: dict[str, str] | None = None) -> Path:
+    """A CRLF master CSV with one row per (sku, name) and generated EANs."""
+    photo = photo or {}
+    lines = ["Varenummer,Varenavn,EAN-nummer,Antal pr colli,Sp2-Engros,"
+             "Sp3-Vejl.Pris,URL to photo"]
+    for i, (sku, name) in enumerate(rows, start=1):
+        lines.append(f'{sku},{name},{ean13(f"57000000{i:04d}")},1,10.00,'
+                     f'20.00,{photo.get(sku, "")}')
+    path = tmp_path / "rows.csv"
+    path.write_bytes("\r\n".join(lines).encode("utf-8"))
+    return path
+
+
 def search_url(keyword: str) -> str:
     return f"{BASE}{bio.SEARCH_PATH}?keyword={quote_plus(keyword)}"
 
@@ -243,6 +263,121 @@ def test_first_result_is_flagged_and_fails(tmp_path):
     assert hit["site_id"] == "1134"
 
 
+def test_f2_bad_ean_never_reaches_the_network_or_a_filename(tmp_path):
+    csv_path = make_csv(tmp_path)
+    csv_path.write_bytes(csv_path.read_bytes().replace(b"4260563290218",
+                                                       b"4260563290219"))
+    code, fake = run(tmp_path, {}, "--only-sku", "1509b",
+                     "--report", str(tmp_path / "report.json"))
+    assert code == 1
+    assert fake.calls == []                    # no search, no image request
+    assert cell(csv_path, "1509b") == ""
+    assert not list((tmp_path / "images").glob("*"))
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["status"] == "bad_ean"
+    code, fake = run(tmp_path, {}, "--only-sku", "1509b", "--dry-run")
+    assert code == 1 and fake.calls == []      # gated on dry-run too
+
+
+def test_f5_garbage_prefilled_cell_is_bad_cell_and_untouched(tmp_path):
+    csv_path = make_csv(tmp_path)
+    csv_path.write_bytes(csv_path.read_bytes().replace(
+        PREFILLED.encode(), b"javascript:alert(1)"))
+    code, fake = run(tmp_path, {}, "--only-sku", "1134",
+                     "--report", str(tmp_path / "report.json"))
+    assert code == 1
+    assert fake.calls == []
+    assert cell(csv_path, "1134") == "javascript:alert(1)"   # never touched
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["status"] == "bad_cell"
+    assert hit["match_via"] == "prefilled"
+    before = csv_path.read_bytes()
+    code, fake = run(tmp_path, {}, "--only-sku", "1134", "--dry-run",
+                     "--no-download")
+    assert code == 1 and fake.calls == []
+    assert csv_path.read_bytes() == before
+
+
+def test_f5_force_reresolves_a_garbage_prefilled_cell(tmp_path):
+    csv_path = make_csv(tmp_path)
+    csv_path.write_bytes(csv_path.read_bytes().replace(
+        PREFILLED.encode(), b"javascript:alert(1)"))
+    routes = {
+        search_url("Kobber tungeskraber"):
+            (read_fixture("search_1134.html"), 200, "text/html"),
+        P_1134: (JPEG, 200, "image/jpeg"),
+    }
+    code, fake = run(tmp_path, routes, "--only-sku", "1134", "--force")
+    assert code == 0                       # --force reads no cell, repairs it
+    assert fake.calls == [search_url("Kobber tungeskraber"), P_1134]
+    assert cell(csv_path, "1134") == P_1134
+
+
+def test_sku_search_with_no_hits_keeps_the_name_first_hit(tmp_path):
+    csv_path = make_csv(tmp_path)
+    routes = {
+        search_url(NAME_1509B): (read_fixture("search_1134.html"), 200, "text/html"),
+        search_url("1509b"): (read_fixture("search_none.html"), 200, "text/html"),
+        P_1134: (JPEG, 200, "image/jpeg"),
+    }
+    code, fake = run(tmp_path, routes, "--only-sku", "1509b",
+                     "--report", str(tmp_path / "report.json"))
+    assert code == 1                       # flagged, never a silent no_result
+    assert fake.calls == [search_url(NAME_1509B), search_url("1509b"), P_1134]
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["status"] == "downloaded"
+    assert hit["match_via"] == "first_result"
+    assert hit["site_id"] == "1134"        # the rung-1 hit, not the empty rung 2
+    assert "sku_search_no_hits" in hit["review"]
+    assert "first_result flagged" in hit["review"]
+    assert cell(csv_path, "1509b") == P_1134
+
+
+def test_breaker_trips_on_consecutive_parse_failures(tmp_path):
+    make_csv(tmp_path)
+    unparseable = read_fixture("search_unparseable.html")
+    routes = {
+        search_url(NAME_10005): (unparseable, 200, "text/html"),
+        search_url(NAME_1509B): (unparseable, 200, "text/html"),
+    }
+    code, fake = run(tmp_path, routes, "--only-sku", "10005",
+                     "--only-sku", "1509b", "--abort-after", "2",
+                     "--report", str(tmp_path / "report.json"))
+    assert code == 2
+    assert len(fake.calls) == 2
+    hits = json.loads((tmp_path / "report.json").read_text())["hits"]
+    assert [h["status"] for h in hits] == ["parse_failure", "parse_failure"]
+
+
+def test_breaker_default_is_five_consecutive_hard_failures(tmp_path):
+    rows = [(f"90{i:03d}", f"Product {i}") for i in range(1, 7)]
+    csv_path = make_row_csv(tmp_path, rows)
+    unparseable = read_fixture("search_unparseable.html")
+    routes = {search_url(f"Product {i}"): (unparseable, 200, "text/html")
+              for i in range(1, 7)}
+    code, fake = run(tmp_path, routes, "--report",
+                     str(tmp_path / "report.json"), csv_path=csv_path)
+    assert code == 2
+    assert len(fake.calls) == 5            # the 6th row is never fetched
+    hits = json.loads((tmp_path / "report.json").read_text())["hits"]
+    assert [h["status"] for h in hits] == ["parse_failure"] * 5
+
+
+def test_breaker_resets_on_a_row_that_is_not_a_hard_failure(tmp_path):
+    make_csv(tmp_path)
+    (tmp_path / "images").mkdir()
+    # row 1134 is complete (prefilled cell + a valid image) -> status skipped
+    (tmp_path / "images" / "4006381333931.jpg").write_bytes(JPEG)
+    unparseable = read_fixture("search_unparseable.html")
+    routes = {
+        search_url(NAME_10005): (unparseable, 200, "text/html"),
+        search_url(NAME_1509B): (unparseable, 200, "text/html"),
+    }
+    code, fake = run(tmp_path, routes, "--abort-after", "2")
+    assert code == 1                       # parse_failure, skipped, parse_failure
+    assert len(fake.calls) == 2
+
+
 def test_no_result_and_strict_match_leave_the_cell_empty(tmp_path):
     csv_path = make_csv(tmp_path)
     routes = {search_url(NAME_1509B): (read_fixture("search_none.html"), 200, "text/html")}
@@ -427,6 +562,8 @@ def test_csv_fidelity_error_maps_to_exit_3(tmp_path, monkeypatch):
     monkeypatch.setattr(bio, "write_masterdata_atomic", boom)
     code, _fake = run(tmp_path, routes, "--only-sku", "10005")
     assert code == 3
+    # F4: a post-verify/write failure still releases the lock
+    assert not (tmp_path / "masterdata.csv.lock").exists()
 
 
 def test_no_resume_reresolves_even_when_cached(tmp_path):
