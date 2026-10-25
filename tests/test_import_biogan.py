@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -391,3 +393,37 @@ def test_blank_or_invalid_supplier_ean_never_clears_a_stored_barcode(tmp_path):
     other = ean13(171)
     assert invoke(tmp_path, engine, [supplier("KEEP", "Name", ean=other)]) == 0
     assert items(engine)[0].barcode == "0" + other
+
+
+def test_subprocess_entrypoint_imports_and_runs(tmp_path):
+    """The real-run entrypoint is ``python scripts/import_biogan.py``.
+
+    Without the sys.path bootstrap at the top of the script (the same rule as
+    biogan_photos.py), a subprocess dies with ``ModuleNotFoundError: No module
+    named 'scripts'`` before argparse even runs — the --db guard explicitly
+    tells in-process callers to use this entrypoint, so it must work. Kept
+    hermetic (no model, no DB, no network): ``--help`` proves every import
+    resolves, and a ``--dry-run`` against a missing DB proves main() runs.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "import_biogan.py"
+    helped = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True, text=True, timeout=120, cwd=tmp_path,
+    )
+    assert helped.returncode == 0, helped.stderr
+    assert "ModuleNotFoundError" not in helped.stderr
+    assert "--prune-demo" in helped.stdout
+
+    csv_path = write_csv(tmp_path / "master.csv", [supplier("SUB", ean=ean13(180))])
+    missing_db = tmp_path / "absent" / "sub.db"
+    result = subprocess.run(
+        [sys.executable, str(script),
+         "--csv", str(csv_path), "--images-dir", str(tmp_path / "images"),
+         "--db", str(missing_db), "--dry-run"],
+        capture_output=True, text=True, timeout=120, cwd=tmp_path,
+    )
+    assert result.returncode == 3, result.stderr  # dry-run needs an existing DB
+    assert "ModuleNotFoundError" not in result.stderr
+    assert "dry-run requires an existing DB schema" in result.stderr
+    assert not missing_db.exists()

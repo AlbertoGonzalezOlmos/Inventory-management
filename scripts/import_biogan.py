@@ -27,6 +27,13 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+# Bootstrap for "python scripts/import_biogan.py …" — the real-run entrypoint
+# (and what the --db guard tells an in-process caller to use). Without the
+# repo root on sys.path, "from scripts import _biogan" below fails with
+# ModuleNotFoundError. Same rule as scripts/biogan_photos.py.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, select
