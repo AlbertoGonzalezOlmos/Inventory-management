@@ -152,11 +152,14 @@ def read_masterdata(path: Path) -> MasterData:
         ean = rec[ean_i].strip()
         if not sku or not ean:
             raise CsvShapeError(f"{p}: record {i + 1}: empty SKU or EAN")
-        if sku in seen_sku:
+        # F10: SKUs are case-sensitive in the wild ("1134b" vs "1134B" would
+        # collide on the site and in reports), so the duplicate check folds
+        # case. EANs are digits; exact comparison stays correct for them.
+        if sku.casefold() in seen_sku:
             raise CsvShapeError(f"{p}: duplicate SKU {sku!r}")
         if ean in seen_ean:
             raise CsvShapeError(f"{p}: duplicate EAN {ean!r} (filename collision)")
-        seen_sku.add(sku)
+        seen_sku.add(sku.casefold())
         seen_ean.add(ean)
 
     eol = "\r\n" if b"\r\n" in raw else "\n"

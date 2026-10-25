@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import stat
+import time
 import urllib.error
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -123,26 +125,14 @@ class FakeOpener:
 
 
 def run(tmp_path: Path, routes: dict, *args: str, csv_path: Path | None = None,
-        images: Path | None = None):
-    fake = FakeOpener(routes)
-
-    class TestFetcher(mod.Fetcher):
-        def __init__(self, **kwargs):
-            kwargs.pop("opener", None)
-            kwargs.setdefault("jitter", 0)
-            kwargs.setdefault("sleep", lambda _s: None)
-            super().__init__(opener=fake, **kwargs)
-
-    original = mod.Fetcher
-    mod.Fetcher = TestFetcher
-    try:
-        code = mod.main([
-            "--csv", str(csv_path or tmp_path / "masterdata.csv"),
-            "--images-dir", str(images or tmp_path / "images"),
-            "--base-url", BASE, "--delay", "0", *args,
-        ])
-    finally:
-        mod.Fetcher = original
+        images: Path | None = None, opener=None):
+    """Run the CLI with F12 injection: opener/sleep/clock go through main()."""
+    fake = opener if opener is not None else FakeOpener(routes)
+    code = mod.main([
+        "--csv", str(csv_path or tmp_path / "masterdata.csv"),
+        "--images-dir", str(images or tmp_path / "images"),
+        "--base-url", BASE, "--delay", "0", *args,
+    ], opener=fake, sleep=lambda _s: None, clock=time.monotonic)
     return code, fake
 
 
@@ -569,6 +559,249 @@ def test_csv_fidelity_error_maps_to_exit_3(tmp_path, monkeypatch):
 def test_no_resume_reresolves_even_when_cached(tmp_path):
     make_csv(tmp_path)
     assert run(tmp_path, clean_routes())[0] == 0
-    code, fake = run(tmp_path, clean_routes(), "--no-resume", "--only-sku", "10005")
+    code, fake = run(tmp_path, clean_routes(), "--no-resume", "--only-sku",
+                     "10005", "--report", str(tmp_path / "report.json"))
     assert code == 0
-    assert fake.calls == [search_url(NAME_10005), P_10005]
+    # F9: --no-resume re-resolves the row (the search happens) but KEEPS the
+    # magic-checked download cache: no second image GET, status "cached".
+    assert fake.calls == [search_url(NAME_10005)]
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["status"] == "cached"
+    assert (tmp_path / "images" / "5901234123457.jpg").read_bytes() == JPEG
+
+
+def test_f7_budget_never_overshoots_mid_row(tmp_path):
+    """F7: the budget is enforced inside the fetcher, before each request."""
+    csv_path = make_csv(tmp_path)
+    routes = {
+        PREFILLED: (JPEG, 200, "image/jpeg"),
+        search_url(NAME_1509B): (read_fixture("search_1134.html"), 200, "text/html"),
+        search_url("1509b"): (read_fixture("search_1509b.html"), 200, "text/html"),
+        P_1509B: (PNG, 200, "image/png"),
+    }
+    code, fake = run(tmp_path, routes, "--only-sku", "1134", "--only-sku",
+                     "1509b", "--max-requests", "3", "--report",
+                     str(tmp_path / "report.json"))
+    assert code == 2
+    assert len(fake.calls) == 3                  # the 4th request is refused
+    assert cell(csv_path, "1509b") == P_1509B    # the resolved URL is knowledge
+    hits = json.loads((tmp_path / "report.json").read_text())["hits"]
+    assert hits[-1]["status"] == "error"
+    assert "budget" in hits[-1]["detail"]
+
+
+def test_f8_fresh_unreadable_lock_is_held_not_broken(tmp_path):
+    """F8: a pidfile inside the grace window is never broken (mid-write race)."""
+    make_csv(tmp_path)
+    lock = tmp_path / "masterdata.csv.lock"
+    lock.write_text("", encoding="utf-8")        # an acquirer that is mid-write
+    code, fake = run(tmp_path, clean_routes(), "--only-sku", "10005")
+    assert code == 2
+    assert fake.calls == []
+    assert lock.exists()                         # not broken, not emptied
+
+
+def test_f8_stale_break_reason_lands_in_the_report(tmp_path):
+    make_csv(tmp_path)
+    lock = tmp_path / "masterdata.csv.lock"
+    lock.write_text("0\n2020-01-01T00:00:00+00:00\nold argv\n", encoding="utf-8")
+    routes = {
+        search_url(NAME_10005): (read_fixture("search_10005.html"), 200, "text/html"),
+        P_10005: (JPEG, 200, "image/jpeg"),
+    }
+    code, _fake = run(tmp_path, routes, "--only-sku", "10005", "--report",
+                      str(tmp_path / "report.json"))
+    assert code == 0
+    assert not lock.exists()
+    meta = json.loads((tmp_path / "report.json").read_text())
+    assert "dead" in meta["lock_broken"]         # the reason is reported
+
+
+def test_f9_part_files_use_the_contract_name_and_stale_parts_are_cleaned(
+        tmp_path, monkeypatch):
+    images = tmp_path / "images"
+    images.mkdir()
+    (images / "5901234123457.jpg.part-1").write_bytes(b"x")   # crashed predecessor
+    (images / "5901234123457.png").write_bytes(PNG)            # stale other ext
+    seen: list[str] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        seen.append(Path(src).name)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(mod.os, "replace", spy_replace)
+    dest = mod._write_image(images, "5901234123457", JPEG, ".jpg")
+    assert seen == [f"5901234123457.jpg.part-{os.getpid()}"]   # contract naming
+    assert dest == images / "5901234123457.jpg"
+    assert dest.read_bytes() == JPEG
+    assert not (images / "5901234123457.jpg.part-1").exists()  # stale part gone
+    assert not (images / "5901234123457.png").exists()         # stale ext gone
+
+
+def test_f11_report_meta_unresolved_and_vocabulary(tmp_path):
+    csv_path = make_csv(tmp_path)
+    before = csv_path.read_bytes()
+    routes = {
+        search_url(NAME_1509B): (read_fixture("search_1134.html"), 200, "text/html"),
+        search_url("1509b"): (read_fixture("search_1134.html"), 200, "text/html"),
+        P_1134: (JPEG, 200, "image/jpeg"),
+    }
+    code, _fake = run(tmp_path, routes, "--only-sku", "1509b", "--report",
+                      str(tmp_path / "report.json"))
+    assert code == 1
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["size"] == len(before)                      # bytes, not --size
+    assert report["variant"] == "p"
+    assert isinstance(report["mode"], int)
+    assert report["mode"] == stat.S_IMODE(csv_path.stat().st_mode)
+    assert "1-based" in report["rec_index_base"]
+    unresolved = report["unresolved"]
+    assert [u["sku"] for u in unresolved] == ["1509b"]
+    assert unresolved[0]["match_via"] == "first_result"
+    assert unresolved[0]["rec_index"] == 4
+    contract_statuses = {"ok", "cached", "downloaded", "no_result", "no_image",
+                         "bad_ean", "bad_cell", "http_404", "too_large",
+                         "not_an_image", "error", "parse_failure", "skipped"}
+    contract_vias = {"exact_id", "exact_name", "sku_search", "first_result",
+                     "prefilled", ""}
+    assert set(report["status_vocabulary"]) == contract_statuses
+    assert set(report["match_via_vocabulary"]) == contract_vias
+    assert set(mod.STATUS_VOCABULARY) == contract_statuses
+    assert set(mod.MATCH_VIA_VOCABULARY) == contract_vias
+    for hit in report["hits"]:
+        assert hit["status"] in contract_statuses
+        assert hit["match_via"] in contract_vias
+        assert "first_result flagged" in hit["review"]
+
+
+def test_f12_pinned_api_surface():
+    import inspect
+    from html.parser import HTMLParser
+    assert issubclass(bio.ProductListParser, HTMLParser)     # a real subclass
+    params = list(inspect.signature(bio.sniff_image).parameters)
+    assert params[:2] == ["body", "content_type"]            # two positionals
+    assert bio.sniff_image(JPEG, "image/jpeg") == (".jpg", None)
+    assert list(inspect.signature(mod.write_report).parameters) == [
+        "path", "hits", "meta"]
+    main_params = inspect.signature(mod.main).parameters
+    assert {"opener", "sleep", "clock"} <= set(main_params)
+    assert all(main_params[k].kind is inspect.Parameter.KEYWORD_ONLY
+               for k in ("opener", "sleep", "clock"))
+
+
+def test_f13_dry_run_with_report_and_save_html_writes_nothing(tmp_path):
+    csv_path = make_csv(tmp_path)
+    before = csv_path.read_bytes()
+    report = tmp_path / "report.json"
+    html_dir = tmp_path / "html"
+    routes = {search_url(NAME_10005):
+              (read_fixture("search_unparseable.html"), 200, "text/html")}
+    code, fake = run(tmp_path, routes, "--only-sku", "10005", "--dry-run",
+                     "--report", str(report), "--save-html", str(html_dir))
+    assert code == 1                                    # parse_failure stands
+    assert fake.calls == [search_url(NAME_10005)]       # requests are allowed
+    assert csv_path.read_bytes() == before
+    assert not report.exists()
+    assert not html_dir.exists()
+    assert not (tmp_path / "images").exists()
+    assert not (tmp_path / "masterdata.csv.bak").exists()
+    assert not (tmp_path / "masterdata.csv.lock").exists()
+
+
+def test_f13_lying_content_type_never_saves_html(tmp_path):
+    csv_path = make_csv(tmp_path)
+    routes = {
+        search_url(NAME_10005): (read_fixture("search_10005.html"), 200, "text/html"),
+        P_10005: (HTML404, 200, "image/jpeg"),
+        T_10005: (HTML404, 200, "image/jpeg"),
+    }
+    code, _fake = run(tmp_path, routes, "--only-sku", "10005", "--report",
+                      str(tmp_path / "report.json"))
+    assert code == 1
+    assert not list((tmp_path / "images").glob("*"))
+    assert cell(csv_path, "10005") == P_10005           # the URL is knowledge
+    hit = json.loads((tmp_path / "report.json").read_text())["hits"][0]
+    assert hit["status"] == "not_an_image"
+
+
+def test_f13_corrupt_and_zero_byte_cache_are_repaired(tmp_path):
+    csv_path = make_csv(tmp_path)
+    images = tmp_path / "images"
+    images.mkdir()
+    (images / "5901234123457.jpg").write_bytes(b"")       # zero-byte cache
+    (images / "4260563290218.png").write_bytes(HTML404)   # HTML junk cache
+    code, _fake = run(tmp_path, clean_routes(), "--report",
+                      str(tmp_path / "report.json"), images=images)
+    assert code == 0
+    assert (images / "5901234123457.jpg").read_bytes() == JPEG
+    assert (images / "4260563290218.png").read_bytes() == PNG
+    hits = json.loads((tmp_path / "report.json").read_text())["hits"]
+    assert {h["sku"]: h["status"] for h in hits} == {
+        "10005": "downloaded", "1134": "downloaded", "1509b": "downloaded"}
+
+
+def test_f13_interrupt_mid_run_flushes_and_exits_2(tmp_path):
+    csv_path = make_csv(tmp_path)
+
+    class InterruptingOpener(FakeOpener):
+        def __init__(self, routes, after):
+            super().__init__(routes)
+            self.after = after
+
+        def __call__(self, request, timeout=None):
+            if len(self.calls) >= self.after:
+                raise KeyboardInterrupt
+            return super().__call__(request, timeout)
+
+    code, fake = run(tmp_path, clean_routes(), "--only-sku", "10005",
+                     "--only-sku", "1134",
+                     opener=InterruptingOpener(clean_routes(), 2))
+    assert code == 2
+    assert len(fake.calls) == 2
+    assert cell(csv_path, "10005") == P_10005             # completed row flushed
+    assert (tmp_path / "images" / "5901234123457.jpg").read_bytes() == JPEG
+    assert not (tmp_path / "masterdata.csv.lock").exists()  # lock released
+    assert (tmp_path / "masterdata.csv.bak").exists()
+    bio.read_masterdata(csv_path)                         # still a valid CSV
+
+
+def test_f13_lock_released_on_write_and_report_errors(tmp_path, monkeypatch):
+    make_csv(tmp_path)
+    routes = {
+        search_url(NAME_10005): (read_fixture("search_10005.html"), 200, "text/html"),
+        P_10005: (JPEG, 200, "image/jpeg"),
+    }
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(bio, "write_masterdata_atomic", boom)
+    code, _fake = run(tmp_path, routes, "--only-sku", "10005")
+    assert code == 3
+    assert not (tmp_path / "masterdata.csv.lock").exists()
+    monkeypatch.undo()
+    code, _fake = run(tmp_path, routes, "--only-sku", "10005", "--report",
+                      str(tmp_path / "missing-dir" / "r.json"))
+    assert code == 3                                       # unwritable report
+    assert not (tmp_path / "masterdata.csv.lock").exists()
+
+
+def test_f14_cli_on_real_shape_changes_only_photo_cells(tmp_path):
+    src = FIXTURES / "masterdata_real_shape.csv"
+    csv_path = tmp_path / "masterdata.csv"
+    csv_path.write_bytes(src.read_bytes())
+    before = csv_path.read_bytes()
+    mode_before = stat.S_IMODE(csv_path.stat().st_mode)
+    code, _fake = run(tmp_path, clean_routes(), csv_path=csv_path)
+    assert code == 0
+    after = csv_path.read_bytes()
+    assert after.endswith(b"\n") and b"\r" not in after    # LF + final newline
+    assert stat.S_IMODE(csv_path.stat().st_mode) == mode_before
+    a = before.decode("utf-8").split("\n")
+    b = after.decode("utf-8").split("\n")
+    assert len(a) == len(b)
+    # only the 10005 and 1509b rows moved; header, blank row and the
+    # prefilled 1134 row are byte-identical
+    assert [i for i, (x, y) in enumerate(zip(a, b)) if x != y] == [2, 4]
+    assert cell(csv_path, "1134") == PREFILLED           # prefilled cell kept

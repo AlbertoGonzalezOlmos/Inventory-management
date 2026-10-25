@@ -290,3 +290,82 @@ def test_bom_is_tolerated_and_not_rewritten(tmp_path):
     md.records[2][md.photo_idx] = "https://shop.test/x.jpg"
     bio.write_masterdata_atomic(path, md, md.records)
     assert not path.read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_f10_duplicate_sku_is_detected_casefolded(tmp_path):
+    """F10: SKUs are case-sensitive in the wild; a casefold clash is a dupe."""
+    header = (b"Varenummer,Varenavn,EAN-nummer,Antal pr colli,"
+              b"Sp2-Engros,Sp3-Vejl.Pris,\r\n")
+    r1 = b"1134b,Name One,5901234123457,1,1.00,2.00,\r\n"
+    r2 = b"1134B,Name Two,4006381333931,1,1.00,2.00,\r\n"
+    p = tmp_path / "dup-case.csv"
+    p.write_bytes(header + r1 + r2)
+    with pytest.raises(bio.CsvShapeError, match="duplicate SKU"):
+        bio.read_masterdata(p)
+
+
+@pytest.mark.parametrize("eol,eof", [("\r\n", False), ("\n", True),
+                                     ("\r\n", True), ("\n", False)])
+def test_f13_bom_round_trip_on_both_eol_shapes(tmp_path, eol, eof):
+    """F13: a BOM is tolerated on every byte shape and never written back."""
+    path = make_csv(tmp_path, eol=eol, eof=eof)
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+    md = bio.read_masterdata(path)
+    assert md.snap.had_bom is True
+    assert md.snap.eol == eol and md.snap.eof_newline is eof
+    original = [r[:] for r in md.records]
+    original[0][6] = ""  # ensure_photo_column renamed the empty 7th header
+    assert bio.serialise(original, md.snap) == md.snap.raw[3:]
+    records = [list(r) for r in md.records]
+    records[2][md.photo_idx] = "https://shop.test/x-p.jpg"
+    bio.write_masterdata_atomic(path, md, records)
+    out = path.read_bytes()
+    assert not out.startswith(b"\xef\xbb\xbf")       # never re-written
+    assert (b"\r\n" in out) is (eol == "\r\n")
+    assert out.endswith(eol.encode()) is eof
+    after = bio.read_masterdata(path)
+    assert after.records[2][after.photo_idx] == "https://shop.test/x-p.jpg"
+
+
+def test_f14_real_shape_fixture_round_trips(tmp_path):
+    """F14: the real post-edit shape (LF + final newline + named header)."""
+    path = tmp_path / "real.csv"
+    path.write_bytes((FIXTURES / "masterdata_real_shape.csv").read_bytes())
+    raw = path.read_bytes()
+    assert b"\r" not in raw and raw.endswith(b"\n")
+    md = bio.read_masterdata(path)
+    assert (md.snap.eol, md.snap.eof_newline, md.snap.had_bom) == ("\n", True, False)
+    assert md.photo_idx == 6 and md.column_appended is False
+    assert md.records[0][6] == bio.IMAGE_COLUMN        # already named: no rename
+    assert md.records[0][3:6] == ["Antal pr colli", "Sp2-Engros", "Sp3-Vejl.Pris"]
+    assert bio.serialise(md.records, md.snap) == raw   # byte-identical round trip
+    assert [r.is_blank for r in md.rows] == [True, False, False, False]
+    prefilled = next(r.photo for r in md.rows if r.sku == "1134")
+    assert prefilled == "https://shop.biogan.dk/images/produktbilleder/1134_web-p.jpg"
+    mode_before = stat.S_IMODE(path.stat().st_mode)
+    records = [list(r) for r in md.records]
+    records[2][md.photo_idx] = "https://shop.test/x-p.jpg"
+    bio.write_masterdata_atomic(path, md, records)
+    out = path.read_bytes()
+    assert out.endswith(b"\n") and b"\r" not in out
+    assert stat.S_IMODE(path.stat().st_mode) == mode_before
+    a, b = raw.decode("utf-8").split("\n"), out.decode("utf-8").split("\n")
+    assert [i for i, (x, y) in enumerate(zip(a, b)) if x != y] == [2]
+
+
+def test_f14_bom_fixture_is_tolerated_and_dropped(tmp_path):
+    """F14: the BOM variant of the real shape loads, round-trips, drops BOM."""
+    path = tmp_path / "bom.csv"
+    path.write_bytes((FIXTURES / "masterdata_bom.csv").read_bytes())
+    raw = path.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf")
+    md = bio.read_masterdata(path)
+    assert md.snap.had_bom is True
+    assert md.snap.eol == "\n" and md.snap.eof_newline is True
+    assert bio.serialise(md.records, md.snap) == raw[3:]
+    records = [list(r) for r in md.records]
+    records[2][md.photo_idx] = "https://shop.test/y-p.jpg"
+    bio.write_masterdata_atomic(path, md, records)
+    out = path.read_bytes()
+    assert not out.startswith(b"\xef\xbb\xbf")
+    assert out.endswith(b"\n") and b"\r" not in out

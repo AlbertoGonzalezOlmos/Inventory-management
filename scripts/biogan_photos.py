@@ -41,6 +41,11 @@ FAILING_STATUSES = {
 OK_STATUSES = {"ok", "cached", "downloaded", "skipped"}
 # The row-level breaker (F6) counts only these; every other outcome resets it.
 HARD_FAILURE_STATUSES = {"error", "parse_failure"}
+# F11: the status/match_via vocabularies pinned by the contract
+# (FINAL-APPROACH-1.md); the report embeds them so a consumer can validate it.
+STATUS_VOCABULARY = frozenset(OK_STATUSES | FAILING_STATUSES)
+MATCH_VIA_VOCABULARY = frozenset(
+    {"exact_id", "exact_name", "sku_search", "first_result", "prefilled", ""})
 
 
 class FetchError(RuntimeError):
@@ -55,12 +60,23 @@ class TooLarge(RuntimeError):
     """A response body exceeded the per-image cap while streaming."""
 
 
+class BudgetExhausted(RuntimeError):
+    """The --max-requests budget ran out (F7); a dedicated abort -> exit 2."""
+
+
 class LockHeld(RuntimeError):
     """Another crawler holds the CSV lock."""
 
 
+# F8: a pidfile this young whose pid cannot be read may simply be mid-write by
+# another acquirer; it is held (never broken) until the grace window passes.
+LOCK_GRACE_SECONDS = 60.0
+
+
 @dataclass
 class Hit:
+    # rec_index is the 1-based data-row number: md.records[rec_index] addresses
+    # the row (records[0] is the header). F11 documents this base in the report.
     rec_index: int
     sku: str = ""
     ean: str = ""
@@ -147,6 +163,11 @@ class Fetcher:
         # a failing row would otherwise erase the streak (F6).
         self.consecutive_hard = 0
         self.max_image_bytes: int | None = None
+        # F7: --max-requests, enforced BEFORE each request (retries included)
+        # so the budget is never overshot mid-row; budget_exhausted tells
+        # main() to abort with exit 2 once the current row state is flushed.
+        self.max_requests: int | None = None
+        self.budget_exhausted = False
         self._last: float | None = None
 
     def _throttle(self) -> None:
@@ -166,6 +187,11 @@ class Fetcher:
     def _request(self, url: str, *, limit: int | None = None) -> tuple[bytes, str | None, str | None, str]:
         last: Exception | None = None
         for attempt in range(self.retries + 1):
+            if (self.max_requests is not None
+                    and self.requests >= self.max_requests):
+                self.budget_exhausted = True
+                raise BudgetExhausted(
+                    f"request budget of {self.max_requests} exhausted")
             self._throttle()
             self.requests += 1
             request = urllib.request.Request(
@@ -349,6 +375,10 @@ def resolve(fetcher: Fetcher, row: bio.Row, *, size: str,
         hit.status = "error"
         hit.detail = str(exc)
         return hit
+    except BudgetExhausted as exc:
+        hit.status = "error"
+        hit.detail = str(exc)
+        return hit
     except (ValueError, OSError) as exc:
         hit.status = "error"
         hit.detail = str(exc)
@@ -369,7 +399,9 @@ def _attempts(hit: Hit) -> list[tuple[str, str, str]]:
 def _write_image(images_dir: Path, ean: str, body: bytes,
                  ext: str) -> Path:
     dest = images_dir / f"{ean}{ext}"
-    tmp = images_dir / f".{ean}{ext}.part-{os.getpid()}"
+    # F9: the contract's part-file name <ean>.<ext>.part-<pid>; the legacy
+    # dot-prefixed form of older runs is cleaned up alongside it.
+    tmp = images_dir / f"{ean}{ext}.part-{os.getpid()}"
     try:
         with open(tmp, "wb") as fh:
             fh.write(body)
@@ -378,9 +410,10 @@ def _write_image(images_dir: Path, ean: str, body: bytes,
         for stale in list(images_dir.glob(f"{ean}.*")):
             if stale != dest and stale.suffix.lower() in bio.IMAGE_EXTS:
                 stale.unlink(missing_ok=True)
-        for stale in list(images_dir.glob(f".{ean}.*.part-*")):
-            if stale != tmp:
-                stale.unlink(missing_ok=True)
+        for pattern in (f"{ean}.*.part-*", f".{ean}.*.part-*"):
+            for stale in list(images_dir.glob(pattern)):
+                if stale != tmp:
+                    stale.unlink(missing_ok=True)
         os.replace(tmp, dest)
     finally:
         if tmp.exists():
@@ -420,6 +453,11 @@ def download(fetcher: Fetcher, hit: Hit, images_dir: Path, *,
         except FetchError as exc:
             hit.status, hit.detail = "error", str(exc)
             return hit
+        except BudgetExhausted as exc:
+            # F7: keep hit.photo_url — the resolved URL is knowledge and the
+            # row is still flushed before main() aborts with exit 2.
+            hit.status, hit.detail = "error", str(exc)
+            return hit
         ext, note = bio.sniff_image(body, ctype, url)
         if ext is None:
             last_status, last_detail = "not_an_image", note or ""
@@ -443,12 +481,23 @@ def download(fetcher: Fetcher, hit: Hit, images_dir: Path, *,
 
 
 class Lock:
-    """A pidfile beside the CSV; stale means the pid is dead or too old."""
+    """A pidfile beside the CSV; stale means the pid is dead or too old.
 
-    def __init__(self, path: Path, stale_after: float = 7200) -> None:
+    F8: an unreadable pidfile inside the grace window is treated as a live
+    acquirer mid-write and held; the pidfile is re-read immediately before
+    the unlink so a lock replaced under us is never broken; every break is
+    recorded in ``break_reason`` for the report.
+    """
+
+    def __init__(self, path: Path, stale_after: float = 7200,
+                 grace: float = LOCK_GRACE_SECONDS) -> None:
         self.path = Path(path)
         self.stale_after = stale_after
+        self.grace = grace
         self._owned = False
+        # F8: the reason string of the stale lock this acquisition broke, or
+        # None; main() copies it into the report as ``lock_broken``.
+        self.break_reason: str | None = None
 
     @staticmethod
     def _alive(pid: int) -> bool:
@@ -464,23 +513,62 @@ class Lock:
             return False
         return True
 
+    def _read(self) -> tuple[int | None, str, float]:
+        """(pid or None if unreadable, raw content, age in seconds)."""
+        age = time.time() - self.path.stat().st_mtime
+        try:
+            content = self.path.read_text(encoding="utf-8")
+        except OSError:
+            return None, "", age
+        try:
+            return int(content.splitlines()[0]), content, age
+        except (ValueError, IndexError):
+            return None, content, age
+
+    def _stale_reason(self, pid: int | None, age: float) -> str | None:
+        """Why this lock is stale, or None while it must be held."""
+        if pid is None:
+            if age < self.grace:
+                return None  # possibly mid-write: hold until the grace passes
+            return f"unreadable pidfile, {age:.0f}s old"
+        if not self._alive(pid):
+            return f"dead pid {pid}"
+        if age > self.stale_after:
+            return f"pid {pid} alive but {age:.0f}s old"
+        return None
+
     def __enter__(self) -> "Lock":
-        for _ in range(2):
+        for _ in range(3):
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                              0o644)
             except FileExistsError:
                 try:
-                    pid = int(self.path.read_text(encoding="utf-8").splitlines()[0])
-                except (OSError, ValueError, IndexError):
-                    pid = 0
-                age = time.time() - self.path.stat().st_mtime
-                if self._alive(pid) and age <= self.stale_after:
+                    pid, content, age = self._read()
+                except FileNotFoundError:
+                    continue  # released between the open attempt and the read
+                reason = self._stale_reason(pid, age)
+                if reason is None:
+                    if pid is None:
+                        raise LockHeld(
+                            f"{self.path} held (pidfile unreadable, "
+                            f"{age:.0f}s old, within {self.grace:.0f}s grace)")
                     raise LockHeld(
                         f"{self.path} held by pid {pid} ({age:.0f}s old)")
-                print(f"breaking stale lock {self.path} (pid {pid}, {age:.0f}s)",
+                # F8: re-read before the unlink — another acquirer may have
+                # replaced the file between our read and this decision.
+                try:
+                    if self.path.read_text(encoding="utf-8") != content:
+                        continue
+                except OSError:
+                    continue
+                print(f"breaking stale lock {self.path} ({reason})",
                       file=sys.stderr)
-                self.path.unlink(missing_ok=True)
+                self.break_reason = reason
+                try:
+                    self.path.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 continue
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(f"{os.getpid()}\n{datetime.now(timezone.utc).isoformat()}\n"
@@ -576,7 +664,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, opener=None, sleep=None,
+         clock=None) -> int:
+    """Run the crawler; opener/sleep/clock are injectable for tests (F12)."""
     args = _build_parser().parse_args(argv)
     started = time.monotonic()
     csv_path = Path(args.csv)
@@ -616,13 +706,18 @@ def main(argv: list[str] | None = None) -> int:
         and (not only or r.sku.casefold() in only)
         and r.sku.casefold() not in skip
     ]
-    force = args.force or not args.resume
+    # F9: --no-resume re-resolves every row but KEEPS the magic-checked
+    # download cache; only --force actually re-downloads over a valid image.
+    force_resolve = args.force or not args.resume
     # Working copy; md.records stays the pristine load-time baseline that
     # write_masterdata_atomic verifies the written temp against (F4).
     records = [list(rec) for rec in md.records]
-    fetcher = Fetcher(opener=urllib.request.urlopen, delay=args.delay,
+    fetcher = Fetcher(opener=opener or urllib.request.urlopen, delay=args.delay,
                       timeout=args.timeout, retries=args.retries,
-                      user_agent=args.user_agent, base_url=args.base_url)
+                      user_agent=args.user_agent, base_url=args.base_url,
+                      sleep=sleep or time.sleep, clock=clock or time.monotonic)
+    fetcher.max_image_bytes = args.max_bytes
+    fetcher.max_requests = args.max_requests  # F7: enforced before each request
     fetcher.max_image_bytes = args.max_bytes
     hits: list[Hit] = []
     aborted = False
@@ -646,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.verbose and not args.quiet:
                     print(f"[bad_ean] {row.sku} {row.ean} {hit.detail}")
                 continue
-            if row.photo and not force:
+            if row.photo and not force_resolve:
                 try:
                     # F5: a prefilled cell is trusted only after it validates;
                     # on failure the cell is left exactly as it is. `--force`/
@@ -665,7 +760,7 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"[bad_cell] {row.sku} {row.ean} {hit.detail}")
                     continue
             existing = bio.find_image(images_dir, row.ean)[0] if row.ean else None
-            state = row_state(row.photo, existing, force)
+            state = row_state(row.photo, existing, force_resolve)
             if args.limit and state != "skip":
                 if work >= args.limit:
                     break
@@ -688,7 +783,7 @@ def main(argv: list[str] | None = None) -> int:
                               if args.save_html and not args.dry_run else None)
             if hit.status == "ok" and not args.no_download and not args.dry_run:
                 hit = download(fetcher, hit, images_dir, size=args.size,
-                               max_bytes=args.max_bytes, force=force)
+                               max_bytes=args.max_bytes, force=args.force)
             new_cell = hit.photo_url or row.photo
             if records[row.rec_index][md.photo_idx].strip() != new_cell.strip():
                 records[row.rec_index][md.photo_idx] = new_cell
@@ -707,7 +802,11 @@ def main(argv: list[str] | None = None) -> int:
                       f"failures; aborting", file=sys.stderr)
                 aborted = True
                 break
-            if fetcher.requests >= args.max_requests:
+            # F7: the fetcher refused a request against --max-requests; the
+            # current row state is flushed, so abort now (exit 2). A run that
+            # merely *reaches* the budget with only skip rows left does not
+            # abort — nothing was refused.
+            if fetcher.budget_exhausted:
                 print("error: request budget exhausted", file=sys.stderr)
                 aborted = True
                 break
@@ -726,11 +825,33 @@ def main(argv: list[str] | None = None) -> int:
         meta = {
             "csv": str(csv_path), "csv_sha256_before": md.snap.sha256,
             "eol": md.snap.eol, "eof_newline": md.snap.eof_newline,
-            "mode": md.snap.mode, "size": args.size,
+            "mode": md.snap.mode,
+            # F11: `size` is the CSV's size in bytes; the crawl variant is
+            # `variant`. `mode` stays the int stat mode.
+            "size": len(md.snap.raw), "variant": args.size,
+            # F11: Hit.rec_index addresses md.records[rec_index] — data rows
+            # are 1-based, records[0] is the header.
+            "rec_index_base": ("1-based data rows "
+                               "(records[0] is the header; "
+                               "md.records[rec_index] addresses the row)"),
             "images_dir": str(images_dir), "requests": fetcher.requests,
             "counts": dict(Counter(h.status for h in hits)),
+            # F11: the pinned vocabularies, so a consumer can validate the
+            # report against FINAL-APPROACH-1.md.
+            "status_vocabulary": sorted(STATUS_VOCABULARY),
+            "match_via_vocabulary": sorted(MATCH_VIA_VOCABULARY),
+            "unresolved": [
+                {"rec_index": h.rec_index, "sku": h.sku, "ean": h.ean,
+                 "name": h.name, "status": h.status,
+                 "match_via": h.match_via, "detail": h.detail}
+                for h in hits
+                if h.status in FAILING_STATUSES or h.match_via == "first_result"
+            ],
             "elapsed": round(elapsed, 3),
         }
+        # F8: the reason a stale lock was broken, when one was.
+        if lock is not None and lock.break_reason:
+            meta["lock_broken"] = lock.break_reason
         try:
             write_report(Path(args.report), hits, meta)
         except (OSError, ValueError) as exc:
