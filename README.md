@@ -166,11 +166,12 @@ bearer), read-only, and never creates the directory. Root order: `$HCRM_CATALOGU
 **Known gaps**: 14 supplier SKUs have **no photo on the site**, so their `URL to photo` cell and DB
 `image_url` stay empty — `1327, 1709c, 1717B, 1773, 1842, 1989, 2223A, 2401, 2962, 2974, 4219, 4270, 4472,
 6700` (the crawler reports them as `no_result`; nothing is invented). Prices are stored as the supplier's DKK
-amounts while `static/app.js` still formats them as EUR — a display-only follow-up, deliberately not changed
-here. If the embedding model is unavailable the importer defers a row rather than writing text without a
-vector (the API enforces the same rule), so boot the app once (or run `uv run python -c "from app.embeddings
-import warm_up; warm_up()"`) before the first import; `app/seed.py::backfill_embeddings()` repairs any NULL
-embedding at boot.
+amounts (integer øre) and rendered as `1.234,50 DKK` — fixed Danish numerals regardless of UI language — by the
+hand-rolled formatter in `static/i18n.js`, deliberately not `Intl` currency mode (which emits a non-breaking
+space before the code and drifts with the browser's ICU build). If the embedding model is unavailable the
+importer defers a row rather than writing text without a vector (the API enforces the same rule), so boot
+the app once (or run `uv run python -c "from app.embeddings import warm_up; warm_up()"`) before the first
+import; `app/seed.py::backfill_embeddings()` repairs any NULL embedding at boot.
 
 ## Features
 
@@ -585,7 +586,6 @@ touching `./data`).
 | **Refunds / voids / receipt re-issue** | Checkout exists (`POST /api/orders`: snapshots, clamp-and-report stock, immutable receipts); what remains open is the after-sale: refunds, voiding an order, re-sending a receipt. |
 | **`PRAGMA foreign_keys` is OFF** | `auth_tokens.user_id` is declarative only; enforcing it needs a table rebuild. The only user-deleting path removes tokens first. |
 | **Quantized ANN scans** (`vector_quantize`) | Exact `vector_full_scan` is comfortable to ~100k items; see the measurements above. |
-| **Supplier prices displayed as EUR** | The Biogan catalogue is priced in DKK (`price_cents` holds the supplier amount) but `static/app.js` formats every price with the EUR symbol. Display-only; changing it would touch all price rendering, so it is a separate, deliberate change. |
 
 ## Next steps (barebones placeholders)
 

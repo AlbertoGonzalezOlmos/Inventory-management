@@ -457,7 +457,7 @@ Client: `monthMatrix` via `Date.UTC` (never local midnight), Monday-first,
 padded; `dayColour` = `hsl(120·(1−t), 73%, 75−25t%)` with
 `t = max > min ? (cents−min)/(max−min) : 0` over **day** totals;
 `monthSummary` cross-checked against `total_cents` (drift detector); empty month
-renders dotless with `DKK0.00`.
+renders dotless with `0,00 DKK`.
 
 ### 7.3 Review screen (item 4) — canonical
 
