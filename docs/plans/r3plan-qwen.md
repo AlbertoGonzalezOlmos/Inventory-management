@@ -1001,7 +1001,7 @@ a checkout (so a just-completed purchase dots today) and on
   collapsing to one column in the existing `@media (max-width: 900px)` block
   (`style.css:490-494`) — mirroring `.catalogue-layout` (`style.css:136-141`).
 * Empty month: the grid still renders (all cells dotless) and the total reads
-  `DKK0.00` — never a blank hole.
+  `0,00 DKK` — never a blank hole.
 
 ### 5.3 Tests
 

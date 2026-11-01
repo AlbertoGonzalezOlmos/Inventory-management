@@ -93,7 +93,7 @@ const DATA_COLUMNS = [
   { key: "sku", label: "SKU" },
   { key: "name", label: "Name" },
   { key: "category", label: "Category" },
-  { key: "price_cents", label: "Price" },
+  { key: "price_cents", label: "Price (DKK)" },
   { key: "stock", label: "Stock" },
   { key: "description", label: "Description" },
   { key: "has_embedding", label: "Embedded" },
@@ -428,9 +428,9 @@ Vue.createApp({
   methods: {
     /* ---------- helpers ---------- */
     formatPrice(cents) {
-      return new Intl.NumberFormat(undefined, {
-        style: "currency", currency: "EUR",
-      }).format((cents || 0) / 100);
+      // DKK via the shared runtime, which loads before this file: fixed
+      // Danish numerals in both UI languages, ASCII space, stable bytes.
+      return HcrmI18n.money(cents);
     },
     formatDate(iso) {
       return new Date(iso).toLocaleDateString();
@@ -2197,7 +2197,9 @@ Vue.createApp({
       }
     },
 
-    /** Raw value used for CSV/PDF exports. */
+    /** Raw value for the CSV export (machine-readable: money stays a bare
+     *  dot-decimal number so spreadsheets can sum it and the
+     *  formula-injection guard keeps working). */
     exportValue(row, key) {
       switch (key) {
         case "price_cents": return (row.price_cents / 100).toFixed(2);
@@ -2205,6 +2207,12 @@ Vue.createApp({
         case "created_at": return new Date(row.created_at).toISOString().slice(0, 10);
         default: return row[key] ?? "";
       }
+    },
+
+    /** Display value for the PDF export (a document a human reads): money is
+     *  formatted ("1.234,50 DKK"); every other column matches exportValue. */
+    exportPdfValue(row, key) {
+      return key === "price_cents" ? this.formatPrice(row.price_cents) : String(this.exportValue(row, key));
     },
 
     csvEscape(value) {
@@ -2245,6 +2253,10 @@ Vue.createApp({
       if (!this.exportRows.length) return this.showToast("Nothing to export");
       if (!window.jspdf) return this.showToast("PDF library not loaded");
       const cols = this.exportCols;
+      // The body cells below are formatted ("1.234,50 DKK"), so the sheet
+      // names the currency once, above the table — but only when a price
+      // column is actually exported (the column picker can exclude it).
+      const hasPrice = cols.some((c) => c.key === "price_cents");
       const doc = new window.jspdf.jsPDF({ orientation: "landscape" });
       doc.setFontSize(14);
       doc.text("HCRM — Items export", 14, 15);
@@ -2253,10 +2265,11 @@ Vue.createApp({
         `${this.exportRows.length} row(s) × ${cols.length} column(s) — ` +
         new Date().toLocaleString(), 14, 22
       );
+      if (hasPrice) { doc.setFontSize(9); doc.text("Prices in DKK", 14, 28); }
       doc.autoTable({
-        startY: 27,
+        startY: hasPrice ? 33 : 27,
         head: [cols.map((c) => c.label)],
-        body: this.exportRows.map((r) => cols.map((c) => String(this.exportValue(r, c.key)))),
+        body: this.exportRows.map((r) => cols.map((c) => this.exportPdfValue(r, c.key))),
         styles: { fontSize: 8, cellPadding: 2 },
         headStyles: { fillColor: [37, 99, 235] },
       });

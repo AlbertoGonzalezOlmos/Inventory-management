@@ -242,7 +242,7 @@ an existing `_cartOp`-serialized mutation returning the full `CartOut`:
   collapsing in the existing 900 px media query); day number kept, dot only
   on purchase days (`:style` background + `title` tooltip with count +
   amount); today ring; month total + purchase count below the grid; empty
-  month renders dotless with `DKK0.00`, never a blank hole. Fetched on
+  month renders dotless with `0,00 DKK`, never a blank hole. Fetched on
   `selectProfileTab("purchases")` and after `donePurchase`. Prev/next month
   nav is ~10 lines once the endpoint exists — **optional, coordinator call**
   (the spec says "current month"; default in both peers' plans is to ship it).
