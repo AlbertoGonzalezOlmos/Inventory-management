@@ -325,7 +325,7 @@ groups **Same barcode family** (`by_prefix`) and **Similar code/name**
 marks a matching open ScanRequest resolved-by-pick is *not* attempted (keep
 it simple); live search as the operator types a name (≥2 chars, 300 ms
 debounce → `GET /items/suggest?barcode=<gtin14?>&q=<name>` — the
-`by_semantic` group appears here as "Similar meaning"); form: name, price €
+`by_semantic` group appears here as "Similar meaning"); form: name, price DKK
 (→ cents via the existing `Math.round(x*100)` idiom), and for **staff only**
 a SKU field prefilled with `analysis.gtin14 || code` (ItemIn requires a SKU).
 Submit, role-aware (decision 1):
