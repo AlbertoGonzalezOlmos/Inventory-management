@@ -39,6 +39,16 @@ if ! uv run python scripts/build_i18n.py --check; then
     exit 1
 fi
 
+# i18n coverage ratchet (item 4): read-only, silent on success. A hardcoded string
+# in a migrated namespace, an unknown/dead id, or a stale allowlist entry refuses
+# the boot rather than serving copy the CSV does not own.
+if ! i18n_check_out=$(uv run python scripts/i18n_check.py --quiet 2>&1); then
+    printf '%s\n' "$i18n_check_out" >&2
+    echo "i18n: refusing to boot — the copy coverage gate failed." >&2
+    echo "i18n: run: uv run python scripts/i18n_check.py" >&2
+    exit 1
+fi
+
 # W1.4: a throwaway database for experiments, so ./data (the operator's live
 # data) is never the default target of a verification run.
 if [ -n "${HCRM_SCRATCH:-}" ]; then

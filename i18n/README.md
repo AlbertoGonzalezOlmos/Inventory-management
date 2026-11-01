@@ -31,6 +31,30 @@ served and committed.
 - `lang.switch_to` is the **action in the current UI language** ("Switch to Danish" /
   "Skift til engelsk") — the toggle's accessible name, not a language name.
 
+## Coverage checker (the ratchet)
+
+`uv run python scripts/i18n_check.py` is read-only and has five passes: **csv** (shape;
+`scripts/_i18n.py` is delegated, never re-implemented), **reference** (`t()`/`tp()` ids
+from the served code must exist), **dead-row** (every row is referenced by the app or a
+test; a computed family needs a `DYNAMIC_FAMILIES` entry that has rows), **hardcoded**
+(copy bypassing the CSV in `index.html`/`static/*.js`), and **ratchet** (which findings
+are fatal). Exit `0` clean, `1` violations, `2` cannot run (bad args, invalid CSV).
+`--quiet` prints only the summary, `--json` the findings; `scripts/run.sh` and CI refuse
+a failing tree.
+
+The ratchet: `migrated.txt` lists migrated namespaces (`app.`, `lang.`, …). A hardcoded
+literal matching a row in a listed namespace is an **error**; anything else is **INFO**
+until its slice lands. Slices ADD their namespace; the file is DELETED at the item-7
+flip, which makes every hardcoded-copy finding fatal. The INFO count is pinned in
+`tests/test_i18n_coverage.py` — lower it in the slice commit, never raise it.
+
+`copy-allowlist.txt` exempts findings by CONTENT — `<path>:<kind>:<escaped literal>`
+(brand tokens, commands) — so an entry survives a line move and only goes stale when the
+copy itself changes. It must say why and which item removes it, and the list can only
+SHRINK: an unused entry is an error. Fix by class: unknown id → add the row (and `--write`) or fix the typo; dead row →
+wire it or delete it; hardcoded copy → move it to the CSV and bind it; stale namespace or
+allowlist entry → delete the entry when its last row/finding goes.
+
 ## Excel
 
 Danish Excel uses `;` as its list separator, so a double-clicked CSV opens in one
