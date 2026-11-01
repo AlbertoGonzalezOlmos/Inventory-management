@@ -32,9 +32,64 @@ auth.staged_waiting.other,{n} scanned items waiting — scan your QR badge or lo
 auth.switch_failed,Switch failed: {message},Skiftet mislykkedes: {message}
 auth.switched_must_change,Switched to {name} — change the password to continue,Skiftet til {name} — skift adgangskoden for at fortsætte
 auth.switched_saved,Switched to {name} — {old}'s list was saved and will be back when {old} signs in,"Skiftet til {name} — {old}s indkøbsliste blev gemt og kommer tilbage, når {old} logger ind"
+cart.add_to_purchase,Add to purchase list,Tilføj til indkøbslisten
+cart.added,{name} added to your purchase list,{name} blev tilføjet til din indkøbsliste
+cart.clear,Clear list,Ryd listen
+cart.empty,Click items in the catalogue to add them to your purchase list.,Klik på varer i kataloget for at tilføje dem til din indkøbsliste.
+cart.empty_toast,Your purchase list is empty,Din indkøbsliste er tom
+cart.imported.one,Imported {n} item from your old purchase list,Importerede {n} vare fra din gamle indkøbsliste
+cart.imported.other,Imported {n} items from your old purchase list,Importerede {n} varer fra din gamle indkøbsliste
+cart.imported_partial,Imported your old purchase list (some items are gone),Din gamle indkøbsliste blev importeret (nogle varer findes ikke længere)
+cart.only_in_stock,— only {n} in stock,— kun {n} på lager
+cart.only_stock,Only {n} in stock,Kun {n} på lager
+cart.price_each,{price} each,{price} pr. stk.
+cart.qty_invalid,Enter a whole number of units (0 removes the line),Indtast et helt antal enheder (0 fjerner linjen)
+cart.qty_title,Set the quantity (0 removes the line),Angiv antallet (0 fjerner linjen)
+cart.restored.one,Your purchase list was restored ({n} item),Din indkøbsliste blev gendannet ({n} vare)
+cart.restored.other,Your purchase list was restored ({n} items),Din indkøbsliste blev gendannet ({n} varer)
+cart.title,Purchase list,Indkøbsliste
+catalogue.all_categories,All categories,Alle kategorier
+catalogue.detail_meta,{category} · SKU {sku},{category} · SKU {sku}
+catalogue.empty,No items found.,Ingen varer fundet.
+catalogue.empty_staff,Add some in the Admin section.,Tilføj nogle varer i Administration.
+catalogue.in_stock,{n} in stock,{n} på lager
+catalogue.no_description,No description.,Ingen beskrivelse.
+catalogue.out_of_stock,Out of stock,Ikke på lager
+catalogue.relevance,{pct}% relevance,{pct}% relevans
+catalogue.search,Search,Søg
 catalogue.search_placeholder,Search the catalogue…,Søg i kataloget…
+catalogue.semantic_note,Semantic search: results ranked by meaning-similarity to “{query}”.,Semantisk søgning: resultater rangeret efter betydningslighed med “{query}”.
+catalogue.semantic_title,Semantic search uses AI embeddings of item descriptions,Semantisk søgning bruger AI-embeddings af varebeskrivelser
+catalogue.similar,Similar items,Lignende varer
+catalogue.stock_out,out of stock,ikke på lager
+catalogue.suggest_keyword,Similar code or name,Lignende kode eller navn
+catalogue.suggest_prefix,Same barcode family,Samme stregkodefamilie
+catalogue.suggest_semantic,Similar meaning,Lignende betydning
+catalogue.view_details,View details,Se detaljer
+checkout.cart_empty,Cart is empty,Indkøbslisten er tom
+checkout.clamped,{applied} of {requested},{applied} af {requested}
+checkout.complete,Complete purchase,Gennemfør køb
+checkout.done,Done — complete purchase,Færdig — gennemfør køb
+checkout.empty,Your purchase list is empty — add items from the catalogue or by scanning them.,"Din indkøbsliste er tom — tilføj varer fra kataloget, eller scan dem."
+checkout.failed,Checkout failed ({status}),Købet kunne ikke gennemføres ({status})
+checkout.keep_shopping,Keep shopping,Fortsæt med at handle
+checkout.order_number,Order #{order},Ordre #{order}
+checkout.purchase_complete,Purchase complete — {total},Køb gennemført — {total}
+checkout.receipt_cleared,Your purchase list was cleared. The receipt also appears in Purchase history.,Din indkøbsliste blev ryddet. Kvitteringen vises også i Købshistorik.
+checkout.receipt_title,Purchase complete,Køb gennemført
+checkout.review_title,Review your purchase,Gennemse køb
+checkout.scan_hint,You can still scan items to add them — quantity changes here are saved as you make them.,Du kan stadig scanne varer for at tilføje dem — ændringer i antallet her gemmes med det samme.
+checkout.skipped.one,{n} scanned item no longer exists and was skipped.,{n} scannet vare findes ikke længere og blev sprunget over.
+checkout.skipped.other,{n} scanned items no longer exist and were skipped.,{n} scannede varer findes ikke længere og blev sprunget over.
+common.done,Done,Færdig
+common.item,Item,Vare
 common.item_count.one,{n} item,{n} vare
 common.item_count.other,{n} items,{n} varer
+common.loading,Loading…,Indlæser…
+common.price,Price,Pris
+common.price_dkk,Price (DKK),Pris (DKK)
+common.qty,Qty,Antal
+common.total,Total,I alt
 lang.switch_to,Switch to Danish,Skift til engelsk
 money.code,DKK,DKK
 nav.admin,Admin,Administration

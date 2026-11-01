@@ -503,3 +503,89 @@ def test_stale_search_responses_are_generation_guarded():
     body = _method_body("async loadMore() {")
     assert body.count("gen !== this._itemsGen) continue") == 2, \
         "both the resolve and the reject path must refetch when superseded"
+
+
+# --- Slice B: the catalogue / cart / checkout copy bindings -----------------
+
+def test_catalogue_toolbar_and_suggestion_copy_is_csv_bound():
+    """Slice B binds the toolbar and the intake suggestion dropdown: the
+    search placeholder is an ATTRIBUTE (the seeded catalogue.search_placeholder
+    row had to be bound, not merely present), the semantic toggle's title and
+    label and the category placeholder follow, and the suggestion group labels
+    are t()-computed (not literal labels)."""
+    html = _read("index.html")
+    assert ":placeholder=\"t('catalogue.search_placeholder')\"" in html
+    assert 'placeholder="Search the catalogue…"' not in html, (
+        "the search placeholder must render from the CSV row in both languages")
+    assert ":title=\"t('catalogue.semantic_title')\"" in html
+    assert ">{{ t('catalogue.search') }}</button>" in html
+    assert ">{{ t('catalogue.all_categories') }}</option>" in html
+    groups = _method_body("intakeGroups() {")
+    for key in ("catalogue.suggest_prefix", "catalogue.suggest_keyword",
+                "catalogue.suggest_semantic"):
+        assert f'this.t("{key}")' in groups, key
+
+
+def test_cart_panels_render_through_rows_with_placeholders():
+    """The two cart panels: price-each and the stock warning are ONE row each
+    (the price/number travels as a placeholder), the total is the shared
+    common.total row, and no 'each'/'>Total<' literal survives. Rendering
+    `formatPrice(...) + ' each'` was the concatenation class slice A banned."""
+    html = _read("index.html")
+    assert html.count(
+        "t('cart.price_each', { price: formatPrice(entry.item.price_cents) })") == 2
+    assert html.count("t('cart.only_in_stock', { n: entry.item.stock })") == 2
+    assert html.count("<span>{{ t('common.total') }}</span>") == 2
+    assert ">Total<" not in html
+    assert "}} each" not in html, "the price must not be concatenated outside t()"
+    for key in ("cart.title", "cart.empty", "cart.clear", "checkout.complete",
+                "checkout.review_title", "checkout.keep_shopping", "checkout.done",
+                "checkout.scan_hint"):
+        assert f"t('{key}')" in html, key
+
+
+def test_receipt_counts_render_through_plural_pairs():
+    """The receipt is slice B's count surface: the line count uses the shared
+    common.item_count pair, the skipped-orphans sentence its own
+    checkout.skipped pair, and the order id/clamped quantities travel as
+    placeholders — never a literal 'item(s)' or an id concatenation. The
+    money column header states the currency (item-1 decision 4), so it uses
+    common.price_dkk, not the form-label common.price row."""
+    html = _read("index.html")
+    assert "tp('common.item_count', lastReceipt.purchase.lines.length)" in html
+    assert "tp('checkout.skipped', lastReceipt.skipped.length)" in html
+    assert "t('checkout.order_number', { order: lastReceipt.purchase.id })" in html
+    assert ("t('checkout.clamped', { applied: line.applied_qty, "
+            "requested: line.qty })") in html
+    receipt = html.split("Checkout receipt modal", 1)[1] \
+        .split("================= Toast", 1)[0]
+    for key in ("common.item", "common.qty", "common.price_dkk", "common.total"):
+        assert f"<th>{{{{ t('{key}') }}}}</th>" in receipt, key
+    assert "<th>{{ t('common.price') }}</th>" not in receipt, (
+        "a money column header must state DKK (item-1 decision 4)")
+    assert "(s)" not in receipt, "the receipt must never render the '(s)' idiom"
+
+
+def test_cart_and_checkout_toasts_are_csv_bound():
+    """Every cart/checkout toast is a {key, vars} descriptor (an open toast
+    re-renders with the flag) or a tp() plural. Method-body scoped: the scan
+    and intake flows still carry the same English sentence until slice D, so a
+    whole-file grep would over-claim."""
+    expected = {
+        "_stockWarn(line) {": ['key: "cart.only_stock"'],
+        "addToPurchase(item) {": ['key: "cart.added", vars: { name: item.name }'],
+        "setLineQty(id, ev) {": ['key: "cart.qty_invalid"'],
+        "_announceCartRestored() {": ['key: "cart.restored", plural: this.cart.total_qty'],
+        "async importLegacyPurchase() {": ['key: "cart.imported", plural: lines.length',
+                                          'key: "cart.imported_partial"'],
+        "async donePurchase() {": ['key: "cart.empty_toast"',
+                                   'key: "checkout.purchase_complete"',
+                                   'key: "checkout.cart_empty"',
+                                   'key: "checkout.failed", vars: { status: r.status }'],
+    }
+    for header, keys in expected.items():
+        body = _method_body(header)
+        for key in keys:
+            assert key in body, (header, key)
+        for gone in ("item(s)", '"Only " +', " added to your purchase list"):
+            assert gone not in body, (header, gone)

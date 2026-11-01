@@ -379,9 +379,9 @@ Vue.createApp({
       if (!this.scanIntake) return {};
       const s = this.scanIntake.suggestions || {};
       return {
-        by_prefix: { label: "Same barcode family", items: s.by_prefix || [] },
-        by_keyword: { label: "Similar code or name", items: s.by_keyword || [] },
-        by_semantic: { label: "Similar meaning", items: s.by_semantic || [] },
+        by_prefix: { label: this.t("catalogue.suggest_prefix"), items: s.by_prefix || [] },
+        by_keyword: { label: this.t("catalogue.suggest_keyword"), items: s.by_keyword || [] },
+        by_semantic: { label: this.t("catalogue.suggest_semantic"), items: s.by_semantic || [] },
       };
     },
 
@@ -521,6 +521,13 @@ Vue.createApp({
       this.lang = this.nextLang;
     },
     msg(value) {
+      // Slice B: a PLURAL descriptor carries its count separately
+      // ({key, plural, vars?}) — {key, vars} cannot express which .one/.other
+      // row to pick, and the toast must still re-render with the flag (tp
+      // reads this.lang at paint time, exactly like t()).
+      if (value && typeof value === "object" && value.plural !== undefined) {
+        return this.tp(value.key, value.plural, value.vars || null);
+      }
       return HcrmI18n.descriptorText(value, (id, vars) => this.t(id, vars));
     },
     formatPrice(cents) {
@@ -934,7 +941,7 @@ Vue.createApp({
       // that path already toasted "Imported N items", and a second
       // "restored" toast would clobber it.
       if (this.cart && this.cart.lines.length && !this._cartImportedLegacy) {
-        this.showToast(`Your purchase list was restored (${this.cart.total_qty} item(s))`);
+        this.showToast({ key: "cart.restored", plural: this.cart.total_qty });
       }
       this._cartImportedLegacy = false;
     },
@@ -956,7 +963,7 @@ Vue.createApp({
         if (lines.length) {
           try {
             this.cart = await api("/cart", { method: "PUT", body: { lines } });
-            this.showToast(`Imported ${lines.length} item(s) from your old purchase list`);
+            this.showToast({ key: "cart.imported", plural: lines.length });
             return true;
           } catch (e) {
             if (e.status === 404 || e.status === 422) {
@@ -968,7 +975,7 @@ Vue.createApp({
                   this.cart = await api("/cart/items", { method: "POST", body: line });
                 } catch (_) { /* item gone from the catalogue */ }
               }
-              this.showToast("Imported your old purchase list (some items are gone)");
+              this.showToast({ key: "cart.imported_partial" });
               return true;
             } // transient errors: the import is one-time by design
           }
@@ -979,7 +986,7 @@ Vue.createApp({
 
     _stockWarn(line) {
       if (line && line.qty > line.item.stock) {
-        this.showToast("Only " + line.item.stock + " in stock");
+        this.showToast({ key: "cart.only_stock", vars: { n: line.item.stock } });
       }
     },
 
@@ -990,7 +997,7 @@ Vue.createApp({
         });
         const line = this.cart.lines.find(l => l.item.id === item.id);
         this._stockWarn(line);
-        this.showToast(item.name + " added to your purchase list");
+        this.showToast({ key: "cart.added", vars: { name: item.name } });
         this.closeDetail();
       });
     },
@@ -1241,7 +1248,7 @@ Vue.createApp({
       return this._cartOp(async () => {
         const n = parseInt(raw, 10);
         if (!Number.isFinite(n) || !Number.isInteger(Number(raw)) || n < 0) {
-          this.showToast("Enter a whole number of units (0 removes the line)");
+          this.showToast({ key: "cart.qty_invalid" });
           await this.loadCart();
         } else {
           try {
@@ -1264,7 +1271,7 @@ Vue.createApp({
 
     async donePurchase() {
       if (this.busy) return;
-      if (!this.purchase.length) { this.showToast("Your purchase list is empty"); return; }
+      if (!this.purchase.length) { this.showToast({ key: "cart.empty_toast" }); return; }
       this.busy = true;   // also drives the button's :disabled binding —
       try {               // without it a double-click fires a second POST
         // Serialized with every other cart mutation (the _cartOp chain):
@@ -1284,8 +1291,8 @@ Vue.createApp({
             this.route = "#/purchases";
             location.hash = "#/purchases";
             this.expandedOrders = [pid];                 // pre-expand the receipt
-            this.showToast("Purchase complete — " +
-              this.formatPrice(r.data.purchase.total_cents));
+            this.showToast({ key: "checkout.purchase_complete",
+              vars: { total: this.formatPrice(r.data.purchase.total_cents) } });
             // The receipt modal is EXCEPTION-ONLY (clamp-not-veto must stay
             // reportable, but a clean checkout gets no blocking dialog):
             // skipped orphans and clamped lines are the cases the history
@@ -1295,8 +1302,8 @@ Vue.createApp({
             if (skipped.length || clamped) this.lastReceipt = r.data;
             return;
           }
-          if (r.status === 400) { this.showToast("Cart is empty"); return; }
-          this.showToast("Checkout failed (" + r.status + ")");
+          if (r.status === 400) { this.showToast({ key: "checkout.cart_empty" }); return; }
+          this.showToast({ key: "checkout.failed", vars: { status: r.status } });
         });
       } finally {
         this.busy = false;

@@ -197,25 +197,26 @@
             class="search"
             type="search"
             v-model="search"
-            placeholder="Search the catalogue…"
+            :placeholder="t('catalogue.search_placeholder')"
           />
           <button
             class="btn toggle"
             :class="{on: semantic}"
-            :title="'Semantic search uses AI embeddings of item descriptions'"
+            :title="t('catalogue.semantic_title')"
             @click="toggleSemantic"
-          >Search</button>
+          >{{ t('catalogue.search') }}</button>
           <select v-model="category">
-            <option value="">All categories</option>
+            <option value="">{{ t('catalogue.all_categories') }}</option>
             <option v-for="c in categories" :key="c" :value="c">{{ c }}</option>
           </select>
         </div>
         <p v-if="semantic && search.trim()" class="muted">
-          Semantic search: results ranked by meaning-similarity to “{{ search }}”.
+          {{ t('catalogue.semantic_note', { query: search }) }}
         </p>
 
         <p v-if="!loading && items.length === 0" class="empty">
-          No items found. <span v-if="isStaff">Add some in the Admin section.</span>
+          {{ t('catalogue.empty') }}
+          <span v-if="isStaff">{{ t('catalogue.empty_staff') }}</span>
         </p>
 
         <div class="item-grid">
@@ -225,7 +226,7 @@
             class="item-card"
             @click="addToPurchase(item)"
           >
-            <button class="details-btn" title="View details" @click.stop="openDetail(item)">ℹ</button>
+            <button class="details-btn" :title="t('catalogue.view_details')" @click.stop="openDetail(item)">ℹ</button>
             <div class="item-thumb">
               <img v-if="item.image_url" :src="item.image_url" :alt="item.name" loading="lazy" />
               <span v-else class="placeholder-icon">📦</span>
@@ -236,10 +237,10 @@
               <div class="item-footer">
                 <strong>{{ formatPrice(item.price_cents) }}</strong>
                 <span v-if="item.similarity !== undefined" class="sim-badge">
-                  {{ Math.round(item.similarity * 100) }}% relevance
+                  {{ t('catalogue.relevance', { pct: Math.round(item.similarity * 100) }) }}
                 </span>
                 <span class="stock" :class="{out: item.stock === 0}">
-                  {{ item.stock > 0 ? item.stock + ' in stock' : 'out of stock' }}
+                  {{ item.stock > 0 ? t('catalogue.in_stock', { n: item.stock }) : t('catalogue.stock_out') }}
                 </span>
               </div>
             </div>
@@ -248,7 +249,7 @@
 
         <!-- infinite-scroll sentinel -->
         <div id="sentinel" v-show="hasMore"></div>
-        <p v-if="loading" class="muted loading-note">Loading…</p>
+        <p v-if="loading" class="muted loading-note">{{ t('common.loading') }}</p>
       </div>
 
         <!-- The checkout review panel (round 3, item 4): the cart in edit
@@ -256,25 +257,24 @@
              existing committed mutation (plus setLineQty's absolute PATCH),
              so edits here are exactly as durable as in the sidebar. -->
       <aside class="selection-panel review-panel" v-if="currentView === 'checkout'">
-        <h2>Review your purchase</h2>
+        <h2>{{ t('checkout.review_title') }}</h2>
         <p v-if="purchase.length === 0" class="muted">
-          Your purchase list is empty — add items from the catalogue or by
-          scanning them.
+          {{ t('checkout.empty') }}
         </p>
         <ul class="selection-list">
           <li v-for="entry in purchase" :key="entry.item.id">
             <div class="sel-info">
               <span>{{ entry.item.name }}</span>
               <small :class="{ 'stock-warn': entry.qty > entry.item.stock }">
-                {{ formatPrice(entry.item.price_cents) }} each
-                <template v-if="entry.qty > entry.item.stock">— only {{ entry.item.stock }} in stock</template>
+                {{ t('cart.price_each', { price: formatPrice(entry.item.price_cents) }) }}
+                <template v-if="entry.qty > entry.item.stock">{{ t('cart.only_in_stock', { n: entry.item.stock }) }}</template>
               </small>
               <small>{{ formatPrice(entry.line_total_cents) }}</small>
             </div>
             <div class="sel-controls">
               <button class="btn tiny" @click="decPurchase(entry.item.id)" :disabled="entry.qty <= 1">−</button>
               <input class="qty-input" type="number" min="1" :value="entry.qty"
-                     title="Set the quantity (0 removes the line)"
+                     :title="t('cart.qty_title')"
                      @change="setLineQty(entry.item.id, $event)" />
               <button class="btn tiny" @click="incPurchase(entry.item.id)">+</button>
               <button class="btn tiny danger" @click="removeFromPurchase(entry.item.id)">✕</button>
@@ -282,31 +282,30 @@
           </li>
         </ul>
         <div class="selection-total" v-if="purchase.length">
-          <span>Total</span>
+          <span>{{ t('common.total') }}</span>
           <strong>{{ formatPrice(purchaseTotalCents) }}</strong>
         </div>
         <div class="selection-actions">
-          <button class="btn ghost block" @click="keepShopping">Keep shopping</button>
+          <button class="btn ghost block" @click="keepShopping">{{ t('checkout.keep_shopping') }}</button>
           <button class="btn block" :disabled="busy || purchase.length === 0"
-                  @click="donePurchase">Done — complete purchase</button>
+                  @click="donePurchase">{{ t('checkout.done') }}</button>
         </div>
-        <p class="muted scan-hint">You can still scan items to add them —
-          quantity changes here are saved as you make them.</p>
+        <p class="muted scan-hint">{{ t('checkout.scan_hint') }}</p>
       </aside>
 
       <!-- Purchase list sidebar (the server-side cart: durable per user) -->
       <aside class="selection-panel" v-else>
-        <h2>Purchase list</h2>
+        <h2>{{ t('cart.title') }}</h2>
         <p v-if="purchase.length === 0" class="muted">
-          Click items in the catalogue to add them to your purchase list.
+          {{ t('cart.empty') }}
         </p>
         <ul class="selection-list">
           <li v-for="entry in purchase" :key="entry.item.id">
             <div class="sel-info">
               <span>{{ entry.item.name }}</span>
               <small :class="{ 'stock-warn': entry.qty > entry.item.stock }">
-                {{ formatPrice(entry.item.price_cents) }} each
-                <template v-if="entry.qty > entry.item.stock">— only {{ entry.item.stock }} in stock</template>
+                {{ t('cart.price_each', { price: formatPrice(entry.item.price_cents) }) }}
+                <template v-if="entry.qty > entry.item.stock">{{ t('cart.only_in_stock', { n: entry.item.stock }) }}</template>
               </small>
               <small>{{ formatPrice(entry.line_total_cents) }}</small>
             </div>
@@ -319,11 +318,11 @@
           </li>
         </ul>
         <div class="selection-actions" v-if="purchase.length">
-          <button class="btn ghost block" @click="clearPurchase">Clear list</button>
-          <button class="btn block" :disabled="busy" @click="goToCheckout">Complete purchase</button>
+          <button class="btn ghost block" @click="clearPurchase">{{ t('cart.clear') }}</button>
+          <button class="btn block" :disabled="busy" @click="goToCheckout">{{ t('checkout.complete') }}</button>
         </div>
         <div class="selection-total" v-if="purchase.length">
-          <span>Total</span>
+          <span>{{ t('common.total') }}</span>
           <strong>{{ formatPrice(purchaseTotalCents) }}</strong>
         </div>
       </aside>
@@ -428,7 +427,7 @@
         </p>
         <table class="table" v-else>
           <thead>
-            <tr><th>Requested</th><th>Code</th><th>Proposed item</th><th>Price</th><th>Status</th></tr>
+            <tr><th>Requested</th><th>Code</th><th>Proposed item</th><th>{{ t('common.price') }}</th><th>Status</th></tr>
           </thead>
           <tbody>
             <tr v-for="req in myRequests" :key="req.id">
@@ -470,7 +469,14 @@
               </span>
             </div>
             <table class="table" v-if="expandedOrders.includes(order.id)">
-              <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>{{ t('common.item') }}</th>
+                  <th>{{ t('common.qty') }}</th>
+                  <th>{{ t('common.price') }}</th>
+                  <th>{{ t('common.total') }}</th>
+                </tr>
+              </thead>
               <tbody>
                 <tr v-for="line in order.lines" :key="line.item_id">
                   <td>{{ line.name }}<br /><small class="muted">SKU {{ line.sku }}</small></td>
@@ -585,7 +591,7 @@
             </tr>
           </tbody>
         </table>
-        <p v-if="dataLoading" class="muted loading-note">Loading…</p>
+        <p v-if="dataLoading" class="muted loading-note">{{ t('common.loading') }}</p>
         <p v-if="!dataLoading && dataRows.length === 0" class="empty">No items.</p>
       </div>
 
@@ -656,7 +662,7 @@
         </label>
         <table class="table" v-if="scanRequests.length">
           <thead>
-            <tr><th>Requested</th><th>Requester</th><th>Code</th><th>Proposed item</th><th>Price</th><th>Status</th><th></th></tr>
+            <tr><th>Requested</th><th>Requester</th><th>Code</th><th>Proposed item</th><th>{{ t('common.price') }}</th><th>Status</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="req in scanRequests" :key="req.id">
@@ -720,7 +726,7 @@
           <h2>Catalogue ({{ adminItems.length }})</h2>
           <table class="table">
             <thead>
-              <tr><th>SKU</th><th>Name</th><th>Category</th><th>Price</th><th>Stock</th><th>AI</th><th></th></tr>
+              <tr><th>SKU</th><th>Name</th><th>Category</th><th>{{ t('common.price') }}</th><th>Stock</th><th>AI</th><th></th></tr>
             </thead>
             <tbody>
               <tr v-for="it in adminItems" :key="it.id">
@@ -822,10 +828,10 @@
         <span v-else class="placeholder-icon">📦</span>
       </div>
       <h2>{{ detailItem.name }}</h2>
-      <p class="muted">{{ detailItem.category }} · SKU {{ detailItem.sku }}</p>
-      <p>{{ detailItem.description || 'No description.' }}</p>
+      <p class="muted">{{ t('catalogue.detail_meta', { category: detailItem.category, sku: detailItem.sku }) }}</p>
+      <p>{{ detailItem.description || t('catalogue.no_description') }}</p>
       <div v-if="similar.length" class="similar">
-        <h3>Similar items</h3>
+        <h3>{{ t('catalogue.similar') }}</h3>
         <ul>
           <li v-for="s in similar" :key="s.id" @click="openDetail(s)">
             {{ s.name }}
@@ -840,7 +846,7 @@
           :disabled="detailItem.stock === 0"
           @click="addToPurchase(detailItem)"
         >
-          {{ detailItem.stock === 0 ? 'Out of stock' : 'Add to purchase list' }}
+          {{ detailItem.stock === 0 ? t('catalogue.out_of_stock') : t('cart.add_to_purchase') }}
         </button>
       </div>
     </div>
@@ -970,7 +976,7 @@
       </p>
       <div class="badge-actions modal-footer">
         <button class="btn block no-print" @click="() => window.print()">Print</button>
-        <button class="btn ghost block no-print" @click="badgePrint = null">Done</button>
+        <button class="btn ghost block no-print" @click="badgePrint = null">{{ t('common.done') }}</button>
       </div>
     </div>
   </div>
@@ -982,20 +988,27 @@
   <div class="modal-backdrop" v-if="lastReceipt" @click.self="lastReceipt = null">
     <div class="modal">
       <button class="modal-close" @click="lastReceipt = null">✕</button>
-      <h2>Purchase complete</h2>
+      <h2>{{ t('checkout.receipt_title') }}</h2>
       <p class="muted">
-        Order #{{ lastReceipt.purchase.id }} ·
-        {{ lastReceipt.purchase.lines.length }} item(s) ·
+        {{ t('checkout.order_number', { order: lastReceipt.purchase.id }) }} ·
+        {{ tp('common.item_count', lastReceipt.purchase.lines.length) }} ·
         <strong>{{ formatPrice(lastReceipt.purchase.total_cents) }}</strong>
       </p>
       <table class="table">
-        <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+        <thead>
+          <tr>
+            <th>{{ t('common.item') }}</th>
+            <th>{{ t('common.qty') }}</th>
+            <th>{{ t('common.price_dkk') }}</th>
+            <th>{{ t('common.total') }}</th>
+          </tr>
+        </thead>
         <tbody>
           <tr v-for="line in lastReceipt.purchase.lines" :key="line.item_id">
             <td>{{ line.name }}</td>
             <td>
               <template v-if="line.clamped">
-                <span class="status-chip open">{{ line.applied_qty }} of {{ line.qty }}</span>
+                <span class="status-chip open">{{ t('checkout.clamped', { applied: line.applied_qty, requested: line.qty }) }}</span>
               </template>
               <template v-else>{{ line.qty }}</template>
             </td>
@@ -1005,11 +1018,10 @@
         </tbody>
       </table>
       <p v-if="lastReceipt.skipped && lastReceipt.skipped.length" class="muted">
-        {{ lastReceipt.skipped.length }} scanned item(s) no longer exist and were skipped.
+        {{ tp('checkout.skipped', lastReceipt.skipped.length) }}
       </p>
-      <p class="muted">Your purchase list was cleared. The receipt also appears
-        in Purchase history.</p>
-      <button class="btn block" @click="lastReceipt = null">Done</button>
+      <p class="muted">{{ t('checkout.receipt_cleared') }}</p>
+      <button class="btn block" @click="lastReceipt = null">{{ t('common.done') }}</button>
     </div>
   </div>
 

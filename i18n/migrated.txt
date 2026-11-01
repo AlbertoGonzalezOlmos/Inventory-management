@@ -7,6 +7,10 @@
 # one to silence a finding.
 app.
 auth.
+cart.
+catalogue.
+checkout.
+common.
 lang.
 money.
 nav.

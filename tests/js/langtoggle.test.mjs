@@ -103,6 +103,25 @@ test("descriptorText: strings pass, {key,vars} render, null is empty, never thro
   assert.equal(descriptorText(undefined, t), "");
 });
 
+test("a plural toast descriptor picks .one/.other and re-renders on a flip", () => {
+  // {key, plural, vars?} is the slice-B extension of the descriptor contract:
+  // the count picks the sibling row through tp(), and msg() still reads
+  // this.lang at paint time, so an open count toast flips with the flag (a
+  // {key, vars} descriptor has no way to choose .one vs .other).
+  const m = appObject("t(id, vars) {", "tp(base, n, vars) {", "msg(value) {");
+  const state = { lang: "en", ...m };
+  assert.equal(state.msg({ key: "cart.restored", plural: 1 }),
+    MESSAGES.en["cart.restored.one"].replace("{n}", "1"));
+  assert.equal(state.msg({ key: "cart.restored", plural: 2 }),
+    MESSAGES.en["cart.restored.other"].replace("{n}", "2"));
+  state.lang = "da";
+  assert.equal(state.msg({ key: "cart.imported", plural: 3 }),
+    MESSAGES.da["cart.imported.other"].replace("{n}", "3"));
+  assert.equal(state.msg({ key: "checkout.skipped", plural: 1 }),
+    MESSAGES.da["checkout.skipped.one"].replace("{n}", "1"));
+});
+
+
 test("applyLang sets <html lang> and the title from the bundle, both directions", () => {
   for (const lang of ["en", "da"]) {
     const doc = { documentElement: {}, title: "" };
@@ -216,22 +235,24 @@ test("an open toast and greeting re-render through the real Vue when lang flips"
   assert.equal(state.lang, "da");
 });
 
-test("plain-string transients neither change nor re-render (no migration yet)", async () => {
+test("plain-string transients neither change nor re-render (server messages)", async () => {
   const m = appObject("t(id, vars) {", "msg(value) {", "toastText() {");
-  const state = Vue.reactive({ lang: "en", toast: "Purchase complete — 1.234,50 DKK" });
+  // api() surfaces a server `detail` as a plain string (item 6 owns its copy),
+  // so the plain-string path must keep passing it through untouched.
+  const state = Vue.reactive({ lang: "en", toast: "Request failed (500)" });
   Object.assign(state, m);
   Object.defineProperty(state, "toastText", {
     get() { return m.toastText.call(state); },
   });
   const seen = [];
   Vue.watchEffect(() => seen.push(state.toastText));
-  assert.deepEqual(seen, ["Purchase complete — 1.234,50 DKK"]);
+  assert.deepEqual(seen, ["Request failed (500)"]);
   state.lang = "da";
   await Vue.nextTick();
   // A plain string never reads `lang` (descriptorText passes it through
   // without t()), so the effect has no dependency and does not even
-  // re-run — the unmigrated toast is untouched by a flip, by construction.
-  assert.deepEqual(seen, ["Purchase complete — 1.234,50 DKK"]);
+  // re-run — a server message is untouched by a flip, by construction.
+  assert.deepEqual(seen, ["Request failed (500)"]);
 });
 
 test("the SHIPPED boot block: applies, writes once, strips, keeps hash (and never on a first visit)", () => {

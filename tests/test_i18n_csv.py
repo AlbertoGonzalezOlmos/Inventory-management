@@ -386,3 +386,32 @@ def test_canonical_bytes_reproduce_the_committed_file():
     rows, _ = i18n.read_rows(CSV_PATH)
     assert i18n.canonical_csv_bytes(rows) == open(CSV_PATH, "rb").read()
     assert len(i18n.sha256_of(i18n.canonical_csv_bytes(rows))) == 64
+
+
+def test_no_plural_suffix_idiom_anywhere_in_the_copy():
+    """The glossary forbids '(s)' suffixes: a count is a .one/.other pair.
+
+    Pinned over the whole CSV because the idiom is a copy rule, not a view
+    rule — slice B removed the receipt's last two ('item(s)' line count,
+    'scanned item(s)') and a new row must not smuggle it back.
+    """
+    rows, _ = i18n.read_rows(CSV_PATH)
+    offenders = [f"{row.id} ({lang})" for row in rows for lang in i18n.LANGUAGES
+                 if "(s)" in row.cell(lang)]
+    assert offenders == [], f"'(s)' idiom found in: {offenders}"
+
+
+def test_money_column_header_states_the_currency():
+    """Item-1 decision 4: a money COLUMN HEADER names the currency in both
+    languages; a form-field label uses the plain `common.price` row.
+
+    `common.price_dkk` is the header row; keeping it separate is what lets
+    slice E's form labels bind `common.price` ('Pris') without silently
+    changing the header's meaning.
+    """
+    rows, _ = i18n.read_rows(CSV_PATH)
+    by_id = {row.id: row for row in rows}
+    assert by_id["common.price_dkk"].en == "Price (DKK)"
+    assert by_id["common.price_dkk"].da == "Pris (DKK)"
+    assert by_id["common.price"].en == "Price"
+    assert by_id["common.price"].da == "Pris"

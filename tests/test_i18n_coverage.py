@@ -30,7 +30,7 @@ ARTIFACT = REPO_ROOT / "static" / "i18n.messages.js"
 #: Hardcoded-copy findings (INFO) on the current tree. This number may only SHRINK:
 #: when a migration slice lands, lower it in the same commit. It must never grow
 #: silently — a new hardcoded string is a new finding, which the checker will show.
-PINNED_INFO_COUNT = 282
+PINNED_INFO_COUNT = 216
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "fixtures", "vendor")
 
