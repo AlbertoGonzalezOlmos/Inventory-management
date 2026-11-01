@@ -1,8 +1,56 @@
 ﻿id,en,da
 app.title,HCRM — Shop Catalogue,HCRM — Butikskatalog
+auth.already_member,Already a member?,Er du allerede medlem?
+auth.badge_check_failed,Badge check failed,Badgekontrollen mislykkedes
+auth.badges_not_items,"Badges log in, they are not catalogue items","Badges logger ind, de er ikke katalogvarer"
+auth.change_password_required,Please change your password before continuing,Skift din adgangskode for at fortsætte
+auth.change_password_scanner,Change your password before using the scanner,"Skift din adgangskode, før du bruger scanneren"
+auth.create_account,Create a member account,Opret en medlemskonto
+auth.discard,Discard,Kassér
+auth.email,Email,E-mail
+auth.email_or_username,Email or username,E-mail eller brugernavn
+auth.full_name,Full name,Fuldt navn
+auth.greeting,Hi {name},Hej {name}
+auth.invalid_credentials,Invalid email or password,Forkert e-mail eller adgangskode
+auth.list_saved,Your list was saved — it will be here when you log back in,"Din indkøbsliste blev gemt — den er her, når du logger ind igen"
+auth.login,Log in,Log ind
+auth.login_subtitle,Members: browse and select items. Staff: manage the catalogue.,Medlemmer: find og vælg varer. Personale: administrér kataloget.
+auth.logout,Log out,Log ud
+auth.no_account,No account yet?,Har du ingen konto?
+auth.password,Password,Adgangskode
+auth.password_min,Password (min. 8 characters),Adgangskode (min. 8 tegn)
+auth.register_title,Create your member account,Opret din medlemskonto
+auth.role.admin,admin,administrator
+auth.role.admin_option,Admin,Administrator
+auth.role.member,member,medlem
+auth.role.staff,staff,personale
+auth.scan_anywhere,Scan anywhere — your QR badge logs you in automatically.,Scan hvor som helst — din QR-badge logger dig automatisk ind.
+auth.session_expired,Session expired — please log in again.,Sessionen er udløbet — log ind igen.
+auth.signup,Sign up,Opret konto
+auth.staged_waiting.one,{n} scanned item waiting — scan your QR badge or log in to add it to your list.,{n} scannet vare venter — scan din QR-badge eller log ind for at tilføje den til din indkøbsliste.
+auth.staged_waiting.other,{n} scanned items waiting — scan your QR badge or log in to add them to your list.,{n} scannede varer venter — scan din QR-badge eller log ind for at tilføje dem til din indkøbsliste.
+auth.switch_failed,Switch failed: {message},Skiftet mislykkedes: {message}
+auth.switched_must_change,Switched to {name} — change the password to continue,Skiftet til {name} — skift adgangskoden for at fortsætte
+auth.switched_saved,Switched to {name} — {old}'s list was saved and will be back when {old} signs in,"Skiftet til {name} — {old}s indkøbsliste blev gemt og kommer tilbage, når {old} logger ind"
 catalogue.search_placeholder,Search the catalogue…,Søg i kataloget…
-common.greeting,"Hello, {name}!","Hej, {name}!"
 common.item_count.one,{n} item,{n} vare
 common.item_count.other,{n} items,{n} varer
 lang.switch_to,Switch to Danish,Skift til engelsk
 money.code,DKK,DKK
+nav.admin,Admin,Administration
+nav.catalogue,Catalogue,Katalog
+nav.profile,My profile,Min profil
+nav.purchases,Purchase history,Købshistorik
+nav.table,Table,Tabel
+scanner.label.live,scanner,scanner
+scanner.label.off,scanner offline,scanner inaktiv
+scanner.label.unpaired,no scanner,ingen scanner
+scanner.paired,"Paired — scans from this terminal now arrive here, even with this window unfocused.","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus."
+scanner.paired_offline,"Paired — scans from this terminal now arrive here, even with this window unfocused (server unreachable — retrying).","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus (serveren er ikke tilgængelig — prøver igen)."
+scanner.pairing_label,Scanner pairing,Scannerparring
+scanner.repair_prefix,"To re-pair: DELETE the terminal (staff or loopback), re-run","For at parre igen: SLET terminalen (personale eller loopback), kør igen"
+scanner.repair_suffix,", then click the pill.",", og klik derefter på statusknappen."
+scanner.title.live,Scans arrive via the grab daemon (no window focus needed) — click to manage the pairing,Scanninger ankommer via grab-daemonen (vinduet behøver ikke have fokus) — klik for at administrere parringen
+scanner.title.off,"Paired, but the server is unreachable — retrying — click to manage the pairing","Parret, men serveren er ikke tilgængelig — prøver igen — klik for at administrere parringen"
+scanner.title.unpaired,Not paired — click to pair this kiosk from the pairing file the daemon wrote,"Ikke parret — klik for at parre denne kiosk ud fra den parringsfil, daemonen skrev"
+scanner.unpair,Unpair,Fjern parring

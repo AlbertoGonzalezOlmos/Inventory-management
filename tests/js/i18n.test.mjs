@@ -106,11 +106,11 @@ test("translate/plural: a missing fallback row names the selected missing id", (
 });
 
 test("translate: interpolation is single-pass, unknown tokens stay, `$` is inert", () => {
-  assert.equal(translate("common.greeting", { name: "Ada" }, "en"), "Hello, Ada!");
-  assert.equal(translate("common.greeting", { name: "Ada" }, "da"), "Hej, Ada!");
-  assert.equal(translate("common.greeting", null, "en"), "Hello, {name}!");
-  assert.equal(translate("common.greeting", { name: "A {b}" }, "en"), "Hello, A {b}!");
-  assert.equal(translate("common.greeting", { name: "$& $1 $`" }, "en"), "Hello, $& $1 $`!",
+  assert.equal(translate("auth.greeting", { name: "Ada" }, "en"), "Hi Ada");
+  assert.equal(translate("auth.greeting", { name: "Ada" }, "da"), "Hej Ada");
+  assert.equal(translate("auth.greeting", null, "en"), "Hi {name}");
+  assert.equal(translate("auth.greeting", { name: "A {b}" }, "en"), "Hi A {b}");
+  assert.equal(translate("auth.greeting", { name: "$& $1 $`" }, "en"), "Hi $& $1 $`",
     "a value is never interpreted as a replacement pattern");
 });
 

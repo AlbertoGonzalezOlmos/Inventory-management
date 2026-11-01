@@ -30,7 +30,7 @@ ARTIFACT = REPO_ROOT / "static" / "i18n.messages.js"
 #: Hardcoded-copy findings (INFO) on the current tree. This number may only SHRINK:
 #: when a migration slice lands, lower it in the same commit. It must never grow
 #: silently — a new hardcoded string is a new finding, which the checker will show.
-PINNED_INFO_COUNT = 333
+PINNED_INFO_COUNT = 282
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "fixtures", "vendor")
 
@@ -64,6 +64,29 @@ def _insert_before(path: Path, needle: str, inserted: str) -> int:
     at = text.index(needle)
     path.write_text(text[:at] + inserted + "\n" + text[at:], encoding="utf-8")
     return text.count("\n", 0, at) + 1
+
+
+def _insert_allow_entry(path: Path, entry: str) -> int:
+    """Insert an allowlist entry in SORTED position; return its 1-based line.
+
+    The checker errors on an out-of-order entry, and the real list already holds
+    a permanent command entry, so a plain append would add an unrelated ERROR to
+    the run under test. Keys are compared as the checker compares them
+    (path, kind, literal); these fixtures use no escapable characters.
+    """
+    key = tuple(entry.partition("  #")[0].split(":", 2))
+    lines = path.read_text(encoding="utf-8").splitlines()
+    at = len(lines)
+    for i, line in enumerate(lines):
+        body = line.strip()
+        if not body or body.startswith("#"):
+            continue
+        if tuple(body.partition("  #")[0].split(":", 2)) > key:
+            at = i
+            break
+    lines.insert(at, entry)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return at + 1
 
 
 def _assert_planted(proc, file: str, line: int, *, kind: str | None = None,
@@ -191,10 +214,8 @@ def test_planted_stale_allowlist_entry(tmp_path):
     """(f) An allowlist entry whose content matches no finding — the list shrinks."""
     tree = _copy_tree(tmp_path)
     path = tree / "i18n" / "copy-allowlist.txt"
-    text = path.read_text(encoding="utf-8")
-    path.write_text(text + "static/app.js:call:Saved the report"
-                    "  # stale — nothing matches this\n", encoding="utf-8")
-    entry_line = text.count("\n") + 1
+    entry_line = _insert_allow_entry(path, "static/app.js:call:Saved the report"
+                                    "  # stale — nothing matches this")
     _assert_planted(_run("--json", root=tree), "i18n/copy-allowlist.txt", entry_line,
                     kind="allowlist", contains="unused")
 
@@ -210,9 +231,8 @@ def test_allowlist_entry_is_content_addressed(tmp_path):
     html = tree / "static" / "index.html"
     _insert_before(html, "</main>", "  <p>Switch to Danish</p>")
     allow = tree / "i18n" / "copy-allowlist.txt"
-    allow.write_text(allow.read_text(encoding="utf-8")
-                     + "static/index.html:text:Switch to Danish"
-                       "  # test token; removed by item 7\n", encoding="utf-8")
+    _insert_allow_entry(allow, "static/index.html:text:Switch to Danish"
+                               "  # test token; removed by item 7")
 
     # Suppressed by content (and the entry is used, not stale).
     assert _run("--json", root=tree).returncode == 0
@@ -325,6 +345,17 @@ def test_planted_comment_only_reference_is_dead(tmp_path):
                          encoding="utf-8")
     _assert_planted(_run("--json", root=tree), "i18n/strings.csv", len(lines) + 1,
                     kind="dead-row", contains=dead)
+
+
+def test_planted_js_reference_is_resolved(tmp_path):
+    """A JS call site is a reference: `this.t("…")` in app.js must resolve too."""
+    tree = _copy_tree(tmp_path)
+    line = _insert_before(
+        tree / "static" / "app.js",
+        '        const data = await api("/auth/login", { method: "POST", body: this.loginForm });',
+        '        this.msg(this.t("nope.missing_js"));')
+    _assert_planted(_run("--json", root=tree), "static/app.js", line,
+                    kind="unknown-id", contains="nope.missing_js")
 
 
 # --- the family list, the exit codes ---------------------------------------

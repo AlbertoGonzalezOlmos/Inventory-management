@@ -6,5 +6,8 @@
 # hardcoded-copy finding is fatal. Add a namespace when its slice lands; never remove
 # one to silence a finding.
 app.
+auth.
 lang.
 money.
+nav.
+scanner.

@@ -96,8 +96,8 @@ test("bootPlan: ?lang beats stored, stored beats default, junk is stripped not p
 test("descriptorText: strings pass, {key,vars} render, null is empty, never throws", () => {
   const t = (id, vars) => translate(id, vars, "en");
   assert.equal(descriptorText("plain", t), "plain");
-  assert.equal(descriptorText({ key: "common.greeting", vars: { name: "Ada" } }, t),
-    "Hello, Ada!");
+  assert.equal(descriptorText({ key: "auth.greeting", vars: { name: "Ada" } }, t),
+    "Hi Ada");
   assert.equal(descriptorText({ key: "nope.row" }, t), "[missing: nope.row]");
   assert.equal(descriptorText(null, t), "");
   assert.equal(descriptorText(undefined, t), "");
@@ -176,8 +176,8 @@ test("an open toast and greeting re-render through the real Vue when lang flips"
                       "toastText() {", "greetingText() {", "toggleLang() {");
   const state = Vue.reactive({
     lang: "en",
-    toast: { key: "common.greeting", vars: { name: "Ada" } },
-    greeting: { key: "common.greeting", vars: { name: "Bo" } },
+    toast: { key: "auth.greeting", vars: { name: "Ada" } },
+    greeting: { key: "auth.greeting", vars: { name: "Bo" } },
   });
   Object.assign(state, m);
   // Computeds are unwrapped in the real app (`this.toastText` is a value);
@@ -203,16 +203,16 @@ test("an open toast and greeting re-render through the real Vue when lang flips"
   });
   assert.equal(renders.length, 1);
   assert.equal(renders[0].label, MESSAGES.en["lang.switch_to"]);
-  assert.equal(renders[0].toast, "Hello, Ada!");
-  assert.equal(renders[0].greeting, "Hello, Bo!");
+  assert.equal(renders[0].toast, "Hi Ada");
+  assert.equal(renders[0].greeting, "Hi Bo");
 
   state.toggleLang();
   await Vue.nextTick();
 
   assert.equal(renders.length, 2, "the flip re-rendered the open toast and greeting");
   assert.equal(renders[1].label, MESSAGES.da["lang.switch_to"]);
-  assert.equal(renders[1].toast, MESSAGES.da["common.greeting"].replace("{name}", "Ada"));
-  assert.equal(renders[1].greeting, MESSAGES.da["common.greeting"].replace("{name}", "Bo"));
+  assert.equal(renders[1].toast, MESSAGES.da["auth.greeting"].replace("{name}", "Ada"));
+  assert.equal(renders[1].greeting, MESSAGES.da["auth.greeting"].replace("{name}", "Bo"));
   assert.equal(state.lang, "da");
 });
 

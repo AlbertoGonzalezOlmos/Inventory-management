@@ -5,3 +5,4 @@
 # tab -> \t , # -> \# . Kinds: text, attr, expr, attr-expr, call, key, template, sentence.
 # An entry is stale only when NO finding has that (path, kind, literal) — i.e. when the
 # copy itself changed. The list can only SHRINK: an unused entry is an error.
+static/index.html:text:scanner_daemon.py --register  # shell command, not copy — the operator types it verbatim (no slice removes it; plan §20: machine interfaces stay English)

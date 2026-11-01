@@ -72,18 +72,24 @@ def test_committed_csv_is_canonical():
     assert raw == i18n.canonical_csv_bytes(rows), "canonical form (minimal quoting)"
 
 
-def test_seed_rows_are_the_plumbing_set():
+SEED_IDS = (
+    "app.title",
+    "catalogue.search_placeholder",
+    "common.item_count.one",
+    "common.item_count.other",
+    "lang.switch_to",
+    "money.code",
+)
+
+
+def test_seed_rows_are_still_present():
+    """The item-2/3 seed rows survive every migration slice (a SUBSET pin now —
+    the slices legitimately add rows, but a seed cannot be renamed or dropped
+    without this going red)."""
     rows, _ = i18n.read_rows(CSV_PATH)
-    assert [row.id for row in rows] == [
-        "app.title",
-        "catalogue.search_placeholder",
-        "common.greeting",
-        "common.item_count.one",
-        "common.item_count.other",
-        "lang.switch_to",
-        "money.code",
-    ]
     by_id = {row.id: row for row in rows}
+    for rid in SEED_IDS:
+        assert rid in by_id, f"seed row {rid!r} disappeared"
     assert by_id["money.code"].en == by_id["money.code"].da == "DKK"
     assert OLD_SYMBOL not in "".join(row.en + row.da for row in rows)
 
@@ -97,6 +103,31 @@ def test_en_title_is_byte_identical_to_todays_static_title():
     rows, _ = i18n.read_rows(CSV_PATH)
     by_id = {row.id: row for row in rows}
     assert by_id["app.title"].en == "HCRM — Shop Catalogue"
+
+
+def test_repair_hint_fragments_rebuild_the_sentence_in_both_languages():
+    """The two-key exception, pinned as COPY: joining each language's
+    fragments around the command must rebuild the original one-sentence
+    hint. This is the half the `<code>` pin cannot see — the markup could
+    keep the element while a translation drifts — and it keeps both rows
+    placeholder-free (the `<code>` element, not a {command} token, carries
+    the machine text)."""
+    rows, _ = i18n.read_rows(CSV_PATH)
+    by_id = {row.id: row for row in rows}
+    command = "scanner_daemon.py --register"
+    for lang, expected in (
+        ("en", "To re-pair: DELETE the terminal (staff or loopback), re-run "
+               f"{command}, then click the pill."),
+        ("da", "For at parre igen: SLET terminalen (personale eller loopback), kør igen "
+               f"{command}, og klik derefter på statusknappen."),
+    ):
+        for rid in ("scanner.repair_prefix", "scanner.repair_suffix"):
+            assert i18n.placeholders(by_id[rid].cell(lang)) == [], (
+                f"{rid} must stay placeholder-free — the command is <code>, "
+                "never a {command} token")
+        rebuilt = (by_id["scanner.repair_prefix"].cell(lang) + " " + command
+                   + by_id["scanner.repair_suffix"].cell(lang))
+        assert rebuilt == expected, f"{lang} fragments drifted: {rebuilt!r}"
 
 
 def test_loader_tolerates_bom_less_and_crlf_input(tmp_path):
@@ -128,10 +159,9 @@ def test_unreadable_file_is_rejected(tmp_path):
     assert problems and problems[0].startswith("i18n/strings.csv: cannot read: ")
 
 
-# test_no_ui_migration_has_started was DELETED in item 3 (acceptance note):
-# the language toggle legitimately binds t('lang.switch_to') in the template.
-# Its replacement — the ratchet that exactly ONE binding exists at this stage —
-# lives in tests/test_lang_toggle.py::test_only_the_toggle_binds_t_yet.
+# test_no_ui_migration_has_started was DELETED in item 3 (acceptance note). Its
+# one-stage replacement (an "exactly one binding" ratchet) was deleted by item 5's
+# slice A; the migration slices are exactly the edits it would have forbidden.
 
 
 # --- validator rules (one case per rule) ------------------------------------
@@ -173,7 +203,7 @@ def test_invalid_id(tmp_path):
     problems = _problems(tmp_path, "App.Title,A,B\n" + MONEY)
     assert problems == [
         "i18n/strings.csv:2: invalid id 'App.Title' "
-        "(lowercase, dot-separated, e.g. 'common.greeting')"]
+        "(lowercase, dot-separated, e.g. 'auth.greeting')"]
 
 
 def test_duplicate_id_names_the_first_line(tmp_path):

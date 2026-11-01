@@ -43,11 +43,11 @@
     <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">HCRM <span>Shop</span></a>
 
     <nav v-if="user" class="nav">
-      <a href="#/catalogue" :class="{active: currentView === 'catalogue' || currentView === 'checkout'}">Catalogue</a>
-      <a v-if="isStaff" href="#/table" :class="{active: currentView === 'table'}">Table</a>
-      <a v-if="isStaff" href="#/admin" :class="{active: currentView === 'admin'}">Admin</a>
-      <a href="#/account" :class="{active: currentView === 'account'}">My profile</a>
-      <a href="#/purchases" :class="{active: currentView === 'purchases'}">Purchase history</a>
+      <a href="#/catalogue" :class="{active: currentView === 'catalogue' || currentView === 'checkout'}">{{ t('nav.catalogue') }}</a>
+      <a v-if="isStaff" href="#/table" :class="{active: currentView === 'table'}">{{ t('nav.table') }}</a>
+      <a v-if="isStaff" href="#/admin" :class="{active: currentView === 'admin'}">{{ t('nav.admin') }}</a>
+      <a href="#/account" :class="{active: currentView === 'account'}">{{ t('nav.profile') }}</a>
+      <a href="#/purchases" :class="{active: currentView === 'purchases'}">{{ t('nav.purchases') }}</a>
     </nav>
 
     <div class="userbox">
@@ -84,12 +84,8 @@
               @click="onPillClick"
               :aria-expanded="scannerFeed === 'unpaired' ? null : (pairOpen ? 'true' : 'false')"
               :aria-haspopup="scannerFeed === 'unpaired' ? null : 'dialog'"
-              :title="scannerFeed === 'live'
-                ? 'Scans arrive via the grab daemon (no window focus needed) — click to manage the pairing'
-                : scannerFeed === 'off'
-                  ? 'Paired, but the server is unreachable — retrying — click to manage the pairing'
-                  : 'Not paired — click to pair this kiosk from the pairing file the daemon wrote'">
-        {{ scannerFeed === 'live' ? 'scanner' : scannerFeed === 'off' ? 'scanner offline' : 'no scanner' }}
+              :title="scannerTitle">
+        {{ scannerLabel }}
       </button>
       <!-- The pairing popover, PAIRED-STATE ONLY (the unpaired pill is an
            action button — it pairs in one click, no form, no popover; the
@@ -100,27 +96,28 @@
            paths close it instead). -->
       <template v-if="pairOpen && scannerFeed !== 'unpaired'">
         <div class="popover-backdrop" @click="pairOpen = false"></div>
-        <div class="pair-popover" role="dialog" aria-label="Scanner pairing">
-          <p class="muted">Paired — scans from this terminal now arrive
-            here, even with this window unfocused<template v-if="scannerFeed === 'off'">
-            (server unreachable — retrying)</template>.</p>
-          <p class="muted">To re-pair: DELETE the terminal (staff or
-            loopback), re-run <code>scanner_daemon.py --register</code>,
-            then click the pill.</p>
+        <div class="pair-popover" role="dialog" :aria-label="t('scanner.pairing_label')">
+          <p class="muted">{{ pairSummary }}</p>
+          <!-- The re-pair hint is a deliberate TWO-KEY fragment pair: both
+               CSV rows are placeholder-free, so each language orders its own
+               text around the command while the command itself stays inside
+               <code> (monospace, never translated). -->
+          <p class="muted">{{ t('scanner.repair_prefix') }}
+            <code>scanner_daemon.py --register</code>{{ t('scanner.repair_suffix') }}</p>
           <div class="pair-actions">
             <button type="button" class="btn ghost"
                     v-if="!user || isStaff"
-                    @click="unpairTerminal">Unpair</button>
+                    @click="unpairTerminal">{{ t('scanner.unpair') }}</button>
           </div>
         </div>
       </template>
       <template v-if="user">
-        <span class="user-name">{{ user.name }} <small>({{ user.role }})</small></span>
-        <button class="btn ghost" @click="logout">Log out</button>
+        <span class="user-name">{{ user.name }} <small>({{ roleLabel }})</small></span>
+        <button class="btn ghost" @click="logout">{{ t('auth.logout') }}</button>
       </template>
       <template v-else>
-        <a href="#/login" class="btn ghost">Log in</a>
-        <a href="#/register" class="btn">Sign up</a>
+        <a href="#/login" class="btn ghost">{{ t('auth.login') }}</a>
+        <a href="#/register" class="btn">{{ t('auth.signup') }}</a>
       </template>
     </div>
   </header>
@@ -128,22 +125,22 @@
   <main>
     <!-- ================= Login ================= -->
     <section v-if="currentView === 'login'" class="auth-card">
-      <h1>Log in</h1>
-      <p class="muted">Members: browse and select items. Staff: manage the catalogue.</p>
+      <h1>{{ t('auth.login') }}</h1>
+      <p class="muted">{{ t('auth.login_subtitle') }}</p>
       <form @submit.prevent="doLogin">
-        <label>Email or username
+        <label>{{ t('auth.email_or_username') }}
           <!-- type="text" (not email): the dev admin credential is the bare
                username "admin" (W4.0), which type="email" would refuse to
                submit. autocomplete/inputmode keep password managers working. -->
           <input type="text" inputmode="email" autocomplete="username"
                  v-model="loginForm.email" required autofocus />
         </label>
-        <label>Password
+        <label>{{ t('auth.password') }}
           <input type="password" autocomplete="current-password"
                  v-model="loginForm.password" required />
         </label>
-        <p v-if="loginError" class="error">{{ loginError }}</p>
-        <button class="btn block" :disabled="busy">Log in</button>
+        <p v-if="loginError" class="error">{{ msg(loginError) }}</p>
+        <button class="btn block" :disabled="busy">{{ t('auth.login') }}</button>
       </form>
       <hr class="divider" />
       <!-- Auto-detect is the PRIMARY path (Task E): the global scan capture
@@ -152,40 +149,39 @@
            decision, login-screen cleanup): the capture bus is the one
            browser badge path. -->
       <p class="muted scan-anywhere">
-        Scan anywhere — your QR badge logs you in automatically.
+        {{ t('auth.scan_anywhere') }}
       </p>
       <!-- Attribution banner: anonymous scans staged while logged out -->
       <div class="staged-banner" v-if="stagedScans.length">
-        <strong>{{ stagedScans.length }} scanned item(s) waiting</strong> —
-        scan your QR badge or log in to add them to your list.
-        <button class="btn tiny ghost" @click="discardStagedScans">Discard</button>
+        <strong>{{ tp('auth.staged_waiting', stagedScans.length) }}</strong>
+        <button class="btn tiny ghost" @click="discardStagedScans">{{ t('auth.discard') }}</button>
       </div>
       <!-- Round 4, T6: kiosk pairing lives in the header pill (one click
            when unpaired, via the server-read pairing file; the popover
            when paired) — the login screen carries no pairing UI at all.
            The stored token is per-TERMINAL: it survives logins and logouts
            and is NOT cleared on logout. -->
-      <p class="muted">No account yet? <a href="#/register">Create a member account</a></p>
+      <p class="muted">{{ t('auth.no_account') }} <a href="#/register">{{ t('auth.create_account') }}</a></p>
     </section>
 
     <!-- ================= Register (member signup) ================= -->
     <section v-else-if="currentView === 'register'" class="auth-card">
-      <h1>Create your member account</h1>
+      <h1>{{ t('auth.register_title') }}</h1>
       <form @submit.prevent="doRegister">
-        <label>Full name
+        <label>{{ t('auth.full_name') }}
           <input type="text" autocomplete="name" v-model="registerForm.name" required />
         </label>
-        <label>Email
+        <label>{{ t('auth.email') }}
           <input type="email" autocomplete="email" v-model="registerForm.email" required />
         </label>
-        <label>Password (min. 8 characters)
+        <label>{{ t('auth.password_min') }}
           <input type="password" autocomplete="new-password"
                  v-model="registerForm.password" minlength="8" required />
         </label>
-        <p v-if="registerError" class="error">{{ registerError }}</p>
-        <button class="btn block" :disabled="busy">Sign up</button>
+        <p v-if="registerError" class="error">{{ msg(registerError) }}</p>
+        <button class="btn block" :disabled="busy">{{ t('auth.signup') }}</button>
       </form>
-      <p class="muted">Already a member? <a href="#/login">Log in</a></p>
+      <p class="muted">{{ t('auth.already_member') }} <a href="#/login">{{ t('auth.login') }}</a></p>
     </section>
 
     <!-- ============ Catalogue (browse + select) / Checkout review ============
@@ -337,7 +333,7 @@
          Route unchanged (#/account — the must_change_password redirect
          depends on it); a flagged account lands on the Security tab. -->
     <section v-else-if="currentView === 'account'" class="auth-card profile-card">
-      <h1>My profile</h1>
+      <h1>{{ t('nav.profile') }}</h1>
       <p class="muted">{{ user.name }} · role: {{ user.role }} · {{ user.email }}</p>
       <p v-if="user.must_change_password" class="error">
         You are using a default or admin-issued password — you must change it
@@ -353,7 +349,7 @@
 
       <!-- Profile: identity + contact -->
       <div v-if="profileTab === 'profile'">
-        <h2>Email</h2>
+        <h2>{{ t('auth.email') }}</h2>
         <p class="muted">Your email is your login identifier. Changing it signs
           out your other sessions.</p>
         <form @submit.prevent="submitEmailChange">
@@ -450,7 +446,7 @@
     <!-- ================= Purchase history (top-level tab: list left, spend
          calendar right — the two-column layout collapses under 900 px) ================= -->
     <section v-else-if="currentView === 'purchases'" class="auth-card profile-card">
-      <h1>Purchase history</h1>
+      <h1>{{ t('nav.purchases') }}</h1>
       <div class="history-layout">
         <div class="history-list">
           <!-- A flagged account cannot buy anything yet (every purchase
@@ -751,7 +747,7 @@
           <label>Name
             <input v-model="memberForm.name" required />
           </label>
-          <label>Email
+          <label>{{ t('auth.email') }}
             <input type="email" v-model="memberForm.email" required />
           </label>
           <label>Temporary password (min. 8 chars)
@@ -762,7 +758,7 @@
             <select v-model="memberForm.role">
               <option value="member">Member (buyer)</option>
               <option value="staff">Staff (can input items)</option>
-              <option v-if="user && user.role === 'admin'" value="admin">Admin</option>
+              <option v-if="user && user.role === 'admin'" value="admin">{{ t('auth.role.admin_option') }}</option>
             </select>
           </label>
           <p v-if="memberError" class="error">{{ memberError }}</p>
@@ -773,7 +769,7 @@
           <h2>Members ({{ members.length }})</h2>
           <table class="table">
             <thead>
-              <tr><th>Name</th><th>Email</th><th>Role</th><th>Badge</th><th>Joined</th><th></th></tr>
+              <tr><th>Name</th><th>{{ t('auth.email') }}</th><th>Role</th><th>Badge</th><th>Joined</th><th></th></tr>
             </thead>
             <tbody>
               <tr v-for="m in members" :key="m.id">

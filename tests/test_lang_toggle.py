@@ -4,8 +4,9 @@ The BEHAVIOUR (boot plan, strip, toggle, watcher, descriptor rendering, the real
 reactivity proof) is pinned by tests/js/langtoggle.test.mjs against the real sources.
 What pytest adds is what a node run or a DOM dump cannot see cheaply: the markup and
 CSS pins, the persistence wiring (one writer, never cleared on logout), the boot order,
-the CSV row being an action sentence, and the ratchet that replaced
-tests/test_i18n_csv.py::test_no_ui_migration_has_started.
+the CSV row being an action sentence, and the descriptor-slot bindings the
+item-5 slices build on. (The item-3 "exactly one t() binding" ratchet was deleted by
+slice A — it existed only until the first migration slice landed.)
 """
 
 import importlib.util
@@ -202,21 +203,15 @@ def test_toggle_row_is_an_action_sentence():
             "the accessible name must be an action sentence, not a language name")
 
 
-def test_only_the_toggle_binds_t_yet():
-    """The ratchet that replaced test_no_ui_migration_has_started (item 3).
+def test_descriptor_slots_render_through_the_computeds():
+    """The transient slots render through their computeds (item 3's descriptor path).
 
-    Exactly ONE template binding exists at this stage: the toggle's label.
-    The item-5 slices are the next edits allowed to add `t(` bindings.
+    The item-3 "exactly one t() binding" ratchet was deleted here: slice A's purpose
+    is to add bindings, so the guard died with its stage. What must survive is the
+    descriptor plumbing the slices build on.
     """
     html = _read(INDEX_HTML)
-    # Count OCCURRENCES (not lines) so a reformat that puts both bindings on
-    # one line cannot false-red, while a third binding still does.
-    bound = re.findall(r'="t\(', html)
-    assert len(bound) == 2, f"expected the toggle's two bindings, got {len(bound)}"
-    for line in html.splitlines():
-        if '="t(' in line:
-            assert "lang.switch_to" in line, f"a second migration started: {line.strip()}"
-    assert "{{ t(" not in html
-    # The descriptor path is live but produces identical output today.
     assert "{{ toastText }}" in html and "{{ greetingText }}" in html
     assert "{{ toast }}" not in html and "{{ greeting }}" not in html
+    app = _read(APP_JS)
+    assert "toastText() {" in app and "greetingText() {" in app

@@ -13,6 +13,11 @@ const LANG_KEY = HcrmI18n.LANG_KEY;          // item 3: the UI language — a
 // runtime OWNS the key (detectLang reads it): one definition, no drift.
 const PAGE_SIZE = 24;
 
+// Module-scope translation for the few non-Vue call sites (api()'s 401 paths):
+// the device language, resolved per call. Vue code uses this.t instead.
+const tGlobal = (id, vars) => HcrmI18n.translate(
+    id, vars, HcrmI18n.detectLang(localStorage, location.search));
+
 // Global HID scan capture (round 3, Task B): the decision logic — shape
 // gates, timing constants and the HOLD/ARMED/WARM state machine — lives in
 // static/scancapture.js (HcrmScanCapture, loaded BEFORE this file; pure,
@@ -58,16 +63,21 @@ async function api(path, { method = "GET", body, raw = false, token } = {}) {
     localStorage.removeItem(USER_KEY);
     window.dispatchEvent(new Event("hcrm-session-expired"));
     if (location.hash !== "#/login") location.hash = "#/login";
-    throw Object.assign(new Error("Session expired — please log in again."), { status: 401 });
+    throw Object.assign(new Error(tGlobal("auth.session_expired")), { status: 401 });
   }
   let data = null;
   if (res.status !== 204) {
     try { data = await res.json(); } catch (_) { data = null; }
   }
   if (res.status === 401) {
-    let detail = "Invalid email or password";
-    if (data && typeof data.detail === "string") detail = data.detail;
-    throw Object.assign(new Error(detail), { status: 401, detail: data && data.detail });
+    const fromServer = !!(data && typeof data.detail === "string");
+    // Our own fallback carries a code so the caller can store a {key} descriptor
+    // (an open login error re-renders on a language flip); a server detail is
+    // item 6's copy and stays verbatim.
+    throw Object.assign(
+      new Error(fromServer ? data.detail : tGlobal("auth.invalid_credentials")),
+      { status: 401, detail: data && data.detail,
+        ...(fromServer ? {} : { code: "auth.invalid_credentials" }) });
   }
   if (!res.ok) {
     let detail = `Request failed (${res.status})`;
@@ -269,6 +279,28 @@ Vue.createApp({
     },
     greetingText() {
       return this.msg(this.greeting);
+    },
+    // Slice A: the userbox role badge and the scanner pill's label/title. Each
+    // branch calls t() with a LITERAL id so the CSV rows stay referenced.
+    roleLabel() {
+      const role = this.user ? this.user.role : "";
+      if (role === "staff") return this.t("auth.role.staff");
+      if (role === "admin") return this.t("auth.role.admin");
+      return this.t("auth.role.member");
+    },
+    scannerLabel() {
+      if (this.scannerFeed === "live") return this.t("scanner.label.live");
+      if (this.scannerFeed === "off") return this.t("scanner.label.off");
+      return this.t("scanner.label.unpaired");
+    },
+    scannerTitle() {
+      if (this.scannerFeed === "live") return this.t("scanner.title.live");
+      if (this.scannerFeed === "off") return this.t("scanner.title.off");
+      return this.t("scanner.title.unpaired");
+    },
+    pairSummary() {
+      if (this.scannerFeed === "off") return this.t("scanner.paired_offline");
+      return this.t("scanner.paired");
     },
     isStaff() {
       return !!this.user && (this.user.role === "staff" || this.user.role === "admin");
@@ -525,7 +557,8 @@ Vue.createApp({
         const data = await api("/auth/login", { method: "POST", body: this.loginForm });
         await this.afterLogin(data);
       } catch (e) {
-        this.loginError = e.message;
+        this.loginError = e.code === "auth.invalid_credentials"
+          ? { key: "auth.invalid_credentials" } : e.message;
       } finally {
         this.busy = false;
       }
@@ -547,7 +580,7 @@ Vue.createApp({
         // password is changed (the cart included — skip loading it).
         location.hash = "#/account";
         this.route = "#/account";
-        this.showToast("Please change your password before continuing");
+        this.showToast({ key: "auth.change_password_required" });
         return;
       }
       await this.loadCart();
@@ -573,7 +606,8 @@ Vue.createApp({
         });
         await this.afterLogin(data);
       } catch (e) {
-        this.loginError = e.message;
+        this.loginError = e.code === "auth.invalid_credentials"
+          ? { key: "auth.invalid_credentials" } : e.message;
       } finally {
         this.busy = false;
       }
@@ -622,7 +656,7 @@ Vue.createApp({
       // and _closeOverlays on adjacent lines — clearing there would kill it
       // on the one path that most needs it); logout and session-expiry clear
       // it explicitly, and the next saveSession overwrites it.
-      this.greeting = "Hi " + user.name;
+      this.greeting = { key: "auth.greeting", vars: { name: user.name } };
       clearTimeout(this._greetingTimer);
       this._greetingTimer = setTimeout(() => (this.greeting = ""), 4000);
     },
@@ -694,7 +728,7 @@ Vue.createApp({
       location.hash = "#/login";
       this.route = "#/login";
       if (hadItems) {
-        this.showToast("Your list was saved — it will be here when you log back in");
+        this.showToast({ key: "auth.list_saved" });
       }
       return hadItems;
     },
@@ -1055,7 +1089,7 @@ Vue.createApp({
         // Self: the flagged-account gate (change the password first).
         // Staff: the manage rule (staff never view an admin's badge).
         this.showToast(isSelf
-          ? "Change your password before using the scanner"
+          ? { key: "auth.change_password_scanner" }
           : "Cannot view this member's badge");
         return false;
       }
@@ -1600,11 +1634,13 @@ Vue.createApp({
         method: "POST", body: { token: code }, raw: true,
       });
       if (status === 403) {
-        this.showToast("Change your password before using the scanner");
+        this.showToast({ key: "auth.change_password_scanner" });
         return;
       }
       if (status === 401) { this.handleSessionExpired(); return; }
-      if (status !== 200 || !data) { this.showToast("Badge check failed"); return; }
+      if (status !== 200 || !data) {
+        this.showToast({ key: "auth.badge_check_failed" }); return;
+      }
       if (data.same_user) {
         await this.armLogoff();
       } else {
@@ -1640,7 +1676,7 @@ Vue.createApp({
         return;
       }
       if (status === 400 && detail && detail.status === "badge") {
-        this.showToast("Badges log in, they are not catalogue items");
+        this.showToast({ key: "auth.badges_not_items" });
         return;
       }
       if (status === 404 && detail && detail.status === "unknown") {
@@ -1671,7 +1707,7 @@ Vue.createApp({
       this._cartImportedLegacy = false;
       location.hash = "#/login";
       this.route = "#/login";
-      this.showToast("Session expired — please log in again.");
+      this.showToast({ key: "auth.session_expired" });
     },
 
     /* ---------- scanner feed (round 4, T6): the daemon-forwarded queue ----
@@ -1896,7 +1932,7 @@ Vue.createApp({
           method: "POST", body: { token: code },
         });
       } catch (e) {
-        this.showToast("Switch failed: " + e.message);
+        this.showToast({ key: "auth.switch_failed", vars: { message: e.message } });
         return;
       }
       if (this.logoff) {                            // 3. a pending countdown
@@ -1916,7 +1952,8 @@ Vue.createApp({
         this.cart = { lines: [], total_qty: 0, total_cents: 0 };
         location.hash = "#/account";
         this.route = "#/account";
-        this.showToast(`Switched to ${auth.user.name} — change the password to continue`);
+        this.showToast({ key: "auth.switched_must_change",
+                         vars: { name: auth.user.name } });
         return;
       }
       await this.loadCart();                        // 6. the incoming user's list
@@ -1930,7 +1967,8 @@ Vue.createApp({
       // (not a 3 s toast) so the save is legible. Deliberately PERSISTENT
       // (click-dismissible via dismissGreeting): no auto-dismiss timer —
       // the reassurance must survive until the next user starts scanning.
-      this.greeting = `Switched to ${auth.user.name} — ${oldName}'s list was saved and will be back when ${oldName} signs in`;
+      this.greeting = { key: "auth.switched_saved",
+                        vars: { name: auth.user.name, old: oldName } };
       clearTimeout(this._greetingTimer);
       await this.replayStagedScans();
     },

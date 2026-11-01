@@ -14,7 +14,9 @@ Five passes
                    plural base whose ``.one``/``.other`` pair exists. Recognised call
                    shapes: ``t('id')``, ``tp('id', …)``, ``this.t(…)``, descriptor
                    ``key: "id"`` literals, and ``labelKey:``/``titleKey:``/``messageKey:``
-                   literals. Comments and string contents are not references.
+                   literals. Comments are not references; string literals ARE (a
+                   reference is itself a string literal — blanking its contents made
+                   every ``this.t("…")`` call site invisible).
 3. ``dead-row``  — Dead rows. Every CSV row must be referenced from production (pass 2),
                    from the tests (the seeded plumbing rows are pinned only by tests until
                    their slice lands), or be covered by a declared ``DYNAMIC_FAMILIES``
@@ -372,7 +374,11 @@ def pass_reference(sources: list[tuple[str, str]],
     findings: list[Finding] = []
     resolved: set[str] = set()
     for rel, raw in sources:
-        text = strip_html_comments(raw) if rel.endswith(".html") else scan_js(raw)[0]
+        # Keep STRING literals here (comments are still blanked): a reference IS a
+        # string literal — ``this.t("auth.role.staff")`` — and blanking its contents
+        # made every JS call site invisible (the HTML path always kept them).
+        text = (strip_html_comments(raw) if rel.endswith(".html")
+                else scan_js(raw, blank_strings=False)[0])
         for match in REF_KEY.finditer(text):
             rid = match.group(2) or match.group(4) or match.group(6)
             if rid in names:

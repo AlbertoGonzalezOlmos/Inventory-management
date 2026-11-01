@@ -146,8 +146,8 @@ def test_badge_field_is_gone_scan_anywhere_is_the_path():
     assert "async badgeLogin(code)" in app, (
         "the scan bus's badge login entry point must survive the field's "
         "removal")
-    assert "logs you in automatically" in html, (
-        "the scan-anywhere copy is the only badge affordance left")
+    assert "t('auth.scan_anywhere')" in html, (
+        "the scan-anywhere copy is the only badge affordance left (CSV-bound)")
 
 
 def test_capture_never_checks_is_trusted():
@@ -399,8 +399,8 @@ def test_unpair_is_operator_gated_and_the_pill_discloses():
         "pill is a one-click action button, present when it discloses")
     assert re.search(r":aria-haspopup=\"scannerFeed === 'unpaired' \? null", html), (
         "aria-haspopup must be state-conditional for the same reason")
-    assert 'role="dialog" aria-label="Scanner pairing"' in html, (
-        "the popover must be a labelled dialog")
+    assert 'role="dialog" :aria-label="t(\'scanner.pairing_label\')"' in html, (
+        "the popover must be a labelled dialog (the label is CSV copy now)")
 
 
 def test_unpair_closes_the_popover_and_states_the_recovery():
@@ -416,6 +416,23 @@ def test_unpair_closes_the_popover_and_states_the_recovery():
     assert "--register" in body, (
         "the unpair toast must name the recovery (re-run --register, then "
         "click the pill)")
+
+
+def test_repair_hint_keeps_the_register_command_in_code():
+    """The re-pair hint is the one DELIBERATE two-key fragment pair (the
+owner's exception to "one key, no concatenation"): the two CSV fragments
+render AROUND `<code>scanner_daemon.py --register</code>`, so the command
+keeps its monospace styling and each language still owns its own word
+order. Slice A's single key flattened the command into sentence text;
+this pin makes that regression impossible without also editing the rows."""
+    html = _read("index.html")
+    assert re.search(
+        r"\{\{ t\('scanner\.repair_prefix'\) \}\}\s*"
+        r"<code>scanner_daemon\.py --register</code>"
+        r"\{\{ t\('scanner\.repair_suffix'\) \}\}", html), (
+        "the re-pair hint must render scanner_daemon.py --register inside "
+        "<code>, between the scanner.repair_prefix and "
+        "scanner.repair_suffix rows")
 
 
 def test_terminal_token_key_is_the_persisted_binding():
