@@ -269,10 +269,12 @@ _TEMPLATE_MONEY_IDENT = re.compile(
     r"\bpurchaseTotalCents\b|\bcalTotalCents\b|\binventoryValueCents\b|"
     r"\bpriceMean\b|\bpriceMedian\b|\bpriceMin\b|\bpriceMax\b|\bpriceStd\b)")
 
-#: Reviewed count of money-rendering bindings in static/index.html: 27 lines,
-#: index.html:598 carries two. Bumping it is a deliberate, reviewed edit (item
-#: 5 re-points these bindings at CSV keys and updates this number).
-_TEMPLATE_MONEY_BINDINGS = 28
+#: Reviewed count of money-rendering bindings in static/index.html. Slice C
+#: moved the calendar day-dot tooltip's price into calendarDayTitle() in
+#: app.js (it still calls formatPrice), so the template count dropped 28 -> 27.
+#: Bumping it is a deliberate, reviewed edit (item 5 re-points these bindings
+#: at CSV keys and updates this number).
+_TEMPLATE_MONEY_BINDINGS = 27
 
 #: Words that make an interpolation money-bearing for the scaling check.
 _MONEY_WORD = re.compile(r"cent|price|total|amount", re.I)

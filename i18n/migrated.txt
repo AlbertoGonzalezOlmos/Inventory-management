@@ -7,11 +7,14 @@
 # one to silence a finding.
 app.
 auth.
+calendar.
 cart.
 catalogue.
 checkout.
 common.
+date.
 lang.
 money.
 nav.
+purchases.
 scanner.

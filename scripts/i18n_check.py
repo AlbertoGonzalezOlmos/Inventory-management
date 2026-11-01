@@ -141,11 +141,15 @@ COMMENT_LINE = re.compile(r"^\s*#")
 
 #: Ids produced by computation are exempt from the dead-row pass. Each entry maps a
 #: prefix to (line in THIS file, producer comment). RULE: a declared family must match
-#: at least one CSV row — a family with no rows is an error. Today no computed family
-#: has rows yet (they arrive with items 5-6), so this list is empty: adding a
-#: speculative entry would be exactly the rot the rule forbids. The one computed shape
-#: that already exists — plural pairs — is covered by the suffix rule.
-DYNAMIC_FAMILIES: dict[str, tuple[int, str]] = {}
+#: at least one CSV row — a family with no rows is an error (the list cannot rot).
+#: Slice C adds the first computed families: the calendar picks weekday/month labels by
+#: index at render time (`"date.dow." + key`, `"date.month." + n`), so no literal id
+#: exists for pass 2 to see. Plural pairs are covered separately by the suffix rule.
+DYNAMIC_FAMILIES: dict[str, tuple[int, str]] = {
+    "date.dow.": (149, "static/app.js calendarWeekdays(): t('date.dow.' + key)"),
+    "date.month.": (150, "static/app.js calendarMonthLabel(): t('date.month.' + n)"),
+    "date.month_long.": (151, "static/app.js calendarMonthLongLabel(): t('date.month_long.' + n)"),
+}
 
 
 @dataclass(frozen=True)

@@ -32,6 +32,14 @@ auth.staged_waiting.other,{n} scanned items waiting — scan your QR badge or lo
 auth.switch_failed,Switch failed: {message},Skiftet mislykkedes: {message}
 auth.switched_must_change,Switched to {name} — change the password to continue,Skiftet til {name} — skift adgangskoden for at fortsætte
 auth.switched_saved,Switched to {name} — {old}'s list was saved and will be back when {old} signs in,"Skiftet til {name} — {old}s indkøbsliste blev gemt og kommer tilbage, når {old} logger ind"
+calendar.day_tooltip.one,{n} purchase · {price},{n} køb · {price}
+calendar.day_tooltip.other,{n} purchases · {price},{n} køb · {price}
+calendar.month_year,{month} {year},{month} {year}
+calendar.next,Next month,Næste måned
+calendar.previous,Previous month,Forrige måned
+calendar.spent_in,Spent in {month},Brugt i {month}
+calendar.spent_this_month,Spent this month,Brugt denne måned
+calendar.title,Calendar,Kalender
 cart.add_to_purchase,Add to purchase list,Tilføj til indkøbslisten
 cart.added,{name} added to your purchase list,{name} blev tilføjet til din indkøbsliste
 cart.clear,Clear list,Ryd listen
@@ -89,7 +97,39 @@ common.loading,Loading…,Indlæser…
 common.price,Price,Pris
 common.price_dkk,Price (DKK),Pris (DKK)
 common.qty,Qty,Antal
+common.sku,SKU {sku},SKU {sku}
 common.total,Total,I alt
+date.dow.fri,Fri,fr
+date.dow.mon,Mon,ma
+date.dow.sat,Sat,lø
+date.dow.sun,Sun,sø
+date.dow.thu,Thu,to
+date.dow.tue,Tue,ti
+date.dow.wed,Wed,on
+date.month.1,January,jan
+date.month.10,October,okt
+date.month.11,November,nov
+date.month.12,December,dec
+date.month.2,February,feb
+date.month.3,March,mar
+date.month.4,April,apr
+date.month.5,May,maj
+date.month.6,June,jun
+date.month.7,July,jul
+date.month.8,August,aug
+date.month.9,September,sep
+date.month_long.1,January,januar
+date.month_long.10,October,oktober
+date.month_long.11,November,november
+date.month_long.12,December,december
+date.month_long.2,February,februar
+date.month_long.3,March,marts
+date.month_long.4,April,april
+date.month_long.5,May,maj
+date.month_long.6,June,juni
+date.month_long.7,July,juli
+date.month_long.8,August,august
+date.month_long.9,September,september
 lang.switch_to,Switch to Danish,Skift til engelsk
 money.code,DKK,DKK
 nav.admin,Admin,Administration
@@ -97,6 +137,11 @@ nav.catalogue,Catalogue,Katalog
 nav.profile,My profile,Min profil
 nav.purchases,Purchase history,Købshistorik
 nav.table,Table,Tabel
+purchases.clamped_title,"requested {requested}, only {applied} in stock","bestilt {requested}, kun {applied} på lager"
+purchases.empty,Nothing purchased yet — complete a purchase from your list in the catalogue.,Intet købt endnu — gennemfør et køb fra din indkøbsliste i kataloget.
+purchases.load_more,Load more,Indlæs flere
+purchases.locked,Change your password (Account → Security) to unlock your purchase history.,Skift din adgangskode (Konto → Sikkerhed) for at låse din købshistorik op.
+purchases.new,new,ny
 scanner.label.live,scanner,scanner
 scanner.label.off,scanner offline,scanner inaktiv
 scanner.label.unpaired,no scanner,ingen scanner

@@ -453,18 +453,18 @@
                "complete a purchase" instruction would be a dead end. -->
           <p class="muted" v-if="myOrders.length === 0">
             <template v-if="user && user.must_change_password">
-              Change your password (Account → Security) to unlock your purchase history.
+              {{ t('purchases.locked') }}
             </template>
             <template v-else>
-              Nothing purchased yet — complete a purchase from your list in the catalogue.
+              {{ t('purchases.empty') }}
             </template>
           </p>
           <div v-for="order in myOrders" :key="order.id" class="order-card">
             <div class="order-head" @click="toggleOrder(order.id)">
               <span><strong>#{{ order.id }}</strong> · {{ formatDate(order.created_at) }}
-                · {{ order.lines.length }} item(s)</span>
+                · {{ tp('common.item_count', order.lines.length) }}</span>
               <span>
-                <span v-if="order.id === lastCheckout" class="status-chip resolved">new</span>
+                <span v-if="order.id === lastCheckout" class="status-chip resolved">{{ t('purchases.new') }}</span>
                 <strong>{{ formatPrice(order.total_cents) }}</strong>
               </span>
             </div>
@@ -479,11 +479,12 @@
               </thead>
               <tbody>
                 <tr v-for="line in order.lines" :key="line.item_id">
-                  <td>{{ line.name }}<br /><small class="muted">SKU {{ line.sku }}</small></td>
+                  <td>{{ line.name }}<br /><small class="muted">{{ t('common.sku', { sku: line.sku }) }}</small></td>
                   <td>
                     <template v-if="line.clamped">
-                      <span class="status-chip open" :title="'requested ' + line.qty + ', only ' + line.applied_qty + ' in stock'">
-                        {{ line.applied_qty }} of {{ line.qty }}
+                      <span class="status-chip open"
+                            :title="t('purchases.clamped_title', { requested: line.qty, applied: line.applied_qty })">
+                        {{ t('checkout.clamped', { applied: line.applied_qty, requested: line.qty }) }}
                       </span>
                     </template>
                     <template v-else>{{ line.qty }}</template>
@@ -495,7 +496,7 @@
             </table>
           </div>
           <button v-if="myOrders.length >= ordersLimit && ordersLimit < 100" class="btn ghost block"
-                  @click="loadMoreOrders">Load more</button>
+                  @click="loadMoreOrders">{{ t('purchases.load_more') }}</button>
         </div>
 
         <!-- The spend calendar (round 3, item 5): one coloured dot per
@@ -506,10 +507,10 @@
         <aside class="calendar-card">
           <div class="cal-head">
             <button class="btn tiny" :disabled="calLoading || !calYear"
-                    @click="shiftCalendarMonth(-1)" title="Previous month">‹</button>
-            <strong>{{ calendarMonthLabel || "Calendar" }}</strong>
+                    @click="shiftCalendarMonth(-1)" :title="t('calendar.previous')">‹</button>
+            <strong>{{ calendarMonthLabel || t('calendar.title') }}</strong>
             <button class="btn tiny" :disabled="calLoading || !calYear"
-                    @click="shiftCalendarMonth(1)" title="Next month">›</button>
+                    @click="shiftCalendarMonth(1)" :title="t('calendar.next')">›</button>
           </div>
           <div class="cal-grid cal-weekdays">
             <span v-for="w in calendarWeekdays" :key="w">{{ w }}</span>
@@ -521,7 +522,7 @@
                 <span class="cal-num">{{ cell.day }}</span>
                 <span v-if="calendarDay(cell.key)" class="cal-dot"
                       :style="{ background: dayColor(calendarDay(cell.key).cents) }"
-                      :title="calendarDay(cell.key).count + ' purchase(s) · ' + formatPrice(calendarDay(cell.key).cents)"></span>
+                      :title="calendarDayTitle(cell.key)"></span>
               </template>
             </div>
           </div>

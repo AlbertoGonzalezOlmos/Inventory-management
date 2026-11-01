@@ -30,7 +30,7 @@ ARTIFACT = REPO_ROOT / "static" / "i18n.messages.js"
 #: Hardcoded-copy findings (INFO) on the current tree. This number may only SHRINK:
 #: when a migration slice lands, lower it in the same commit. It must never grow
 #: silently — a new hardcoded string is a new finding, which the checker will show.
-PINNED_INFO_COUNT = 216
+PINNED_INFO_COUNT = 204
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "fixtures", "vendor")
 
@@ -392,3 +392,14 @@ def test_usage_and_source_errors_exit_two(tmp_path):
     proc = _run("--json", root=tree)
     assert proc.returncode == 2
     assert any(f["pass"] == "csv" and "duplicate" in f["message"] for f in _findings(proc))
+
+
+def test_calendar_date_families_are_declared_dynamic():
+    """Slice C's weekday/month labels are picked by index at render time, so the
+    dead-row pass can only see their 19 rows through DYNAMIC_FAMILIES; losing a
+    declaration would report every one of them as dead."""
+    module = _load_module()
+    assert set(module.DYNAMIC_FAMILIES) == {
+        "date.dow.", "date.month.", "date.month_long."}
+    rows, _problems = module.pass_csv(CSV)
+    assert module.family_findings(rows) == []

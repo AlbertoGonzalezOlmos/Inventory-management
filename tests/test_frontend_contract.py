@@ -589,3 +589,63 @@ def test_cart_and_checkout_toasts_are_csv_bound():
             assert key in body, (header, key)
         for gone in ("item(s)", '"Only " +', " added to your purchase list"):
             assert gone not in body, (header, gone)
+
+
+# --- Slice C: purchase history and the spend calendar ----------------------
+
+def test_purchase_history_copy_is_csv_bound():
+    """The history list's counts, chips and line metadata: the order count is
+    the shared plural pair, the clamped chip reuses the receipt's
+    checkout.clamped row for its visible text and gets its own row for the
+    title, and the line SKU is one placeholder row (no 'SKU ' concatenation)."""
+    html = _read("index.html")
+    assert "tp('common.item_count', order.lines.length)" in html
+    assert "t('purchases.new')" in html
+    assert "t('common.sku', { sku: line.sku })" in html
+    assert ("t('purchases.clamped_title', { requested: line.qty, "
+            "applied: line.applied_qty })") in html
+    assert ("t('checkout.clamped', { applied: line.applied_qty, "
+            "requested: line.qty })") in html
+    assert "t('purchases.locked')" in html and "t('purchases.empty')" in html
+    assert "t('purchases.load_more')" in html
+    assert "item(s)" not in html
+    assert ">new<" not in html
+    assert ">Load more<" not in html
+
+
+def test_calendar_labels_come_from_the_csv_and_dates_from_the_locale():
+    """The calendar must not borrow Intl for names: the weekday labels and the
+    compact grid-header month (date.dow.*/date.month.*) are CSV rows chosen by
+    index (see the checker's DYNAMIC_FAMILIES); PROSE uses date.month_long.* so
+    "Brugt i marts 2026" is not the telegraphic "Brugt i mar 2026". Numeric
+    dates go through formatLang() (da-DK / en-GB), never the browser default."""
+    html = _read("index.html")
+    assert ":title=\"t('calendar.previous')\"" in html
+    assert ":title=\"t('calendar.next')\"" in html
+    assert "calendarMonthLabel || t('calendar.title')" in html
+    assert ":title=\"calendarDayTitle(cell.key)\"" in html
+
+    weekdays = _method_body("calendarWeekdays() {")
+    assert 'this.t("date.dow." + key)' in weekdays
+    assert "toLocaleDateString" not in weekdays, "names come from the CSV, not Intl"
+
+    month = _method_body("calendarMonthLabel() {")
+    assert 'this.t("date.month." + this.calMonth)' in month
+    assert '"calendar.month_year"' in month
+    assert "toLocaleDateString" not in month
+
+    month_long = _method_body("calendarMonthLongLabel() {")
+    assert 'this.t("date.month_long." + this.calMonth)' in month_long
+    assert '"calendar.month_year"' in month_long
+    assert "toLocaleDateString" not in month_long
+
+    total = _method_body("calendarTotalLabel() {")
+    assert 'this.t("calendar.spent_this_month")' in total
+    assert 'this.t("calendar.spent_in", { month: this.calendarMonthLongLabel })' in total
+
+    day = _method_body("calendarDayTitle(key) {")
+    assert 'this.tp("calendar.day_tooltip", day.count' in day
+    assert "formatPrice(day.cents)" in day
+
+    date = _method_body("formatDate(iso) {")
+    assert "toLocaleDateString(this.formatLang())" in date

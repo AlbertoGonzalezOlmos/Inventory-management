@@ -349,10 +349,11 @@ Vue.createApp({
       return cells;
     },
     calendarWeekdays() {
-      // 2024-01-01 was a Monday: UTC-stable short labels, Monday-first.
-      return Array.from({ length: 7 }, (_, i) =>
-        new Date(Date.UTC(2024, 0, 1 + i))
-          .toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }));
+      // Mon-first keys -> CSV rows (`date.dow.*`, slice C): the labels must not
+      // come from Intl, whose Danish shorts ("man.", "tirs.") overflow the
+      // 7-column grid. Computed, so a language flip re-renders the row.
+      return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        .map((key) => this.t("date.dow." + key));
     },
     calendarMinMax() {
       // min/max over the month's PER-DAY totals (one dot = one value).
@@ -367,12 +368,35 @@ Vue.createApp({
         && this.calMonth === now.getUTCMonth() + 1;
     },
     calendarMonthLabel() {
+      // The calendar HEADER keeps the compact labels (`date.month.*`): the card
+      // is narrow and "mar 2026" is a header, not a sentence.
       if (!this.calYear) return "";
-      return new Date(Date.UTC(this.calYear, this.calMonth - 1, 1))
-        .toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+      return this.t("calendar.month_year", {
+        month: this.t("date.month." + this.calMonth),
+        year: this.calYear,
+      });
+    },
+    calendarMonthLongLabel() {
+      // PROSE uses the long names (`date.month_long.*`): "Brugt i marts 2026"
+      // is idiomatic, "Brugt i mar 2026" is not (slice-C review).
+      if (!this.calYear) return "";
+      return this.t("calendar.month_year", {
+        month: this.t("date.month_long." + this.calMonth),
+        year: this.calYear,
+      });
     },
     calendarTotalLabel() {
-      return this.calIsCurrent ? "Spent this month" : "Spent in " + this.calendarMonthLabel;
+      return this.calIsCurrent
+        ? this.t("calendar.spent_this_month")
+        : this.t("calendar.spent_in", { month: this.calendarMonthLongLabel });
+    },
+    calendarDayTitle(key) {
+      // A day dot's tooltip: the count picks the .one/.other row, the money is
+      // a placeholder (never string concatenation).
+      const day = this.calendarDay(key);
+      if (!day) return "";
+      return this.tp("calendar.day_tooltip", day.count,
+        { price: this.formatPrice(day.cents) });
     },
     // The intake modal's suggestion groups (labelled pick-lists).
     intakeGroups() {
@@ -537,7 +561,11 @@ Vue.createApp({
       return HcrmI18n.money(cents, HcrmI18n.moneyCode());
     },
     formatDate(iso) {
-      return new Date(iso).toLocaleDateString();
+      // Numeric dates follow the UI language (da-DK / en-GB): the day order is
+      // part of the language, and `formatLang` is the one source for it. The
+      // previous no-argument call inherited the BROWSER locale, so a Danish
+      // UI on an English kiosk printed English dates.
+      return new Date(iso).toLocaleDateString(this.formatLang());
     },
     showToast(msg) {
       this.toast = msg;

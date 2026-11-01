@@ -415,3 +415,33 @@ def test_money_column_header_states_the_currency():
     assert by_id["common.price_dkk"].da == "Pris (DKK)"
     assert by_id["common.price"].en == "Price"
     assert by_id["common.price"].da == "Pris"
+
+
+def test_calendar_date_labels_are_csv_rows_and_compact_in_danish():
+    """Slice C: the calendar's weekday and month labels are CSV rows, not Intl
+    output. The Danish cells are the glossary shorts so the 7-column header
+    (and the month title) stay compact; the English month cells keep the long
+    names the UI shipped with, so the English render is unchanged."""
+    rows, _ = i18n.read_rows(CSV_PATH)
+    by_id = {row.id: row for row in rows}
+    ordered = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    assert [by_id[f"date.dow.{key}"].en for key in ordered] == [
+        "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    assert [by_id[f"date.dow.{key}"].da for key in ordered] == [
+        "ma", "ti", "on", "to", "fr", "lø", "sø"]
+    assert all(len(by_id[f"date.dow.{key}"].da) <= 2 for key in ordered), \
+        "the Danish weekday labels must fit the 7-column grid"
+    assert sorted(rid for rid in by_id if rid.startswith("date.month.")) == \
+        sorted(f"date.month.{n}" for n in range(1, 13))
+    for n in range(1, 13):
+        assert len(by_id[f"date.month.{n}"].da) <= 3, "Danish month labels stay short"
+    assert by_id["date.month.3"].en == "March"
+    assert by_id["date.month.3"].da == "mar"
+    # Prose month names: the sentence form ("Brugt i marts 2026"), never a
+    # grid short. English keeps the long names the UI shipped with.
+    assert [by_id[f"date.month_long.{n}"].en for n in range(1, 13)] == [
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December"]
+    assert [by_id[f"date.month_long.{n}"].da for n in range(1, 13)] == [
+        "januar", "februar", "marts", "april", "maj", "juni", "juli",
+        "august", "september", "oktober", "november", "december"]
