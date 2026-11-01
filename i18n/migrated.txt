@@ -1,0 +1,10 @@
+# Namespaces whose copy is already migrated. Pass 4 turns a hardcoded literal into an
+# ERROR when it matches a CSV cell in one of these namespaces; everything else is INFO
+# until its slice lands (item 5). One prefix per line, ending in '.'.
+#
+# This file is DELETED at the item-7 flip: with no file, nothing is exempt and every
+# hardcoded-copy finding is fatal. Add a namespace when its slice lands; never remove
+# one to silence a finding.
+app.
+lang.
+money.

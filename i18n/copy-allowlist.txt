@@ -1,0 +1,7 @@
+# Copy that must NOT come from i18n/strings.csv: brand tokens, commands, machine values.
+# One entry per line, sorted, CONTENT-ADDRESSED (a line move never invalidates it):
+#     <path>:<kind>:<exact literal>   # <why it cannot move, and which item removes it>
+# The literal is escaped so one entry stays one line: \ -> \\ , newline -> \n ,
+# tab -> \t , # -> \# . Kinds: text, attr, expr, attr-expr, call, key, template, sentence.
+# An entry is stale only when NO finding has that (path, kind, literal) — i.e. when the
+# copy itself changed. The list can only SHRINK: an unused entry is an error.
