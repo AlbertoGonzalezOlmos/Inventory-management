@@ -36,6 +36,11 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
+      # The served copy is compiled from i18n/strings.csv; a stale artifact must
+      # fail here, and the check must never write (the hygiene step below asserts
+      # a clean tree). scripts/run.sh runs the same check before boot.
+      - name: i18n artifact is fresh (read-only)
+        run: uv run python scripts/build_i18n.py --check
       - name: suite
         run: uv run pytest -q
       # Order-independence is a claimed property, so it is checked, not assumed.

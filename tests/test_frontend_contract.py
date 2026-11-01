@@ -84,24 +84,28 @@ def test_scancapture_loads_before_app_js():
 
 
 def test_i18n_runtime_loads_between_vendor_and_scan_adapters():
-    """The money formatter must exist before app.js mounts — formatPrice
-    delegates to the HcrmI18n global at render time, so a reversed order is
-    a ReferenceError in the first money render (the login/register targets
-    of the browser gate render no price, which is why THIS pin carries it).
-    It sits above the scan adapters so the item-2 bundle wiring never moves
-    this tag."""
+    """The compiled copy and the runtime must exist before app.js mounts.
+
+    `i18n.messages.js` (generated from i18n/strings.csv) publishes the global the
+    runtime reads at load time, and `formatPrice` delegates to the runtime at
+    render time — a reversed order is a ReferenceError in the first money render
+    (the browser gate's login/register targets render no price, which is why THIS
+    pin carries it). Both sit above the scan adapters so item 3 never moves them.
+    """
     html = _read("index.html")
     autotable = html.find('src="/vendor/jspdf.plugin.autotable.min.js"')
+    messages = html.find('src="/i18n.messages.js"')
     i18n = html.find('src="/i18n.js"')
     capture = html.find('src="/scancapture.js"')
     feed = html.find('src="/scanfeed.js"')
     app = html.find('src="/app.js"')
-    for needle, idx in (("autotable", autotable), ("i18n.js", i18n),
-                        ("scancapture.js", capture), ("scanfeed.js", feed),
-                        ("app.js", app)):
+    for needle, idx in (("autotable", autotable), ("i18n.messages.js", messages),
+                        ("i18n.js", i18n), ("scancapture.js", capture),
+                        ("scanfeed.js", feed), ("app.js", app)):
         assert idx != -1, f"index.html no longer loads {needle}"
-    assert autotable < i18n < capture < feed < app, (
-        "script order must be vendor → i18n → scancapture → scanfeed → app")
+    assert autotable < messages < i18n < capture < feed < app, (
+        "script order must be vendor → i18n.messages → i18n → scancapture → "
+        "scanfeed → app")
 
 
 def _html_section(view: str) -> str:

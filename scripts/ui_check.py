@@ -80,6 +80,10 @@ Pin a specific binary with --browser or HCRM_BROWSER.
 
 FAIL_PATTERNS = (
     "Uncaught",
+    # The i18n runtime renders "[missing: <id>]" and logs this line when a key is
+    # absent from the compiled copy (item 2). It is ours, so it is a hard failure:
+    # the browser gate must never certify a page that lost a string.
+    "[i18n] missing message",
     "Refused to",
     "violates the following Content Security Policy",
     "Failed to load resource",

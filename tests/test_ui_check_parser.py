@@ -139,6 +139,18 @@ def test_liveness_guard_fires_when_records_exist_but_none_parse(monkeypatch):
     assert message is not None and "0 of 1 record(s)" in message
 
 
+def test_missing_i18n_message_is_an_error():
+    """The i18n runtime's own missing-key line must red the browser gate.
+
+    `[missing: <id>]` renders where the copy should have been, and the runtime logs
+    this line once per id. It is our message, so it is a hard failure — a gate that
+    certified a page with a lost string would be worse than no gate.
+    """
+    assert uic.is_error(
+        "[i18n] missing message: checkout.title — add it to i18n/strings.csv "
+        "and run: uv run python scripts/build_i18n.py --write") is True
+
+
 def test_benign_allowlist_is_narrow_and_documented():
     # Only messages that WOULD match a fail pattern need allowlisting; the
     # advisory above is benign by classification, not by allowlist.
