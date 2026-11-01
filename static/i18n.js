@@ -121,6 +121,49 @@
     return translate(base + (value === 1 ? ".one" : ".other"), merged, lang);
   }
 
+  /** The language a switch would land on (normalising junk to the en side). */
+  function otherLang(lang) {
+    return normaliseLang(lang) === "da" ? "en" : "da";
+  }
+
+  function hasLangParam(search) {
+    return typeof search === "string" && /[?&]lang=/.test(search);
+  }
+
+  /** Remove ONLY the `lang` pair, preserving order, sibling params and the
+   *  caller's hash: "?a=1&lang=da&b=2" -> "?a=1&b=2"; "?lang=da" -> "";
+   *  "?language=da" is untouched (a different parameter). Pure. */
+  function stripLangQuery(search) {
+    if (!hasLangParam(search)) return typeof search === "string" ? search : "";
+    const kept = search.replace(/^\?/, "").split("&")
+      .filter((pair) => pair && !/^lang=/.test(pair));
+    return kept.length ? "?" + kept.join("&") : "";
+  }
+
+  /** The one-shot boot decision (item 3): resolve `?lang` > stored > default,
+   *  and say whether the query should be persisted and stripped. `lang` is
+   *  resolved HERE and never re-derived — after the strip, a storage-blocked
+   *  device must not silently revert a consumed ?lang. Pure: no writes. */
+  function bootPlan(search, storage) {
+    return {
+      lang: detectLang(storage, search),
+      persist: queryLang(search) !== null,
+      strip: hasLangParam(search),
+      search: stripLangQuery(search),
+    };
+  }
+
+  /** Transient-message renderer: `{key, vars}` descriptors go through the
+   *  passed translate (so they re-render with the language), anything else
+   *  passes through verbatim, null/undefined render "". Never throws. */
+  function descriptorText(value, translateFn) {
+    if (value == null) return "";
+    if (typeof value === "object" && typeof value.key === "string") {
+      return String(translateFn(value.key, value.vars || null));
+    }
+    return String(value);
+  }
+
   function queryLang(search) {
     if (typeof search !== "string" || !search) return null;
     const match = /[?&]lang=([^&]*)/.exec(search);
@@ -210,6 +253,7 @@
     MONEY_CODE, LANG_KEY, SUPPORTED_LANGS, DEFAULT_LANG, FALLBACK_LANG,
     money, moneyCode, messagesFor, hasMessage, translate, plural,
     detectLang, applyLang, dateLocale, errorText, missingCount,
+    otherLang, queryLang, stripLangQuery, bootPlan, descriptorText,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = HcrmI18n;
   global.HcrmI18n = HcrmI18n;

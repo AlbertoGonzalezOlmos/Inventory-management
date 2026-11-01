@@ -4,4 +4,5 @@ catalogue.search_placeholder,Search the catalogue…,Søg i kataloget…
 common.greeting,"Hello, {name}!","Hej, {name}!"
 common.item_count.one,{n} item,{n} vare
 common.item_count.other,{n} items,{n} varer
+lang.switch_to,Switch to Danish,Skift til engelsk
 money.code,DKK,DKK

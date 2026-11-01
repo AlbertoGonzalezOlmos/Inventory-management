@@ -80,6 +80,7 @@ def test_seed_rows_are_the_plumbing_set():
         "common.greeting",
         "common.item_count.one",
         "common.item_count.other",
+        "lang.switch_to",
         "money.code",
     ]
     by_id = {row.id: row for row in rows}
@@ -127,11 +128,10 @@ def test_unreadable_file_is_rejected(tmp_path):
     assert problems and problems[0].startswith("i18n/strings.csv: cannot read: ")
 
 
-def test_no_ui_migration_has_started():
-    """Item 2 is machinery only: the template must not call t() yet."""
-    html = open(INDEX_HTML, encoding="utf-8").read()
-    assert "{{ t(" not in html, "the template migration is item 5, not item 2"
-    assert '="t(' not in html, "no bound attribute calls t() yet"
+# test_no_ui_migration_has_started was DELETED in item 3 (acceptance note):
+# the language toggle legitimately binds t('lang.switch_to') in the template.
+# Its replacement — the ratchet that exactly ONE binding exists at this stage —
+# lives in tests/test_lang_toggle.py::test_only_the_toggle_binds_t_yet.
 
 
 # --- validator rules (one case per rule) ------------------------------------
