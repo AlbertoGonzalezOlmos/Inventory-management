@@ -100,10 +100,19 @@ const DATA_COLUMNS = [
   { key: "created_at", label: "Created" },
 ];
 
+// Language bootstrap (item 2): resolve the device preference and set <html lang> and
+// the document title from the compiled copy BEFORE Vue mounts, so the first painted
+// frame is already in the right language. With no stored preference this is a no-op:
+// DEFAULT_LANG is "en" and the en `app.title` row is today's static title.
+HcrmI18n.applyLang(HcrmI18n.detectLang(localStorage, location.search));
+
 Vue.createApp({
   data() {
     return {
       user: JSON.parse(localStorage.getItem(USER_KEY) || "null"),
+      // The UI language for this device (item 2: always "en"; the toggle and the
+      // persistence write land with item 3). Reactive, so t()-bound copy follows it.
+      lang: HcrmI18n.detectLang(localStorage, location.search),
       route: location.hash || "#/catalogue",
       busy: false,
 
@@ -427,10 +436,22 @@ Vue.createApp({
 
   methods: {
     /* ---------- helpers ---------- */
+    /* i18n (item 2): thin delegates for the template migration in items 3-5.
+     * Nothing in the template calls them yet, so the rendering is unchanged. */
+    t(id, vars) {
+      return HcrmI18n.translate(id, vars, this.lang);
+    },
+    tp(base, n, vars) {
+      return HcrmI18n.plural(base, n, vars, this.lang);
+    },
+    formatLang() {
+      return HcrmI18n.dateLocale(this.lang);
+    },
     formatPrice(cents) {
       // DKK via the shared runtime, which loads before this file: fixed
       // Danish numerals in both UI languages, ASCII space, stable bytes.
-      return HcrmI18n.money(cents);
+      // The code itself comes from the compiled CSV row `money.code`.
+      return HcrmI18n.money(cents, HcrmI18n.moneyCode());
     },
     formatDate(iso) {
       return new Date(iso).toLocaleDateString();

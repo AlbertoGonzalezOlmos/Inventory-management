@@ -1,0 +1,7 @@
+﻿id,en,da
+app.title,HCRM — Shop Catalogue,HCRM — Butikskatalog
+catalogue.search_placeholder,Search the catalogue…,Søg i kataloget…
+common.greeting,"Hello, {name}!","Hej, {name}!"
+common.item_count.one,{n} item,{n} vare
+common.item_count.other,{n} items,{n} varer
+money.code,DKK,DKK

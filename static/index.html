@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HCRM — Shop Catalogue</title>
+  <title>HCRM</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -1007,6 +1007,11 @@
 <script src="/vendor/vue.global.prod.js"></script>
 <script src="/vendor/jspdf.umd.min.js"></script>
 <script src="/vendor/jspdf.plugin.autotable.min.js"></script>
+<!-- The compiled copy dictionary: data only, generated from i18n/strings.csv by
+     scripts/build_i18n.py. It MUST load before /i18n.js, which reads the
+     HCRM_MESSAGES global at load time (script order pinned in
+     tests/test_frontend_contract.py). scripts/run.sh refuses a stale bundle. -->
+<script src="/i18n.messages.js"></script>
 <!-- i18n.js MUST load before app.js: formatPrice delegates to the HcrmI18n
      money formatter at render time. -->
 <script src="/i18n.js"></script>
