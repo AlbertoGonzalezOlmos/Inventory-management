@@ -28,6 +28,8 @@ served and committed.
   agreeing on the same placeholders.
 - `money.code` must exist, be identical in both languages, and be exactly `DKK`
   (money never changes shape; a currency change edits the rule and this row together).
+- `lang.switch_to` is the **action in the current UI language** ("Switch to Danish" /
+  "Skift til engelsk") — the toggle's accessible name, not a language name.
 
 ## Excel
 

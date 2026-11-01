@@ -269,7 +269,7 @@ def count(pattern: str, text: str) -> int:
 
 
 def check_app_route(label: str, dom: str, console: list[str], liveness: str | None,
-                    copy: str) -> list[str]:
+                    copy: str | None, expected_lang: str = "en") -> list[str]:
     """The compiler canary: the Vue runtime compiler must have executed."""
     failures = []
     if liveness:
@@ -285,7 +285,7 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
         failures.append(f"[{label}] fewer than 2 <input> elements rendered")
     if count(r"<button\b", dom) < 1:
         failures.append(f"[{label}] no <button> rendered")
-    if copy not in dom:
+    if copy is not None and copy not in dom:
         failures.append(f"[{label}] expected copy {copy!r} not rendered")
     # Task 5 pins (count()-only, per the repo's no-interaction harness):
     # - the global scan bus must be LIVE (the keydown listener's installer
@@ -331,6 +331,68 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
         if count(r"Point the scanner at your badge", dom) != 0:
             failures.append(f"[{label}] stale click-to-scan copy still "
                             "rendered — the auto-detect rewording regressed")
+    # The language toggle (item 3), for every app target — copy=None (the
+    # ?lang=da target) skips the English copy pins above but still runs
+    # the structural checks and these.
+    failures.extend(check_lang_direction(dom, expected_lang))
+    return failures
+
+
+_LANG_LABELS: dict[str, str] | None = None
+
+
+def _lang_labels() -> dict[str, str]:
+    """en/da → the toggle's accessible name, read from the copy source.
+
+    Read from i18n/strings.csv (via the shared loader) so a wording change
+    can never redden this gate: the browser gate asserts structure and
+    polarity, never copy. Lazy so importing this module (the parser tests)
+    needs neither scripts/ on sys.path nor the CSV until a check runs.
+    """
+    global _LANG_LABELS
+    if _LANG_LABELS is None:
+        scripts_dir = str(Path(__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import _i18n
+        rows, problems = _i18n.read_rows()
+        if problems:
+            raise SystemExit("i18n: " + problems[0])
+        row = next(r for r in rows if r.id == "lang.switch_to")
+        _LANG_LABELS = {"en": row.en, "da": row.da}
+    return _LANG_LABELS
+
+
+def check_lang_direction(dom: str, expected_lang: str) -> list[str]:
+    """The language-toggle sentinel pair and its polarity (item 3).
+
+    `data-lang` is the CURRENT language, `data-lang-toggle` the target (the
+    flag the button draws), `data-flag` is static per SVG so a swapped
+    drawing is still detectable. The accessible name is compared to the CSV
+    row for the expected language — no copy is hardcoded here.
+    """
+    label = "lang-direction"
+    target = "da" if expected_lang == "en" else "en"
+    failures = []
+    if count(rf'<html lang="{expected_lang}"', dom) < 1:
+        failures.append(f"[{label}] <html lang> is not {expected_lang!r}")
+    if count(r'data-lang-toggle="', dom) != 1:
+        failures.append(f"[{label}] expected exactly one language toggle, "
+                        f"found {count(r'data-lang-toggle="', dom)}")
+    if count(rf'data-lang="{expected_lang}"', dom) < 1:
+        failures.append(f"[{label}] data-lang must carry the current "
+                        f"language ({expected_lang})")
+    if count(rf'data-lang-toggle="{expected_lang}"', dom) != 0:
+        failures.append(f"[{label}] inversion: data-lang-toggle must be the "
+                        f"TARGET ({target}), not the current language")
+    if count(rf'data-lang-toggle="{target}"', dom) < 1 \
+            or count(rf'data-flag="{target}"', dom) < 1:
+        failures.append(f"[{label}] the toggle must show the {target} flag "
+                        f"(data-lang-toggle == data-flag == {target})")
+    expected_label = _lang_labels()[expected_lang]
+    if count(rf'aria-label="{re.escape(expected_label)}"', dom) < 1:
+        failures.append(f"[{label}] the accessible name must be the CSV "
+                        f"action row for {expected_lang}")
     return failures
 
 
@@ -363,9 +425,15 @@ def _check_targets(browser: str, base: str, workdir: str, report: dict) -> list[
             "app-root", dom, console, live, "Log in")),
         ("app-register", "/#/register", lambda dom, console, live: check_app_route(
             "app-register", dom, console, live, "Create your member account")),
+        # The ?lang=da direction: copy=None skips the English copy pins (the
+        # page is Danish-bootstrapped); a fresh per-label profile keeps the
+        # persisted ?lang from bleeding into the other targets.
+        ("app-lang-da", "/?lang=da", lambda dom, console, live: check_app_route(
+            "app-lang-da", dom, console, live, None, "da")),
         ("docs", "/docs", lambda dom, console, live: check_docs(dom, console, live)),
     ]
     failures: list[str] = []
+    titles: dict[str, str] = {}
     for label, path, check in targets:
         url = base.rstrip("/") + path
         profile = os.path.join(workdir, f"profile-{label}")
@@ -377,6 +445,9 @@ def _check_targets(browser: str, base: str, workdir: str, report: dict) -> list[
             continue
         console = console_records(stderr)
         liveness = parser_liveness_failure(stderr)
+        title = re.search(r"<title>(.*?)</title>", dom)
+        if title:
+            titles[label] = title.group(1)
         target_failures = check(dom, console, liveness)
         failures.extend(target_failures)
         report["targets"][label] = {
@@ -390,6 +461,15 @@ def _check_targets(browser: str, base: str, workdir: str, report: dict) -> list[
         print(f"  [{status:>4}] {label:<12} DOM "
               f"{report['targets'][label]['dom_bytes']:>7} B, "
               f"{record_count(stderr)} console record(s), {len(console)} parsed")
+    # Both-direction proof with zero Danish copy: the en and da targets must
+    # render DIFFERENT titles, both carrying the brand token (the title is
+    # set from the CSV's app.title before mount).
+    en_title, da_title = titles.get("app-root"), titles.get("app-lang-da")
+    if en_title is None or da_title is None:
+        failures.append("[lang-direction] an app target rendered no <title>")
+    elif en_title == da_title or "HCRM" not in en_title or "HCRM" not in da_title:
+        failures.append("[lang-direction] the en and da targets must show "
+                        "different HCRM titles")
     return failures
 
 

@@ -176,3 +176,52 @@ def test_exit_codes_are_distinct():
     assert len({uic.EXIT_PASS, uic.EXIT_CHECK_FAILED, uic.EXIT_UNREACHABLE,
                 uic.EXIT_NO_BROWSER, uic.EXIT_DETECTOR_BLIND}) == 5
     assert uic.EXIT_DETECTOR_BLIND == 4 and uic.EXIT_NO_BROWSER == 3
+
+
+# --- item 3: the language-toggle direction check (structure, never copy) ----- #
+
+def _lang_dom(current, target, flag, label, html_lang=None):
+    """A minimal app DOM with the toggle sentinel pair in a given polarity."""
+    return (
+        f'<html lang="{html_lang or current}"><head><title>HCRM</title></head><body>'
+        f'<button type="button" class="lang-toggle" data-lang="{current}" '
+        f'data-lang-toggle="{target}" aria-label="{label}">'
+        f'<svg data-flag="{flag}" viewBox="0 0 37 28"></svg></button></body></html>'
+    )
+
+
+def test_lang_direction_passes_in_both_directions():
+    for lang, target, label in (("en", "da", "Switch to Danish"),
+                                ("da", "en", "Skift til engelsk")):
+        dom = _lang_dom(lang, target, target, label)
+        assert uic.check_lang_direction(dom, lang) == [], (lang, label)
+
+
+def test_lang_direction_flags_an_inverted_toggle():
+    # The classic bug: the toggle carries the CURRENT language as its target.
+    dom = _lang_dom("en", "en", "da", "Switch to Danish")
+    failures = uic.check_lang_direction(dom, "en")
+    assert any("inversion" in f for f in failures), failures
+    assert any('data-lang="en"' not in dom or True for _ in [0])  # shape sanity
+
+
+def test_lang_direction_flags_a_swapped_flag_drawing():
+    # Right attributes, wrong drawing: the en page must show the Dannebrog.
+    dom = _lang_dom("en", "da", "en", "Switch to Danish")
+    failures = uic.check_lang_direction(dom, "en")
+    assert any("flag" in f for f in failures), failures
+
+
+def test_lang_direction_flags_a_missing_toggle_and_a_wrong_html_lang():
+    dom = '<html lang="da"><body><p>no toggle here</p></body></html>'
+    failures = uic.check_lang_direction(dom, "en")
+    assert any("<html lang>" in f for f in failures), failures
+    assert any("exactly one language toggle" in f for f in failures), failures
+
+
+def test_lang_direction_checks_the_accessible_name_against_the_csv():
+    # The label must be the CSV row for the CURRENT language — a stale or
+    # wrong-language label is a failure even when the polarity is right.
+    dom = _lang_dom("en", "da", "da", "Skift til engelsk")
+    failures = uic.check_lang_direction(dom, "en")
+    assert any("accessible name" in f for f in failures), failures

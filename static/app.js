@@ -8,6 +8,9 @@ const STAGING_KEY = "hcrm_staged_scans";   // anonymous scans awaiting attributi
 const TERMINAL_TOKEN_KEY = "hcrm_terminal_token";  // round 4: the kiosk's
 // scanner-feed READ credential — per-TERMINAL, not per-user: it survives
 // logins/logouts (clearing it on logout would unpair the whole kiosk).
+const LANG_KEY = HcrmI18n.LANG_KEY;          // item 3: the UI language — a
+// device preference like the terminal token, so it too survives logout. The
+// runtime OWNS the key (detectLang reads it): one definition, no drift.
 const PAGE_SIZE = 24;
 
 // Global HID scan capture (round 3, Task B): the decision logic — shape
@@ -100,19 +103,30 @@ const DATA_COLUMNS = [
   { key: "created_at", label: "Created" },
 ];
 
-// Language bootstrap (item 2): resolve the device preference and set <html lang> and
-// the document title from the compiled copy BEFORE Vue mounts, so the first painted
-// frame is already in the right language. With no stored preference this is a no-op:
-// DEFAULT_LANG is "en" and the en `app.title` row is today's static title.
-HcrmI18n.applyLang(HcrmI18n.detectLang(localStorage, location.search));
+// Language bootstrap (item 3): resolve ONCE (query > stored > default), apply
+// before mount, and consume ?lang — persist it, then strip it from the URL
+// with the hash and any sibling params preserved (a stale link must not beat
+// a later explicit toggle; location.href is never assigned — that would
+// reload). data() reads the CAPTURED boot.lang, never re-detecting: on a
+// storage-blocked device the stripped query would otherwise be lost.
+const boot = HcrmI18n.bootPlan(location.search, localStorage);
+HcrmI18n.applyLang(boot.lang);
+if (boot.persist) { try { localStorage.setItem(LANG_KEY, boot.lang); } catch (e) { /* kiosk */ } }
+if (boot.strip) {
+  try {
+    history.replaceState(history.state, "",
+      location.pathname + boot.search + location.hash);
+  } catch (e) { /* history unavailable: boot already applied the language */ }
+}
 
 Vue.createApp({
   data() {
     return {
       user: JSON.parse(localStorage.getItem(USER_KEY) || "null"),
-      // The UI language for this device (item 2: always "en"; the toggle and the
-      // persistence write land with item 3). Reactive, so t()-bound copy follows it.
-      lang: HcrmI18n.detectLang(localStorage, location.search),
+      // The UI language for this device (item 3): captured once at boot from
+      // the boot plan (query > stored > default) — never re-detected after
+      // the ?lang strip. Reactive, so t()-bound copy follows every toggle.
+      lang: boot.lang,
       route: location.hash || "#/catalogue",
       busy: false,
 
@@ -240,6 +254,22 @@ Vue.createApp({
   },
 
   computed: {
+    /* ---------- i18n (item 3) ---------- */
+    // The language the toggle would switch TO — the flag's polarity and the
+    // sentinel's target, derived once so they cannot drift apart.
+    nextLang() {
+      return HcrmI18n.otherLang(this.lang);
+    },
+    // Transient copy renders at PAINT time: a plain string (every current
+    // producer) passes through, a {key, vars} descriptor renders through
+    // t() and so re-renders when the language flips (an open toast/greeting
+    // switches with the flag, no reload). Producers migrate in item 5.
+    toastText() {
+      return this.msg(this.toast);
+    },
+    greetingText() {
+      return this.msg(this.greeting);
+    },
     isStaff() {
       return !!this.user && (this.user.role === "staff" || this.user.role === "admin");
     },
@@ -378,6 +408,13 @@ Vue.createApp({
   },
 
   watch: {
+    // The language switch (item 3): the SINGLE post-boot writer of the
+    // preference (a first visit never writes — only a toggle or ?lang does),
+    // and the sync point for <html lang> + the document title on every flip.
+    lang(next) {
+      try { localStorage.setItem(LANG_KEY, next); } catch (e) { /* kiosk */ }
+      HcrmI18n.applyLang(next);
+    },
     search() {
       this.debouncedReload();
     },
@@ -446,6 +483,13 @@ Vue.createApp({
     },
     formatLang() {
       return HcrmI18n.dateLocale(this.lang);
+    },
+    /* i18n (item 3): the toggle and the transient-descriptor renderer. */
+    toggleLang() {
+      this.lang = this.nextLang;
+    },
+    msg(value) {
+      return HcrmI18n.descriptorText(value, (id, vars) => this.t(id, vars));
     },
     formatPrice(cents) {
       // DKK via the shared runtime, which loads before this file: fixed

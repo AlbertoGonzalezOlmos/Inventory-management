@@ -21,6 +21,8 @@ INDEX_HTML = os.path.join(REPO_ROOT, "static", "index.html")
 ITEM2_API = (
     "money", "moneyCode", "messagesFor", "hasMessage", "translate", "plural",
     "detectLang", "applyLang", "dateLocale", "errorText", "missingCount",
+    # item 3: the switch — pure helpers; persistence stays in app.js
+    "otherLang", "queryLang", "stripLangQuery", "bootPlan", "descriptorText",
 )
 
 
@@ -66,12 +68,16 @@ def test_format_price_injects_the_compiled_currency_code():
 
 def test_data_resolves_the_language_and_applylang_runs_before_mount():
     js = _read(APP_JS)
-    assert "lang: HcrmI18n.detectLang(localStorage, location.search)" in js, (
-        "the reactive language must be resolved once, up front")
-    applied = js.index("HcrmI18n.applyLang(HcrmI18n.detectLang(localStorage, location.search))")
+    assert "lang: boot.lang," in js, (
+        "the reactive language must be the CAPTURED boot value — re-detecting "
+        "after the ?lang strip loses it on a storage-blocked device")
+    assert "lang: HcrmI18n.detectLang(" not in js
+    plan = js.index("HcrmI18n.bootPlan(location.search, localStorage)")
+    applied = js.index("HcrmI18n.applyLang(boot.lang)")
     mount = js.index("Vue.createApp({")
-    assert applied < mount, (
-        "<html lang> and the title must be right on the first painted frame")
+    assert plan < applied < mount, (
+        "the boot plan runs first, <html lang> and the title are right on the "
+        "first painted frame, and the strip cannot precede the application")
 
 
 def test_static_title_is_language_neutral():

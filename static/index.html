@@ -35,7 +35,7 @@
        stylesheet rule of its own. -->
   <div class="greeting" aria-live="polite" @click="dismissGreeting"
        :style="greeting ? null : { margin: '0', padding: '0', border: '0', background: 'none', boxShadow: 'none', height: '0', overflow: 'hidden', pointerEvents: 'none', cursor: 'default' }">
-    <template v-if="greeting">{{ greeting }}</template>
+    <template v-if="greeting">{{ greetingText }}</template>
   </div>
 
   <!-- ================= Header / navigation ================= -->
@@ -51,6 +51,26 @@
     </nav>
 
     <div class="userbox">
+      <!-- Language switch: the flag shows the language you would switch TO; the
+           accessible name is the action in the CURRENT language. Both derive from
+           nextLang / the CSV, so the two polarities cannot drift apart. Inline
+           SVGs only: offline, CSP-clean, no emoji. -->
+      <button type="button" class="lang-toggle no-print" :data-lang="lang"
+              :data-lang-toggle="nextLang" :aria-label="t('lang.switch_to')"
+              :title="t('lang.switch_to')" @click="toggleLang">
+        <svg v-if="nextLang === 'da'" data-flag="da" viewBox="0 0 37 28" aria-hidden="true" focusable="false">
+          <rect width="37" height="28" fill="#C8102E"/>
+          <rect x="12" y="0" width="4" height="28" fill="#fff"/>
+          <rect x="0" y="12" width="37" height="4" fill="#fff"/></svg>
+        <svg v-else data-flag="en" viewBox="0 0 60 30" aria-hidden="true" focusable="false">
+          <rect width="60" height="30" fill="#012169"/>
+          <path d="M0 0 60 30 M60 0 0 30" stroke="#fff" stroke-width="6" fill="none"/>
+          <path d="M0 0 60 30 M60 0 0 30" stroke="#C8102E" stroke-width="2" fill="none"/>
+          <rect x="25" y="0" width="10" height="30" fill="#fff"/>
+          <rect x="0" y="10" width="60" height="10" fill="#fff"/>
+          <rect x="27" y="0" width="6" height="30" fill="#C8102E"/>
+          <rect x="0" y="12" width="60" height="6" fill="#C8102E"/></svg>
+      </button>
       <!-- Round 4: which scan path is live. "live" = the grab daemon is
            paired and the queue poll succeeds; "off" = paired but the
            server is unreachable (polling continues); "unpaired" = the
@@ -999,7 +1019,7 @@
 
   <!-- ================= Toast ================= -->
   <transition name="fade">
-    <div class="toast" v-if="toast">{{ toast }}</div>
+    <div class="toast" v-if="toast">{{ toastText }}</div>
   </transition>
 </div>
 
