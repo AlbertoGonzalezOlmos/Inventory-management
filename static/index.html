@@ -333,87 +333,80 @@
          depends on it); a flagged account lands on the Security tab. -->
     <section v-else-if="currentView === 'account'" class="auth-card profile-card">
       <h1>{{ t('nav.profile') }}</h1>
-      <p class="muted">{{ user.name }} · role: {{ user.role }} · {{ user.email }}</p>
-      <p v-if="user.must_change_password" class="error">
-        You are using a default or admin-issued password — you must change it
-        before using the app.
-      </p>
+      <p class="muted">{{ t('account.identity', { name: user.name, role: roleLabel, email: user.email }) }}</p>
+      <p v-if="user.must_change_password" class="error">{{ t('account.must_change') }}</p>
 
       <div class="admin-tabs">
-        <button :class="{active: profileTab === 'profile'}" @click="selectProfileTab('profile')">Profile</button>
-        <button :class="{active: profileTab === 'security'}" @click="selectProfileTab('security')">Security</button>
-        <button :class="{active: profileTab === 'badge'}" @click="selectProfileTab('badge')">My QR badge</button>
-        <button :class="{active: profileTab === 'requests'}" @click="selectProfileTab('requests')">My scan requests</button>
+        <button :class="{active: profileTab === 'profile'}" @click="selectProfileTab('profile')">{{ t('account.tab_profile') }}</button>
+        <button :class="{active: profileTab === 'security'}" @click="selectProfileTab('security')">{{ t('account.tab_security') }}</button>
+        <button :class="{active: profileTab === 'badge'}" @click="selectProfileTab('badge')">{{ t('account.tab_badge') }}</button>
+        <button :class="{active: profileTab === 'requests'}" @click="selectProfileTab('requests')">{{ t('account.tab_requests') }}</button>
       </div>
 
       <!-- Profile: identity + contact -->
       <div v-if="profileTab === 'profile'">
         <h2>{{ t('auth.email') }}</h2>
-        <p class="muted">Your email is your login identifier. Changing it signs
-          out your other sessions.</p>
+        <p class="muted">{{ t('account.email_hint') }}</p>
         <form @submit.prevent="submitEmailChange">
-          <label>New email
+          <label>{{ t('account.new_email') }}
             <input type="email" v-model="emailForm.new_email" required />
           </label>
-          <label>Current password
+          <label>{{ t('auth.current_password') }}
             <input type="password" autocomplete="current-password"
                    v-model="emailForm.current_password" required />
           </label>
           <p v-if="emailError" class="error">{{ emailError }}</p>
-          <p v-if="emailOk" class="ok">Email updated — other sessions were signed out.</p>
-          <button class="btn block" :disabled="busy">Change email</button>
+          <p v-if="emailOk" class="ok">{{ t('account.email_updated') }}</p>
+          <button class="btn block" :disabled="busy">{{ t('account.change_email') }}</button>
         </form>
 
-        <h2 style="margin-top: 2rem">Phone</h2>
-        <p class="muted">Optional: an optional leading "+" and 6–15 digits.
-          Saving an empty field clears it.</p>
+        <h2 style="margin-top: 2rem">{{ t('account.phone') }}</h2>
+        <p class="muted">{{ t('account.phone_hint') }}</p>
         <form @submit.prevent="submitPhoneChange">
-          <label>Phone
+          <label>{{ t('account.phone') }}
             <input type="tel" v-model="phoneForm.phone"
                    placeholder="+34 600 123 456" />
           </label>
           <p v-if="phoneError" class="error">{{ phoneError }}</p>
-          <button class="btn block" :disabled="busy">Save phone</button>
+          <button class="btn block" :disabled="busy">{{ t('account.save_phone') }}</button>
         </form>
       </div>
 
       <!-- Security: the existing change-password form -->
       <div v-else-if="profileTab === 'security'">
-        <h2>Change password</h2>
+        <h2>{{ t('auth.change_password') }}</h2>
         <form @submit.prevent="changePassword">
-          <label>Current password
+          <label>{{ t('auth.current_password') }}
             <input type="password" autocomplete="current-password"
                    v-model="pwForm.current_password" required />
           </label>
-          <label>New password (min. 8 characters)
+          <label>{{ t('auth.new_password_min') }}
             <input type="password" autocomplete="new-password"
                    v-model="pwForm.new_password" minlength="8" required />
           </label>
           <p v-if="pwError" class="error">{{ pwError }}</p>
-          <p v-if="pwOk" class="ok">Password updated. Other sessions were signed out.</p>
-          <button class="btn block" :disabled="busy">Change password</button>
+          <p v-if="pwOk" class="ok">{{ t('account.password_updated') }}</p>
+          <button class="btn block" :disabled="busy">{{ t('auth.change_password') }}</button>
         </form>
       </div>
 
       <!-- My QR badge -->
       <div v-else-if="profileTab === 'badge'">
-        <h2>QR badge login</h2>
+        <h2>{{ t('account.badge_login_heading') }}</h2>
         <p class="muted">
-          A QR badge logs you in without email and password — anyone holding the
-          printed code can log in as you, so treat it like a password.
-          <template v-if="user.has_qr_badge">A badge is currently <strong>active</strong> for this account.</template>
-          <template v-else>No badge is active for this account.</template>
+          {{ t('account.badge_intro') }}
+          {{ user.has_qr_badge ? t('account.badge_active') : t('account.badge_none') }}
         </p>
         <div class="badge-actions">
           <button v-if="user.has_qr_badge" class="btn" :disabled="busy" @click="showMyBadge">
-            Show my QR
+            {{ t('account.show_qr') }}
           </button>
           <button class="btn" :disabled="busy" @click="generateMyBadge">
-            {{ user.has_qr_badge ? "Regenerate badge (revokes the old one)" : "Generate QR badge" }}
+            {{ user.has_qr_badge ? t('account.regenerate_badge') : t('account.generate_badge') }}
           </button>
-          <button v-if="badgeSvg" class="btn ghost no-print" @click="printAccountBadge">Print</button>
+          <button v-if="badgeSvg" class="btn ghost no-print" @click="printAccountBadge">{{ t('common.print') }}</button>
           <button v-if="user.has_qr_badge" class="btn ghost danger no-print" @click="revokeMyBadge">
-            Revoke badge
+            {{ t('account.revoke_badge') }}
           </button>
         </div>
         <div v-if="badgeSvg" class="qr-badge" v-html="badgeSvg"></div>
@@ -421,13 +414,13 @@
 
       <!-- My scan requests: existing block, moved -->
       <div v-else-if="profileTab === 'requests'">
-        <h2>My scan requests</h2>
+        <h2>{{ t('account.tab_requests') }}</h2>
         <p class="muted" v-if="myRequests.length === 0">
-          Unknown items you report at the counter appear here, with their status.
+          {{ t('account.requests_empty') }}
         </p>
         <table class="table" v-else>
           <thead>
-            <tr><th>Requested</th><th>Code</th><th>Proposed item</th><th>{{ t('common.price') }}</th><th>Status</th></tr>
+            <tr><th>Requested</th><th>Code</th><th>Proposed item</th><th>{{ t('common.price_dkk') }}</th><th>Status</th></tr>
           </thead>
           <tbody>
             <tr v-for="req in myRequests" :key="req.id">
@@ -687,7 +680,7 @@
       <!-- Items management -->
       <div v-if="adminTab === 'items'" class="admin-split">
         <form class="card" @submit.prevent="submitItem">
-          <h2>{{ itemEditingId ? 'Edit item #' + itemEditingId : 'Input new item' }}</h2>
+          <h2>{{ itemEditingId ? t('item.edit_title', { id: itemEditingId }) : t('item.new_title') }}</h2>
           <label>SKU
             <input v-model="itemForm.sku" required :disabled="!!itemEditingId" />
           </label>
@@ -702,23 +695,23 @@
           </label>
           <label>Description
             <textarea v-model="itemForm.description" rows="3"
-              placeholder="Please, enter a brief description of the product"></textarea>
+              :placeholder="t('item.description_placeholder')"></textarea>
           </label>
           <div class="row">
-            <label>Price (DKK)
+            <label>{{ t('common.price_dkk') }}
               <input type="number" v-model.number="itemForm.price" step="0.01" min="0" required />
             </label>
             <label>Stock
               <input type="number" v-model.number="itemForm.stock" min="0" required />
             </label>
           </div>
-          <label>Image URL (optional)
+          <label>{{ t('item.image_url') }}
             <input v-model="itemForm.image_url" placeholder="https://…" />
           </label>
           <p v-if="itemError" class="error">{{ itemError }}</p>
           <div class="row">
-            <button class="btn" :disabled="busy">{{ itemEditingId ? 'Save changes' : 'Add to catalogue' }}</button>
-            <button v-if="itemEditingId" type="button" class="btn ghost" @click="resetItemForm">Cancel</button>
+            <button class="btn" :disabled="busy">{{ itemEditingId ? t('item.save') : t('item.add') }}</button>
+            <button v-if="itemEditingId" type="button" class="btn ghost" @click="resetItemForm">{{ t('common.cancel') }}</button>
           </div>
           <p class="muted"></p>
         </form>
@@ -857,15 +850,14 @@
   <div class="modal-backdrop badge-backdrop" v-if="memberBadge" @click.self="memberBadge = null">
     <div class="modal badge-card">
       <button class="modal-close no-print" @click="memberBadge = null">✕</button>
-      <h2>QR badge — {{ memberBadge.name }}</h2>
+      <h2>{{ t('account.badge_modal_title', { name: memberBadge.name }) }}</h2>
       <p class="muted">
-        {{ memberBadge.email }} · any previous badge for this account was just revoked.
-        Whoever holds this code can log in as the member — hand it over privately.
+        {{ t('account.badge_modal_notice', { email: memberBadge.email }) }}
       </p>
       <div class="qr-badge" v-html="memberBadge.svg"></div>
       <div class="modal-footer no-print">
-        <button class="btn ghost" @click="memberBadge = null">Close</button>
-        <button class="btn" @click="() => window.print()">Print</button>
+        <button class="btn ghost" @click="memberBadge = null">{{ t('common.close') }}</button>
+        <button class="btn" @click="() => window.print()">{{ t('common.print') }}</button>
       </div>
     </div>
   </div>
@@ -874,17 +866,17 @@
   <div class="modal-backdrop" v-if="pwResetMember" @click.self="closePwReset">
     <div class="modal">
       <button class="modal-close" @click="closePwReset">✕</button>
-      <h2>Reset password — {{ pwResetMember.name }}</h2>
+      <h2>{{ t('account.reset_title', { name: pwResetMember.name }) }}</h2>
       <p class="muted">
-        {{ pwResetMember.email }} · their sessions will be signed out.
+        {{ t('account.reset_notice', { email: pwResetMember.email }) }}
       </p>
       <form @submit.prevent="submitPwReset">
-        <label>Temporary password (min. 8 characters)
+        <label>{{ t('account.temp_password') }}
           <input type="password" autocomplete="new-password"
                  v-model="pwResetValue" minlength="8" required />
         </label>
-        <p v-if="pwResetError" class="error">{{ pwResetError }}</p>
-        <button class="btn block" :disabled="!pwResetValue">Set password</button>
+        <p v-if="pwResetError" class="error">{{ msg(pwResetError) }}</p>
+        <button class="btn block" :disabled="!pwResetValue">{{ t('account.set_password') }}</button>
       </form>
     </div>
   </div>
@@ -894,13 +886,13 @@
        deliberate act (button, expiry, or a badge decision). -->
   <div class="modal-backdrop logoff-overlay" v-if="logoff">
     <div class="modal logoff-card">
-      <h2>Log off {{ logoff.name }}?</h2>
-      <p class="muted">You scanned your own badge.</p>
+      <h2>{{ t('account.logoff_title', { name: logoff.name }) }}</h2>
+      <p class="muted">{{ t('account.logoff_self') }}</p>
       <div class="countdown">{{ logoff.remaining }}</div>
-      <p class="muted">Logging off automatically when the countdown reaches zero.</p>
+      <p class="muted">{{ t('account.logoff_auto') }}</p>
       <div class="modal-footer">
-        <button class="btn ghost block" @click="cancelLogoff">Stay logged in</button>
-        <button class="btn danger block" @click="finishLogoff">Log off now</button>
+        <button class="btn ghost block" @click="cancelLogoff">{{ t('account.logoff_stay') }}</button>
+        <button class="btn danger block" @click="finishLogoff">{{ t('account.logoff_now') }}</button>
       </div>
     </div>
   </div>
@@ -909,7 +901,7 @@
   <div class="modal-backdrop" v-if="scanIntake" @click.self="closeIntake">
     <div class="modal">
       <button class="modal-close" @click="closeIntake">✕</button>
-      <h2>Unknown item</h2>
+      <h2>{{ t('intake.title') }}</h2>
       <p>
         <code>{{ scanIntake.code }}</code>
         <span class="muted" v-if="intakeAnalysisLine()"> · {{ intakeAnalysisLine() }}</span>
@@ -927,17 +919,17 @@
             @click="addSuggestedItem(item)"
           >
             <strong>{{ item.name }}</strong>
-            <small>{{ formatPrice(item.price_cents) }} · SKU {{ item.sku }}</small>
+            <small>{{ formatPrice(item.price_cents) }} · {{ t('common.sku', { sku: item.sku }) }}</small>
           </button>
         </div>
       </template>
 
       <form @submit.prevent="submitIntake">
-        <label>Item name
+        <label>{{ t('intake.item_name') }}
           <input v-model="scanIntake.name" @input="intakeSuggest" required
-                 placeholder="What is this item?" />
+                 :placeholder="t('intake.name_placeholder')" />
         </label>
-        <label>Price (DKK)
+        <label>{{ t('common.price_dkk') }}
           <input v-model="scanIntake.price" type="number" min="0" step="0.01"
                  placeholder="0.00" />
         </label>
@@ -946,13 +938,13 @@
         </label>
         <label v-if="scanIntake.resolveRequestId" class="checkbox-label">
           <input type="checkbox" v-model="scanIntake.addToCart" />
-          Also add the item to {{ scanIntake.requesterName }}'s purchase list
+          {{ t('intake.also_cart', { name: scanIntake.requesterName }) }}
         </label>
         <p v-if="!isStaff" class="muted">
-          Staff will review the request and add the item to the catalogue.
+          {{ t('intake.staff_note') }}
         </p>
         <button class="btn block" :disabled="scanIntake.busy">
-          {{ isStaff ? 'Add to catalogue & purchase list' : 'Send to staff' }}
+          {{ isStaff ? t('intake.submit_staff') : t('intake.submit_member') }}
         </button>
       </form>
     </div>
@@ -973,10 +965,10 @@
       <div class="qr-badge" v-html="badgePrint.svg"></div>
       <p class="badge-payload"><code>{{ badgePrint.payload }}</code></p>
       <p class="badge-warn">
-        {{ badgePrint.warning || "Anyone holding this code can log in — keep it private." }}
+        {{ badgePrint.warning || t('account.badge_warn_fallback') }}
       </p>
       <div class="badge-actions modal-footer">
-        <button class="btn block no-print" @click="() => window.print()">Print</button>
+        <button class="btn block no-print" @click="() => window.print()">{{ t('common.print') }}</button>
         <button class="btn ghost block no-print" @click="badgePrint = null">{{ t('common.done') }}</button>
       </div>
     </div>

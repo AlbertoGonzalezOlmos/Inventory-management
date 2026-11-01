@@ -6,6 +6,5 @@
 # An entry is stale only when NO finding has that (path, kind, literal) — i.e. when the
 # copy itself changed. The list can only SHRINK: an unused entry is an error.
 static/app.js:key:Price (DKK)  # DATA_COLUMNS export/table label stays hardcoded until slice E migrates it (instruction: do not touch DATA_COLUMNS); delete this entry then
-static/index.html:text:Price (DKK)  # item-form and intake form-field labels migrate with slices D/E; delete this entry then
 static/index.html:text:scanner_daemon.py --register  # shell command, not copy — the operator types it verbatim (no slice removes it; plan §20: machine interfaces stay English)
 static/index.html:text:ℹ  # info glyph, not copy — the button's title carries the label (no slice removes it)

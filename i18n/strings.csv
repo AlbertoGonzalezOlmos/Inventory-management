@@ -1,11 +1,73 @@
 ﻿id,en,da
+account.badge_active,A badge is currently active for this account.,Der er i øjeblikket en aktiv badge for denne konto.
+account.badge_generated,QR badge generated — print it and keep it safe,"QR-badge oprettet — udskriv den, og opbevar den sikkert"
+account.badge_intro,"A QR badge logs you in without email and password — anyone holding the printed code can log in as you, so treat it like a password.","En QR-badge logger dig ind uden e-mail og adgangskode — alle med den trykte kode kan logge ind som dig, så behandl den som en adgangskode."
+account.badge_key_mismatch,The badge key changed — regenerate your badge to re-enable viewing (logins are unaffected),Badge-nøglen er ændret — opret din badge igen for at slå visning til (login påvirkes ikke)
+account.badge_login_heading,QR badge login,Log ind med QR-badge
+account.badge_login_title,Your QR login badge,Din QR-badge til login
+account.badge_modal_notice,{email} · any previous badge for this account was just revoked. Whoever holds this code can log in as the member — hand it over privately.,{email} · enhver tidligere badge for denne konto er netop tilbagekaldt. Alle med denne kode kan logge ind som medlemmet — giv den videre privat.
+account.badge_modal_title,QR badge — {name},QR-badge — {name}
+account.badge_no_key,Badge viewing is unavailable (no key) — logins are unaffected; ask an admin to restore the badge key,Badgevisning er ikke tilgængelig (ingen nøgle) — login påvirkes ikke; bed en administrator om at gendanne badge-nøglen
+account.badge_none,No badge is active for this account.,Der er ingen aktiv badge for denne konto.
+account.badge_none_member,This member has no badge yet — they can generate one from their profile,Dette medlem har ingen badge endnu — medlemmet kan oprette en fra sin profil
+account.badge_none_self,You have no badge yet — generate one below,Du har ingen badge endnu — opret en nedenfor
+account.badge_not_allowed,Cannot view this member's badge,Kan ikke vise dette medlems badge
+account.badge_revoked,QR badge revoked,QR-badge tilbagekaldt
+account.badge_rotated,Rotated just now — the previous badge stopped working,Netop roteret — den forrige badge virker ikke længere
+account.badge_self_title,Your QR badge,Din QR-badge
+account.badge_view_failed,Could not view the badge,Kunne ikke vise badgen
+account.badge_warn,Anyone holding this code can log in as you — keep it private.,Alle med denne kode kan logge ind som dig — hold den privat.
+account.badge_warn_fallback,Anyone holding this code can log in — keep it private.,Alle med denne kode kan logge ind — hold den privat.
+account.badge_warn_migrated,Your PREVIOUS printed badge stopped working when you viewed this one — print the new card now and replace it.,"Din FORRIGE trykte badge holdt op med at virke, da du åbnede denne — udskriv det nye kort nu, og erstat det."
+account.badge_warn_register,Anyone holding this code can log in as you — keep it private. Print it now while you have it.,"Alle med denne kode kan logge ind som dig — hold den privat. Udskriv den nu, mens du har den."
+account.badge_welcome,"Welcome, {name}!","Velkommen, {name}!"
+account.change_email,Change email,Skift e-mail
+account.email_hint,Your email is your login identifier. Changing it signs out your other sessions.,"Din e-mail er dit login. Hvis du ændrer den, logges dine andre sessioner ud."
+account.email_updated,Email updated — other sessions were signed out.,E-mail opdateret — andre sessioner blev logget ud.
+account.email_updated_toast,Email updated — you were signed out on other devices,E-mail opdateret — du blev logget ud på andre enheder
+account.generate_badge,Generate QR badge,Opret QR-badge
+account.identity,{name} · role: {role} · {email},{name} · rolle: {role} · {email}
+account.logged_off,Logged off,Logget ud
+account.logoff_arm_failed,Could not arm the logoff countdown,Kunne ikke starte nedtællingen til udlogning
+account.logoff_auto,Logging off automatically when the countdown reaches zero.,"Du bliver logget ud automatisk, når nedtællingen er slut."
+account.logoff_cancelled,Logoff cancelled,Udlogning annulleret
+account.logoff_now,Log off now,Log ud nu
+account.logoff_self,You scanned your own badge.,Du scannede din egen badge.
+account.logoff_stay,Stay logged in,Forbliv logget ind
+account.logoff_title,Log off {name}?,Log {name} ud?
+account.must_change,You are using a default or admin-issued password — you must change it before using the app.,"Du bruger en standardadgangskode eller en adgangskode udstedt af en administrator — du skal skifte den, før du kan bruge appen."
+account.new_email,New email,Ny e-mail
+account.password_reset,Password reset for {name} (their sessions were signed out),Adgangskoden for {name} er nulstillet (sessionerne blev logget ud)
+account.password_too_short,Password must be at least 8 characters,Adgangskoden skal være på mindst 8 tegn
+account.password_updated,Password updated. Other sessions were signed out.,Adgangskoden er opdateret. Andre sessioner blev logget ud.
+account.password_updated_toast,Password updated — other sessions were signed out,Adgangskoden er opdateret — andre sessioner blev logget ud
+account.phone,Phone,Telefon
+account.phone_cleared,Phone cleared,Telefonnummer ryddet
+account.phone_hint,"Optional: an optional leading ""+"" and 6–15 digits. Saving an empty field clears it.","Valgfrit: et eventuelt indledende ""+"" og 6–15 cifre. Gemmer du et tomt felt, ryddes nummeret."
+account.phone_saved,Phone saved,Telefonnummer gemt
+account.regenerate_badge,Regenerate badge (revokes the old one),Opret badgen igen (den gamle tilbagekaldes)
+account.requests_empty,"Unknown items you report at the counter appear here, with their status.","Ukendte varer, du rapporterer ved disken, vises her med deres status."
+account.reset_notice,{email} · their sessions will be signed out.,{email} · sessionerne bliver logget ud.
+account.reset_title,Reset password — {name},Nulstil adgangskode — {name}
+account.revoke_badge,Revoke badge,Tilbagekald badge
+account.revoke_confirm,Revoke your QR badge? It will stop working immediately.,Tilbagekald din QR-badge? Den holder op med at virke med det samme.
+account.save_phone,Save phone,Gem telefon
+account.set_password,Set password,Angiv adgangskode
+account.show_qr,Show my QR,Vis min QR
+account.tab_badge,My QR badge,Min QR-badge
+account.tab_profile,Profile,Profil
+account.tab_requests,My scan requests,Mine scananmodninger
+account.tab_security,Security,Sikkerhed
+account.temp_password,Temporary password (min. 8 characters),Midlertidig adgangskode (min. 8 tegn)
 app.title,HCRM — Shop Catalogue,HCRM — Butikskatalog
 auth.already_member,Already a member?,Er du allerede medlem?
 auth.badge_check_failed,Badge check failed,Badgekontrollen mislykkedes
 auth.badges_not_items,"Badges log in, they are not catalogue items","Badges logger ind, de er ikke katalogvarer"
+auth.change_password,Change password,Skift adgangskode
 auth.change_password_required,Please change your password before continuing,Skift din adgangskode for at fortsætte
 auth.change_password_scanner,Change your password before using the scanner,"Skift din adgangskode, før du bruger scanneren"
 auth.create_account,Create a member account,Opret en medlemskonto
+auth.current_password,Current password,Nuværende adgangskode
 auth.discard,Discard,Kassér
 auth.email,Email,E-mail
 auth.email_or_username,Email or username,E-mail eller brugernavn
@@ -16,6 +78,7 @@ auth.list_saved,Your list was saved — it will be here when you log back in,"Di
 auth.login,Log in,Log ind
 auth.login_subtitle,Members: browse and select items. Staff: manage the catalogue.,Medlemmer: find og vælg varer. Personale: administrér kataloget.
 auth.logout,Log out,Log ud
+auth.new_password_min,New password (min. 8 characters),Ny adgangskode (min. 8 tegn)
 auth.no_account,No account yet?,Har du ingen konto?
 auth.password,Password,Adgangskode
 auth.password_min,Password (min. 8 characters),Adgangskode (min. 8 tegn)
@@ -89,6 +152,8 @@ checkout.review_title,Review your purchase,Gennemse køb
 checkout.scan_hint,You can still scan items to add them — quantity changes here are saved as you make them.,Du kan stadig scanne varer for at tilføje dem — ændringer i antallet her gemmes med det samme.
 checkout.skipped.one,{n} scanned item no longer exists and was skipped.,{n} scannet vare findes ikke længere og blev sprunget over.
 checkout.skipped.other,{n} scanned items no longer exist and were skipped.,{n} scannede varer findes ikke længere og blev sprunget over.
+common.cancel,Cancel,Annuller
+common.close,Close,Luk
 common.done,Done,Færdig
 common.item,Item,Vare
 common.item_count.one,{n} item,{n} vare
@@ -96,6 +161,7 @@ common.item_count.other,{n} items,{n} varer
 common.loading,Loading…,Indlæser…
 common.price,Price,Pris
 common.price_dkk,Price (DKK),Pris (DKK)
+common.print,Print,Udskriv
 common.qty,Qty,Antal
 common.sku,SKU {sku},SKU {sku}
 common.total,Total,I alt
@@ -130,6 +196,31 @@ date.month_long.6,June,juni
 date.month_long.7,July,juli
 date.month_long.8,August,august
 date.month_long.9,September,september
+intake.added,{name} added to the catalogue and your purchase list,{name} blev tilføjet til kataloget og din indkøbsliste
+intake.already_filed,Already filed as {sku} — added instead,Allerede registreret som {sku} — tilføjet i stedet
+intake.also_cart,Also add the item to {name}'s purchase list,Tilføj også varen til {name}s indkøbsliste
+intake.duplicate,You already reported this code — staff know,Du har allerede rapporteret denne kode — personalet ved det
+intake.item_name,Item name,Varenavn
+intake.name_placeholder,What is this item?,Hvad er det for en vare?
+intake.name_required,Enter the item name first,Indtast varenavnet først
+intake.reported,Reported to staff — scan it again once it's in the catalogue,"Sendt til personalet — scan koden igen, når varen er i kataloget"
+intake.request_from,Scan request from {name},Scananmodning fra {name}
+intake.resolve_failed,"Created, but resolving the request failed: {message}","Oprettet, men behandlingen af anmodningen mislykkedes: {message}"
+intake.resolved,Scan request resolved,Scananmodning behandlet
+intake.resolved_also,Also resolved {name}'s request for this code,Behandlede også {name}s anmodning om denne kode
+intake.restricted,restricted circulation,begrænset cirkulation
+intake.staff_note,Staff will review the request and add the item to the catalogue.,Personalet gennemgår anmodningen og tilføjer varen til kataloget.
+intake.submit_member,Send to staff,Send til personalet
+intake.submit_staff,Add to catalogue & purchase list,Tilføj til kataloget og indkøbslisten
+intake.title,Unknown item,Ukendt vare
+item.add,Add to catalogue,Tilføj til kataloget
+item.added,Item added to the catalogue,Varen blev tilføjet til kataloget
+item.description_placeholder,Please enter a brief description of the product,Indtast en kort beskrivelse af varen
+item.edit_title,Edit item #{id},Redigér vare #{id}
+item.image_url,Image URL (optional),Billed-URL (valgfri)
+item.new_title,Input new item,Indtast ny vare
+item.save,Save changes,Gem ændringer
+item.updated,Item updated,Varen blev opdateret
 lang.switch_to,Switch to Danish,Skift til engelsk
 money.code,DKK,DKK
 nav.admin,Admin,Administration
@@ -142,6 +233,13 @@ purchases.empty,Nothing purchased yet — complete a purchase from your list in 
 purchases.load_more,Load more,Indlæs flere
 purchases.locked,Change your password (Account → Security) to unlock your purchase history.,Skift din adgangskode (Konto → Sikkerhed) for at låse din købshistorik op.
 purchases.new,new,ny
+scan.added_assigned,{name} added (assigned scan),{name} tilføjet (tildelt scanning)
+scan.busy_dialog,Finish the current dialog first,Afslut den aktuelle dialog først
+scan.failed,Scan failed ({status}),Scanningen mislykkedes ({status})
+scan.misread,Misread — re-scan,Læst forkert — scan igen
+scan.staged_failed,A staged scan could not be added,En midlertidigt gemt scanning kunne ikke tilføjes
+scan.staged_misread,A staged scan was a misread — dropped,En midlertidigt gemt scanning var læst forkert — kasseret
+scan.staged_saved,Scan saved — log in or scan your badge to assign it,"Scanning gemt — log ind, eller scan din badge for at tildele den"
 scanner.label.live,scanner,scanner
 scanner.label.off,scanner offline,scanner inaktiv
 scanner.label.unpaired,no scanner,ingen scanner

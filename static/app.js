@@ -661,12 +661,11 @@ Vue.createApp({
         // the creation-moment urgency to print it.
         if (data.qr_badge) {
           this.badgePrint = {
-            title: "Your QR login badge",
-            subtitle: "Welcome, " + data.user.name + "!",
+            title: this.t("account.badge_login_title"),
+            subtitle: this.t("account.badge_welcome", { name: data.user.name }),
             svg: data.qr_badge.svg,
             payload: data.qr_badge.payload,
-            warning: "Anyone holding this code can log in as you — keep it " +
-                     "private. Print it now while you have it.",
+            warning: this.t("account.badge_warn_register"),
           };
         }
         // No "Welcome" toast here: the greeting banner from saveSession
@@ -781,7 +780,7 @@ Vue.createApp({
           this.user.must_change_password = false;
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
         }
-        this.showToast("Password updated — other sessions were signed out");
+        this.showToast({ key: "account.password_updated_toast" });
       } catch (e) {
         this.pwError = e.message;
       } finally {
@@ -802,7 +801,7 @@ Vue.createApp({
           this.user.has_qr_badge = true;
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
         }
-        this.showToast("QR badge generated — print it and keep it safe");
+        this.showToast({ key: "account.badge_generated" });
       } catch (e) {
         this.showToast(e.message);
       } finally {
@@ -817,16 +816,16 @@ Vue.createApp({
       // account page directly would print the whole page around the card.
       if (!this.badgeSvg) return;
       this.badgePrint = {
-        title: "Your QR login badge",
-        subtitle: "Rotated just now — the previous badge stopped working",
+        title: this.t("account.badge_login_title"),
+        subtitle: this.t("account.badge_rotated"),
         svg: this.badgeSvg,
         payload: this.badgePayload || "",
-        warning: "Anyone holding this code can log in as you — keep it private.",
+        warning: this.t("account.badge_warn"),
       };
     },
 
     async revokeMyBadge() {
-      if (!confirm("Revoke your QR badge? It will stop working immediately.")) return;
+      if (!confirm(this.t("account.revoke_confirm"))) return;
       try {
         await api("/auth/qr-badge", { method: "DELETE" });
         this.badgeSvg = "";
@@ -835,7 +834,7 @@ Vue.createApp({
           this.user.has_qr_badge = false;
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
         }
-        this.showToast("QR badge revoked");
+        this.showToast({ key: "account.badge_revoked" });
       } catch (e) {
         this.showToast(e.message);
       }
@@ -1083,7 +1082,7 @@ Vue.createApp({
         localStorage.setItem(USER_KEY, JSON.stringify(user));
         this.emailForm = { new_email: "", current_password: "" };
         this.emailOk = true;
-        this.showToast("Email updated — you were signed out on other devices");
+        this.showToast({ key: "account.email_updated_toast" });
       } catch (e) {
         this.emailError = e.message;   // 400 wrong-password/no-op, 409 taken, 422 shape
       } finally {
@@ -1100,7 +1099,8 @@ Vue.createApp({
         });
         this.user = user;
         localStorage.setItem(USER_KEY, JSON.stringify(user));
-        this.showToast(user.phone ? "Phone saved" : "Phone cleared");
+        if (user.phone) this.showToast({ key: "account.phone_saved" });
+        else this.showToast({ key: "account.phone_cleared" });
       } catch (e) {
         this.phoneError = e.message;   // 422: the normaliser's shape message
       } finally {
@@ -1125,7 +1125,7 @@ Vue.createApp({
         // Staff: the manage rule (staff never view an admin's badge).
         this.showToast(isSelf
           ? { key: "auth.change_password_scanner" }
-          : "Cannot view this member's badge");
+          : { key: "account.badge_not_allowed" });
         return false;
       }
       if (r.status === 200 && r.data) {
@@ -1134,37 +1134,34 @@ Vue.createApp({
           svg: r.data.svg,
           payload: r.data.payload,
           warning: r.data.migrated
-            ? "Your PREVIOUS printed badge stopped working when you viewed " +
-              "this one — print the new card now and replace it."
-            : "Anyone holding this code can log in as you — keep it private.",
+            ? this.t("account.badge_warn_migrated")
+            : this.t("account.badge_warn"),
         };
         return true;
       }
       const s = r.data && r.data.detail && r.data.detail.status;
       if (r.status === 404 || s === "none") {
         this.showToast(isSelf
-          ? "You have no badge yet — generate one below"
-          : "This member has no badge yet — they can generate one from their profile");
+          ? { key: "account.badge_none_self" }
+          : { key: "account.badge_none_member" });
       } else if (s === "no_key") {
-        this.showToast("Badge viewing is unavailable (no key) — logins are " +
-                       "unaffected; ask an admin to restore the badge key");
+        this.showToast({ key: "account.badge_no_key" });
       } else if (s === "key_mismatch") {
-        this.showToast("The badge key changed — regenerate your badge to " +
-                       "re-enable viewing (logins are unaffected)");
+        this.showToast({ key: "account.badge_key_mismatch" });
       } else {
-        this.showToast("Could not view the badge");
+        this.showToast({ key: "account.badge_view_failed" });
       }
       return false;
     },
 
     async showMyBadge() {
       const r = await api("/auth/qr-badge", { raw: true });
-      this._handleBadgeView(r, "Your QR badge", this.user ? this.user.name : "");
+      this._handleBadgeView(r, this.t("account.badge_self_title"), this.user ? this.user.name : "");
     },
 
     async viewMemberBadge(member) {
       const r = await api("/members/" + member.id + "/qr-badge", { raw: true });
-      this._handleBadgeView(r, "QR badge — " + member.name, member.email, false);
+      this._handleBadgeView(r, this.t("account.badge_modal_title", { name: member.name }), member.email, false);
     },
 
     async loadMyOrders() {
@@ -1688,7 +1685,7 @@ Vue.createApp({
       // are dropped — finish the current dialog first. Badges always
       // process: a second person at the counter is never ignored.
       if (this._modalOpen()) {
-        this.showToast("Finish the current dialog first");
+        this.showToast({ key: "scan.busy_dialog" });
         return;
       }
       if (!this.user) {
@@ -1701,13 +1698,13 @@ Vue.createApp({
       if (status === 401) { this.handleSessionExpired(); return; }
       if (status === 200 && data) {
         this.cart = data.cart;
-        this.showToast(data.item.name + " added to your purchase list");
+        this.showToast({ key: "cart.added", vars: { name: data.item.name } });
         this._stockWarn(this.cart.lines.find(l => l.item.id === data.item.id));
         return;
       }
       const detail = data && data.detail;
       if (status === 422 && detail && detail.status === "misread") {
-        this.showToast(detail.message || "Misread — re-scan");
+        this.showToast(detail.message || this.t("scan.misread"));
         return;
       }
       if (status === 400 && detail && detail.status === "badge") {
@@ -1719,7 +1716,7 @@ Vue.createApp({
         this.openNextIntake();
         return;
       }
-      this.showToast((detail && detail.message) || `Scan failed (${status})`);
+      this.showToast((detail && detail.message) || this.t("scan.failed", { status }));
     },
 
     handleSessionExpired() {
@@ -1909,7 +1906,7 @@ Vue.createApp({
       });
       if (status === 401) { this.handleSessionExpired(); return; }
       if (status !== 200 || !data) {
-        this.showToast("Could not arm the logoff countdown");
+        this.showToast({ key: "account.logoff_arm_failed" });
         return;
       }
       // The server deadline is the truth (Task 4 enforces it lazily); the
@@ -1938,7 +1935,7 @@ Vue.createApp({
       this.clearLogoff();
       const announcedSave = await this.logout();   // best-effort: the server
       if (!announcedSave) {                        // deadline already killed
-        this.showToast("Logged off");              // the token if throttled
+        this.showToast({ key: "account.logged_off" });              // the token if throttled
       }
     },
 
@@ -1946,7 +1943,7 @@ Vue.createApp({
       this.clearLogoff();
       const { status } = await api("/auth/logoff-cancel", { method: "POST", raw: true });
       if (status === 401) { this.handleSessionExpired(); return; }
-      this.showToast("Logoff cancelled");
+      this.showToast({ key: "account.logoff_cancelled" });
     },
 
     clearLogoff() {
@@ -2016,7 +2013,7 @@ Vue.createApp({
         this.stagedScans = this.stagedScans.slice(-STAGING_CAP);
       }
       this.persistStagedScans();
-      this.showToast("Scan saved — log in or scan your badge to assign it");
+      this.showToast({ key: "scan.staged_saved" });
     },
 
     persistStagedScans() {
@@ -2040,14 +2037,14 @@ Vue.createApp({
         if (status === 401) { this.handleSessionExpired(); return; }
         if (status === 200 && data) {
           this.cart = data.cart;
-          this.showToast(data.item.name + " added (assigned scan)");
+          this.showToast({ key: "scan.added_assigned", vars: { name: data.item.name } });
         } else if (status === 422) {
-          this.showToast("A staged scan was a misread — dropped");
+          this.showToast({ key: "scan.staged_misread" });
         } else if (status === 404 && data && data.detail && data.detail.status === "unknown") {
           this.intakeQueue.push(data.detail);   // unknown: take it through intake
           continue;
         } else {
-          this.showToast("A staged scan could not be added");
+          this.showToast({ key: "scan.staged_failed" });
         }
       }
       this.stagedScans = [];
@@ -2089,7 +2086,7 @@ Vue.createApp({
       if (a.format) bits.push(a.format);
       if (a.region) bits.push(a.region);
       if (a.usage) bits.push(a.usage);
-      if (a.globally_unique === false) bits.push("restricted circulation");
+      if (a.globally_unique === false) bits.push(this.t("intake.restricted"));
       return bits.join(" · ");
     },
 
@@ -2117,7 +2114,7 @@ Vue.createApp({
         this.cart = await api("/cart/items", {
           method: "POST", body: { item_id: item.id, qty: 1 },
         });
-        this.showToast(item.name + " added to your purchase list");
+        this.showToast({ key: "cart.added", vars: { name: item.name } });
         this.closeIntake();
       } catch (e) {
         this.showToast(e.message);
@@ -2127,7 +2124,7 @@ Vue.createApp({
     async submitIntake() {
       const intake = this.scanIntake;
       if (!intake || intake.busy) return;
-      if (!intake.name.trim()) { this.showToast("Enter the item name first"); return; }
+      if (!intake.name.trim()) { this.showToast({ key: "intake.name_required" }); return; }
       intake.busy = true;
       try {
         if (this.isStaff) await this.submitIntakeStaff(intake);
@@ -2155,7 +2152,7 @@ Vue.createApp({
         const existing = await api("/items?barcode=" + encodeURIComponent(gtin14));
         if (existing.length) {
           await this._intakeAddToCart(existing[0].id);
-          this.showToast(`Already filed as ${existing[0].sku} — added instead`);
+          this.showToast({ key: "intake.already_filed", vars: { sku: existing[0].sku } });
           await this._resolveIfRequested(intake, existing[0].id);
           this.closeIntake();
           return;
@@ -2182,7 +2179,7 @@ Vue.createApp({
           const existing = await api("/items?barcode=" + encodeURIComponent(gtin14));
           if (existing.length) {
             await this._intakeAddToCart(existing[0].id);
-            this.showToast(`Already filed as ${existing[0].sku} — added instead`);
+            this.showToast({ key: "intake.already_filed", vars: { sku: existing[0].sku } });
             await this._resolveIfRequested(intake, existing[0].id);
             this.closeIntake();
             return;
@@ -2191,7 +2188,7 @@ Vue.createApp({
         throw e;
       }
       await this._intakeAddToCart(item.id);
-      this.showToast(item.name + " added to the catalogue and your purchase list");
+      this.showToast({ key: "intake.added", vars: { name: item.name } });
       await this._resolveIfRequested(intake, item.id);
       this.closeIntake();
       if (this.currentView === "admin" || this.currentView === "table") {
@@ -2211,7 +2208,7 @@ Vue.createApp({
             method: "POST",
             body: { item_id: itemId, add_to_cart: intake.addToCart },
           });
-          this.showToast("Scan request resolved");
+          this.showToast({ key: "intake.resolved" });
         } else {
           const open = await api("/scan-requests?status=open");
           const match = open.find(r => r.code === intake.code);
@@ -2220,12 +2217,12 @@ Vue.createApp({
               method: "POST",
               body: { item_id: itemId, add_to_cart: true },
             });
-            this.showToast(`Also resolved ${match.requester.name}'s request for this code`);
+            this.showToast({ key: "intake.resolved_also", vars: { name: match.requester.name } });
           }
         }
         this.loadScanRequests();
       } catch (e) {
-        this.showToast("Created, but resolving the request failed: " + e.message);
+        this.showToast({ key: "intake.resolve_failed", vars: { message: e.message } });
       }
     },
 
@@ -2241,17 +2238,17 @@ Vue.createApp({
             price_cents: price,
           },
         });
-        this.showToast("Reported to staff — scan it again once it's in the catalogue");
+        this.showToast({ key: "intake.reported" });
         this.closeIntake();
       } catch (e) {
         if (e.status === 409 && e.detail && e.detail.status === "already" && e.detail.item) {
           await this._intakeAddToCart(e.detail.item.id);
-          this.showToast(`Already filed as ${e.detail.item.sku} — added instead`);
+          this.showToast({ key: "intake.already_filed", vars: { sku: e.detail.item.sku } });
           this.closeIntake();
           return;
         }
         if (e.status === 409 && e.detail && e.detail.status === "duplicate") {
-          this.showToast("You already reported this code — staff know");
+          this.showToast({ key: "intake.duplicate" });
           this.closeIntake();
           return;
         }
@@ -2462,7 +2459,7 @@ Vue.createApp({
       this.intakeQueue = [];
       this.scanIntake = {
         code: req.code,
-        message: `Scan request from ${req.requester.name}`,
+        message: this.t("intake.request_from", { name: req.requester.name }),
         analysis: { kind: req.kind, gtin14: req.gtin14, format: req.kind === "gtin" ? "GTIN" : "" },
         catalogable: !!req.gtin14,
         suggestions: { by_prefix: [], by_keyword: [], by_semantic: [] },
@@ -2513,10 +2510,10 @@ Vue.createApp({
       try {
         if (this.itemEditingId) {
           await api("/items/" + this.itemEditingId, { method: "PATCH", body: payload });
-          this.showToast("Item updated");
+          this.showToast({ key: "item.updated" });
         } else {
           await api("/items", { method: "POST", body: payload });
-          this.showToast("Item added to the catalogue");
+          this.showToast({ key: "item.added" });
         }
         this.resetItemForm();
         this.loadAdminData();
@@ -2639,7 +2636,7 @@ Vue.createApp({
       const member = this.pwResetMember;
       if (!member) return;
       if (this.pwResetValue.length < 8) {
-        this.pwResetError = "Password must be at least 8 characters";
+        this.pwResetError = this.t("account.password_too_short");
         return;
       }
       this.pwResetError = "";
@@ -2648,7 +2645,7 @@ Vue.createApp({
           method: "PATCH", body: { password: this.pwResetValue },
         });
         this.showToast(
-          "Password reset for " + member.name + " (their sessions were signed out)"
+          { key: "account.password_reset", vars: { name: member.name } }
         );
         this.closePwReset();
       } catch (e) {

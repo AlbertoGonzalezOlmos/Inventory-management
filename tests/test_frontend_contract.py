@@ -649,3 +649,119 @@ def test_calendar_labels_come_from_the_csv_and_dates_from_the_locale():
 
     date = _method_body("formatDate(iso) {")
     assert "toLocaleDateString(this.formatLang())" in date
+
+
+# --- Slice D: account, security and item capture ----------------------------
+
+def test_account_screens_copy_is_csv_bound():
+    """The account tabs, identity line and the email/phone/password forms.
+    The identity line is one row with the role LABEL (auth.role.*) as a
+    placeholder value — not the raw machine value; Price (DKK) in the requests
+    table is the money-column row, not the form-label row."""
+    html = _read("index.html")
+    assert ("t('account.identity', { name: user.name, role: roleLabel, "
+            "email: user.email })") in html
+    assert "t('account.must_change')" in html
+    for key in ("account.tab_profile", "account.tab_security",
+                "account.tab_badge", "account.tab_requests"):
+        assert f"t('{key}')" in html, key
+    for key in ("account.new_email", "auth.current_password",
+                "account.change_email", "account.email_updated",
+                "account.phone_hint", "account.save_phone",
+                "auth.change_password", "auth.new_password_min",
+                "account.password_updated"):
+        assert f"t('{key}')" in html, key
+    for key in ("account.badge_login_heading", "account.badge_intro",
+                "account.badge_active", "account.badge_none",
+                "account.show_qr", "account.regenerate_badge",
+                "account.generate_badge", "account.revoke_badge",
+                "account.requests_empty"):
+        assert f"t('{key}')" in html, key
+    assert "t('common.price_dkk')" in html, (
+        "the requests table's money column states DKK (item-1 decision 4)")
+    for gone in (">Profile<", ">Security<", ">My QR badge<", "Show my QR",
+                 "Change password</button>", "New email", "Save phone"):
+        assert gone not in html, gone
+
+
+def test_account_modals_copy_is_csv_bound():
+    """Badge view/print, password reset and the logoff overlay: titles and
+    notices travel as rows with placeholders (name/email), and the print
+    layout's buttons share common.print/close/done."""
+    html = _read("index.html")
+    assert "t('account.badge_modal_title', { name: memberBadge.name })" in html
+    assert "t('account.badge_modal_notice', { email: memberBadge.email })" in html
+    assert "t('account.reset_title', { name: pwResetMember.name })" in html
+    assert "t('account.reset_notice', { email: pwResetMember.email })" in html
+    assert "t('account.temp_password')" in html
+    assert "t('account.set_password')" in html
+    assert "t('account.logoff_title', { name: logoff.name })" in html
+    for key in ("account.logoff_self", "account.logoff_auto",
+                "account.logoff_stay", "account.logoff_now"):
+        assert f"t('{key}')" in html, key
+    assert "t('account.badge_warn_fallback')" in html
+    assert "t('common.close')" in html
+    assert html.count("t('common.print')") == 3, (
+        "account badge tab, member badge modal and badge print modal")
+    assert ">Print<" not in html and ">Close<" not in html
+
+
+def test_scan_intake_and_item_form_copy_is_csv_bound():
+    """The intake modal and the item add/edit form: labels/placeholders are
+    bound, the price field is the money-column row (common.price_dkk), the
+    suggestion SKU line uses common.sku's placeholder, and the colliding bare
+    field labels (Name/Category/Description/Stock/SKU) stay deferred to the
+    shared slice-E rows (see the slice notes)."""
+    html = _read("index.html")
+    for key in ("intake.title", "intake.item_name", "intake.also_cart",
+                "intake.staff_note", "intake.submit_staff", "intake.submit_member",
+                "common.sku"):
+        assert f"t('{key}'" in html, key
+    assert ":placeholder=\"t('intake.name_placeholder')\"" in html
+    assert "t('item.edit_title', { id: itemEditingId })" in html
+    assert "t('item.new_title')" in html
+    assert ":placeholder=\"t('item.description_placeholder')\"" in html
+    assert "t('item.image_url')" in html
+    assert "t('item.save')" in html and "t('item.add')" in html
+    assert "t('common.cancel')" in html
+    assert html.count("<label>{{ t('common.price_dkk') }}") == 2, (
+        "the intake price field and the item-form price field")
+    assert "Price (DKK)" not in html, (
+        "the legacy Price (DKK) literal must come from common.price_dkk now")
+
+
+def test_slice_d_toasts_are_csv_bound():
+    """Every account/badge/logoff/intake/item toast or confirm in this slice is
+    a descriptor (or a t() built at call time for native confirm()), not a
+    literal, and the badge warnings are rows too."""
+    js = _read("app.js")
+    for needle in (
+        'key: "account.password_updated_toast"', 'key: "account.badge_generated"',
+        'confirm(this.t("account.revoke_confirm"))', 'key: "account.badge_revoked"',
+        'key: "account.email_updated_toast"', 'key: "account.phone_saved"',
+        'key: "account.phone_cleared"', 'key: "account.badge_not_allowed"',
+        'key: "account.badge_no_key"', 'key: "account.badge_key_mismatch"',
+        'key: "account.badge_view_failed"', 'key: "account.badge_none_self"',
+        'key: "account.badge_none_member"', 't("account.badge_warn_migrated")',
+        't("account.badge_warn")', 't("account.badge_login_title")',
+        't("account.badge_welcome", { name: data.user.name })',
+        't("account.badge_warn_register")', 't("account.badge_rotated")',
+        't("account.badge_self_title")',
+        't("account.badge_modal_title", { name: member.name })',
+        'key: "account.logoff_arm_failed"', 'key: "account.logged_off"',
+        'key: "account.logoff_cancelled"', 'key: "scan.staged_saved"',
+        'key: "scan.added_assigned"', 'key: "scan.staged_misread"',
+        'key: "scan.staged_failed"', 't("intake.restricted")',
+        'key: "intake.name_required"', 'key: "intake.already_filed"',
+        'key: "intake.added"', 'key: "intake.resolved"',
+        'key: "intake.resolved_also"', 'key: "intake.resolve_failed"',
+        'key: "intake.reported"', 'key: "intake.duplicate"',
+        'key: "scan.busy_dialog"', 't("scan.misread")',
+        't("scan.failed", { status })', 'key: "item.updated"',
+        'key: "item.added"', 't("intake.request_from", { name: req.requester.name })',
+        't("account.password_too_short")', 'key: "account.password_reset"',
+    ):
+        assert needle in js, needle
+    assert 'showToast("QR badge revoked")' not in js
+    assert 'showToast("Logged off")' not in js
+    assert 'confirm("Revoke your QR badge?' not in js

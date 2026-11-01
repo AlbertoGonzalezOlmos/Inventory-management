@@ -5,6 +5,7 @@
 # This file is DELETED at the item-7 flip: with no file, nothing is exempt and every
 # hardcoded-copy finding is fatal. Add a namespace when its slice lands; never remove
 # one to silence a finding.
+account.
 app.
 auth.
 calendar.
@@ -13,8 +14,11 @@ catalogue.
 checkout.
 common.
 date.
+intake.
+item.
 lang.
 money.
 nav.
 purchases.
+scan.
 scanner.

@@ -331,11 +331,11 @@ def test_template_renders_every_amount_through_format_price():
         f"{_TEMPLATE_MONEY_BINDINGS}: a new price surface is a reviewed change "
         "(and it must call formatPrice)")
 
-    # A currency code may appear only as the two field labels ba09ca7
-    # introduced ("Price (DKK)"; item 5 turns them into CSV keys). A rendered
-    # amount takes its code from the formatter, never from the template.
-    assert html.count("DKK") == 2, (
-        "the only DKK literals allowed in the template are the two "
-        "`Price (DKK)` field labels")
+    # A currency code never appears in the template: the two "Price (DKK)"
+    # field labels ba09ca7 introduced are CSV rows now (common.price_dkk,
+    # slice D), and a rendered amount takes its code from the formatter.
+    assert html.count("DKK") == 0, (
+        "no DKK literal in the template — the label comes from common.price_dkk "
+        "and the amount's code from formatPrice")
     assert _SIGN not in html and "kr." not in html, (
         "no hand-written currency symbol in the template")
