@@ -464,7 +464,7 @@ before it is trusted; if no candidate passes the detector exits **4** instead of
 reporting pass with a blind detector. Discovery prefers full Chrome over
 `chrome-headless-shell` (which emits zero `:CONSOLE` records and would make the
 gate permanently blind). The parser is pinned by `tests/test_ui_check_parser.py`
-— 11 fixtures covering both formats, a missing-`source:` suffix, inner quotes,
+— fixtures covering both formats, a missing-`source:` suffix, inner quotes,
 embedded newlines and the liveness guard; no browser needed.
 
 ### `scripts/smoke_test.py` — end-to-end vs a live server

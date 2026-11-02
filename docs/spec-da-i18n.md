@@ -1,6 +1,10 @@
 # Spec: Localize application UI to Danish (da‑DK)
 
-Status: Approved — ready to implement.
+Status: **SUPERSEDED (2026-11-01)** — kept for history. The delivered implementation differs on the
+language-switcher, message-catalogue, currency and brand decisions; see
+`docs/danish-terminology.md` §"Relationship to the older localization spec" for the authoritative
+comparison, and `i18n/README.md` for the workflow that replaced this plan.
+Originally: Approved — ready to implement.
 Owner: omp + tester/tester2 agents.
 Date: 2026-10-20.
 
