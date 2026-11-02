@@ -114,7 +114,6 @@ auth.email,Email,E-mail
 auth.email_or_username,Email or username,E-mail eller brugernavn
 auth.full_name,Full name,Fuldt navn
 auth.greeting,Hi {name},Hej {name}
-auth.invalid_credentials,Invalid email or password,Forkert e-mail eller adgangskode
 auth.list_saved,Your list was saved — it will be here when you log back in,"Din indkøbsliste blev gemt — den er her, når du logger ind igen"
 auth.login,Log in,Log ind
 auth.login_subtitle,Members: browse and select items. Staff: manage the catalogue.,Medlemmer: find og vælg varer. Personale: administrér kataloget.
@@ -178,7 +177,6 @@ catalogue.suggest_keyword,Similar code or name,Lignende kode eller navn
 catalogue.suggest_prefix,Same barcode family,Samme stregkodefamilie
 catalogue.suggest_semantic,Similar meaning,Lignende betydning
 catalogue.view_details,View details,Se detaljer
-checkout.cart_empty,Cart is empty,Indkøbslisten er tom
 checkout.clamped,{applied} of {requested},{applied} af {requested}
 checkout.complete,Complete purchase,Gennemfør køb
 checkout.done,Done — complete purchase,Færdig — gennemfør køb
@@ -245,16 +243,86 @@ date.month_long.6,June,juni
 date.month_long.7,July,juli
 date.month_long.8,August,august
 date.month_long.9,September,september
+error.admin_create_forbidden,Only admins can create admin accounts,Kun administratorer kan oprette administratorkonti
+error.admin_managed_forbidden,Admin accounts can only be managed by admins,Administratorkonti kan kun administreres af administratorer
+error.admin_modified_forbidden,Admin accounts can only be modified by admins,Administratorkonti kan kun ændres af administratorer
+error.admin_password_reset_forbidden,Only admins can reset passwords,Kun administratorer kan nulstille adgangskoder
+error.admin_required,Admin privileges required,Kræver administratoradgang
+error.admin_role_grant_forbidden,Only admins can grant the admin role,Kun administratorer kan give administratorrollen
+error.already_paired,This terminal is already paired — DELETE it (staff or loopback) and re-register to re-pair,"Denne terminal er allerede parret — SLET den (personale eller loopback), og registrér den igen for at parre på ny"
+error.bad_pairing,Unknown terminal or wrong pairing code,Ukendt terminal eller forkert parringskode
+error.bad_pairing_file,The pairing file is malformed — regenerate it with scanner_daemon.py --register,Parringsfilen er ugyldig — opret den igen med scanner_daemon.py --register
+error.badge_key_mismatch,The badge key changed since this badge was issued — regenerate the badge to re-enable viewing (logins are unaffected: they verify by hash),"Badge-nøglen er ændret, siden badgen blev udstedt — opret badgen igen for at slå visning til (login påvirkes ikke: de bekræftes via hash)"
+error.badge_no_key,Badge re-viewing is unavailable (no derivation key) — logins are unaffected; regenerate the badge once a key exists,"Badgevisning er ikke tilgængelig (ingen afledningsnøgle) — login påvirkes ikke; opret badgen igen, når der findes en nøgle"
+error.badge_none,No QR badge for this account — generate one first,Kontoen har ingen QR-badge — opret en først
+error.barcode_taken,Barcode already assigned to item {sku},Stregkoden er allerede tildelt varen {sku}
+error.barcode_taken_concurrent,Barcode already assigned to another item (concurrent update),Stregkoden er allerede tildelt en anden vare (samtidig opdatering)
+error.cart_duplicate_lines,Duplicate item_id in lines: {duplicates},Duplikeret item_id i linjerne: {duplicates}
+error.cart_empty,Cart is empty,Indkøbslisten er tom
+error.cart_items_missing,Items not found: {missing},Varer blev ikke fundet: {missing}
+error.cart_line_missing,Item not in cart,Varen er ikke i indkøbslisten
+error.checkout_db_locked,database is locked by another writer; retry the checkout,databasen er låst af en anden skribent; prøv købet igen
+error.current_password_incorrect,Current password is incorrect,Den nuværende adgangskode er forkert
+error.email_taken,Email already registered,E-mailen er allerede registreret
+error.email_unchanged,New email must differ from the current email,Den nye e-mail skal være forskellig fra den nuværende
+error.embedding_unavailable_create,Embedding model unavailable; cannot create items right now (they would be invisible to semantic search). Try again shortly.,Embedding-modellen er utilgængelig; varer kan ikke oprettes lige nu (de ville være usynlige i semantisk søgning). Prøv igen om lidt.
+error.embedding_unavailable_update,Embedding model unavailable; cannot change item name or description right now. No changes were saved.,Embedding-modellen er utilgængelig; varens navn eller beskrivelse kan ikke ændres lige nu. Ingen ændringer blev gemt.
+error.intake_already,This code is already in the catalogue,Denne kode findes allerede i kataloget
+error.intake_duplicate,You already have an open request for this code,Du har allerede en åben anmodning om denne kode
+error.internal_error,Internal server error,Der opstod en intern fejl
+error.invalid_badge,Invalid QR badge,Ugyldig QR-badge
+error.invalid_credentials,Invalid email or password,Forkert e-mail eller adgangskode
+error.invalid_gtin,not a valid GTIN (bad check digit or length): {barcode},Ugyldig GTIN (forkert kontrolciffer eller længde): {barcode}
+error.invalid_role,Invalid role,Ugyldig rolle
+error.item_conflict_create,SKU or barcode already exists (concurrent create),SKU eller stregkode findes allerede (samtidig oprettelse)
+error.item_not_found,Item not found,Varen blev ikke fundet
+error.json_required,Content-Type: application/json is required,Content-Type: application/json er påkrævet
+error.last_admin_delete,Cannot delete the last admin,Den sidste administrator kan ikke slettes
+error.last_admin_demote,Cannot demote the last admin,Den sidste administrator kan ikke nedgraderes
+error.member_not_found,Member not found,Medlemmet blev ikke fundet
+error.no_pairing_file,No pairing file on this host — run scanner_daemon.py --register first,Der er ingen parringsfil på denne vært — kør scanner_daemon.py --register først
+error.not_authenticated,Not authenticated,Du er ikke logget ind
+error.offset_requires_limit,offset requires a limit (omit limit to rank every item),offset kræver en limit (udelad limit for at rangere alle varer)
+error.pair_loopback_only,One-click pairing is loopback-only by default (HCRM_SCANNER_PAIR_ANY=1 to open for a LAN deployment),Parring med ét klik virker kun fra loopback som standard (HCRM_SCANNER_PAIR_ANY=1 åbner for en LAN-opsætning)
+error.pairing_file_unreadable,"The pairing file {path} exists but cannot be read — the daemon and the server must run as the same user (systemd User=), or set HCRM_SCANNER_PAIRING_FILE","Parringsfilen {path} findes, men kan ikke læses — daemonen og serveren skal køre som samme bruger (systemd User=), eller sæt HCRM_SCANNER_PAIRING_FILE"
+error.password_change_required,Password change required: change your password (Account → Change password) before using the app,"Adgangskodeskift påkrævet: skift din adgangskode (Konto → Sikkerhed), før du bruger appen"
+error.password_unchanged,New password must differ from the current password,Den nye adgangskode skal være forskellig fra den nuværende
+error.register_loopback_only,Terminal registration is loopback-only by default (HCRM_SCANNER_REGISTER_ANY=1 to open for a LAN deployment),Terminalregistrering virker kun fra loopback som standard (HCRM_SCANNER_REGISTER_ANY=1 åbner for en LAN-opsætning)
+error.request_failed,Request failed ({status}),Anmodningen mislykkedes ({status})
+error.scan_badge,"QR badge payload — badges log in via POST /api/auth/qr-login, they are not catalogue items","QR-badge-payload — badges logger ind via POST /api/auth/qr-login, de er ikke katalogvarer"
+error.scan_misread,"MISREAD — check digit fails; re-scan, do not file","Læst forkert — kontrolcifferet fejler; scan igen, og registrér ikke"
+error.scan_request_not_found,Scan request not found,Scananmodningen blev ikke fundet
+error.scan_request_status_invalid,status must be one of {statuses},status skal være en af {statuses}
+error.secret_in_use,That secret is already registered to terminal {owner} — generate a fresh secret per terminal,Den hemmelighed er allerede registreret til terminalen {owner} — opret en ny hemmelighed pr. terminal
+error.self_delete,Cannot delete yourself,Du kan ikke slette dig selv
+error.sku_taken,SKU already exists,SKU'en findes allerede
+error.staff_required,Staff privileges required,Kræver personaleadgang
+error.stock_db_locked,database is locked by another writer; retry the adjustment,databasen er låst af en anden skribent; prøv justeringen igen
+error.terminal_already_registered,"Terminal {terminal} is already registered — recovery is DELETE /api/scanner/terminals/{terminal_url} (staff or loopback), then re-register","Terminalen {terminal} er allerede registreret — gendannelse er DELETE /api/scanner/terminals/{terminal_url} (personale eller loopback), og derefter registrere igen"
+error.terminal_not_found,No terminal {terminal},Ingen terminal {terminal}
+error.terminal_staff_required,Deleting a terminal requires staff privileges (or a loopback caller),Sletning af en terminal kræver personaleadgang (eller en loopback-kalder)
+error.token_invalid,Token invalid or expired,Sessionen er ugyldig eller udløbet
+error.use_change_password,Use POST /api/auth/change-password to change your own password (it verifies your current password),Brug POST /api/auth/change-password til at skifte din egen adgangskode (den bekræfter din nuværende adgangskode)
+error.user_gone,User no longer exists,Brugeren findes ikke længere
+error.validation,Check the highlighted fields,Kontrollér de fremhævede felter
+error.validation_field,{field} is not valid,Ugyldig værdi for {field}
+error.vector_extension_unavailable,Vector search unavailable (sqlite-vector extension not loaded),Vektorsøgning er utilgængelig (sqlite-vector-udvidelsen er ikke indlæst)
+error.vector_model_unavailable,Vector search unavailable (embedding model not loaded),Vektorsøgning er utilgængelig (embedding-modellen er ikke indlæst)
+error.well_known_password,That password is published in this project's documentation/seed code; choose another one,Den adgangskode er offentliggjort i projektets dokumentation/seed-kode; vælg en anden
 export.done,Exported {rows} × {cols} as {format},Eksporterede {rows} × {cols} som {format}
 export.empty,Nothing to export,Intet at eksportere
 export.pdf_prices,Prices in DKK,Priser i DKK
 export.pdf_title,HCRM — Items export,HCRM — Vareeksport
 export.pdf_unavailable,PDF library not loaded,PDF-biblioteket er ikke indlæst
 export.summary,{rows} × {cols} — {date},{rows} × {cols} — {date}
+field.barcode,Barcode,Stregkode
 field.category,Category,Kategori
+field.delta,Stock change,Lagerændring
 field.description,Description,Beskrivelse
+field.image_url,Image URL,Billed-URL
 field.image_url_placeholder,https://…,https://…
 field.name,Name,Navn
+field.new_password,New password,Ny adgangskode
 field.role,Role,Rolle
 field.sku,SKU,SKU
 field.status,Status,Status
@@ -307,8 +375,6 @@ scanner.label.live,scanner,scanner
 scanner.label.off,scanner offline,scanner inaktiv
 scanner.label.unpaired,no scanner,ingen scanner
 scanner.pair_failed,Pairing failed ({status}),Parringen mislykkedes ({status})
-scanner.pair_loopback_only,"One-click pairing is loopback-only — use a browser on the server host, or set HCRM_SCANNER_PAIR_ANY=1","Parring med ét klik virker kun fra loopback — brug en browser på serverværten, eller sæt HCRM_SCANNER_PAIR_ANY=1"
-scanner.pair_no_file,"No pairing file on the server — run scanner_daemon.py --register on the kiosk host, then click the pill again","Ingen parringsfil på serveren — kør scanner_daemon.py --register på kioskværten, og klik derefter på statusknappen igen"
 scanner.paired,"Paired — scans from this terminal now arrive here, even with this window unfocused.","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus."
 scanner.paired_offline,"Paired — scans from this terminal now arrive here, even with this window unfocused (server unreachable — retrying).","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus (serveren er ikke tilgængelig — prøver igen)."
 scanner.paired_toast,"Scanner paired — scans from this terminal now arrive here, even with this window unfocused","Scanner parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke har fokus"

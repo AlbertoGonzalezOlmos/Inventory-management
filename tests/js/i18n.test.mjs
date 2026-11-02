@@ -24,7 +24,7 @@ const { default: HcrmI18n } = await import("../../static/i18n.js");
 
 const {
   translate, plural, detectLang, applyLang, dateLocale, errorText,
-  money, moneyCode, hasMessage, messagesFor, missingCount,
+  money, moneyCode, hasMessage, messagesFor, missingCount, fieldLabel,
   LANG_KEY, SUPPORTED_LANGS, DEFAULT_LANG, FALLBACK_LANG, MONEY_CODE,
 } = HcrmI18n;
 
@@ -170,34 +170,72 @@ test("dateLocale: one explicit BCP 47 tag per UI language", () => {
   assert.equal(dateLocale("fr"), "en-GB");
 });
 
-test("errorText: code row, status row, validation row, then the raw message", () => {
+test("errorText: item 6's chain, executed against the shipped copy", () => {
   const errors = captureErrors(() => {
-    // No error.* rows exist today: every branch falls through to the raw message.
-    assert.equal(errorText({ message: "Not authenticated", status: 401 }, "en"), "Not authenticated");
-    assert.equal(errorText({ detail: { status: "badge", message: "Scan a badge" } }, "en"), "Scan a badge");
-    assert.equal(errorText({ detail: "plain detail" }, "en"), "plain detail");
-    assert.equal(errorText("a bare string", "en"), "a bare string");
-    assert.equal(errorText({ status: 422, detail: [{ msg: "bad" }] }, "en"), "[missing: error.request_failed]",
-      "no message at all is loud, not blank");
+    // 1. the response header's code -> error.<code> (the row IS the copy: an
+    //    English server message never wins when the code has a row).
+    assert.equal(errorText({ code: "not_authenticated", status: 401,
+                             message: "Not authenticated" }, "en"),
+      MESSAGES.en["error.not_authenticated"]);
+    assert.equal(errorText({ code: "not_authenticated", status: 401 }, "da"),
+      MESSAGES.da["error.not_authenticated"]);
+    // ...with the parameterised values from X-Error-Vars (one var, two spans)
+    assert.equal(errorText({ code: "barcode_taken", vars: { sku: "SKU-A" },
+                             message: "Barcode already assigned to item SKU-A" }, "da"),
+      MESSAGES.da["error.barcode_taken"].replace("{sku}", "SKU-A"));
+    assert.equal(errorText({ code: "terminal_not_found",
+                             vars: { terminal: "'kiosk-1'" } }, "en"),
+      MESSAGES.en["error.terminal_not_found"].replace("{terminal}", "'kiosk-1'"));
+    // A row whose vars did not travel is abandoned for the raw message: a
+    // visible "{sku}" is worse than the server's (English) sentence.
+    assert.equal(errorText({ code: "barcode_taken",
+                             message: "Barcode already assigned to item SKU-A" }, "da"),
+      "Barcode already assigned to item SKU-A");
 
+    // 2. no header (a proxy stripped it): the structured status family. No
+    //    error.status.* rows ship — the code is authoritative — so this is
+    //    proved with a temporary table, and the raw message is the live path.
+    assert.equal(errorText({ detail: { status: "badge", message: "Scan a badge" } }, "en"),
+      "Scan a badge");
     withMessages({
-      en: {
-        "error.badge": "Badge problem: {detail}",
-        "error.status.misread": "That scan was a misread",
-        "error.validation": "Check the highlighted field",
-      },
-      da: {},
+      en: { "error.status.misread": "That scan was a misread" },
+      da: { "error.status.misread": "Det var en fejllæsning" },
     }, () => {
-      assert.equal(errorText({ code: "badge", vars: { detail: "expired" } }, "en"),
-        "Badge problem: expired", "a machine code wins");
-      assert.equal(errorText({ detail: { code: "badge", vars: { detail: "x" } } }, "en"),
-        "Badge problem: x", "the structured detail code is equivalent");
-      assert.equal(errorText({ detail: { status: "misread" } }, "en"), "That scan was a misread");
-      assert.equal(errorText({ status: 422, detail: [{ msg: "bad" }] }, "en"),
-        "Check the highlighted field");
+      assert.equal(errorText({ detail: { status: "misread" } }, "en"),
+        "That scan was a misread");
+      assert.equal(errorText({ detail: { status: "misread" } }, "da"),
+        "Det var en fejllæsning");
     });
+
+    // 3. FastAPI's own 422: the field label row, from the body's loc.
+    assert.equal(errorText({ status: 422, field: "price_cents" }, "da"),
+      MESSAGES.da["error.validation_field"].replace("{field}", MESSAGES.da["common.price"]));
+    assert.equal(errorText({ status: 422 }, "en"), MESSAGES.en["error.validation"]);
+    // An unmapped field name is a machine identifier: it renders verbatim.
+    assert.equal(errorText({ status: 422, field: "symbology" }, "en"),
+      MESSAGES.en["error.validation_field"].replace("{field}", "symbology"));
+
+    // 4. uncoded: the raw text (a browser string, or a message no row covers)
+    assert.equal(errorText({ status: 500, message: "Internal server error" }, "en"),
+      "Internal server error");
+    assert.equal(errorText("a bare string", "en"), "a bare string");
+    // 5. nothing at all: the request_failed row — never blank
+    assert.equal(errorText({ status: 500 }, "da"),
+      MESSAGES.da["error.request_failed"].replace("{status}", "500"));
+    assert.equal(errorText(null, "en"),
+      MESSAGES.en["error.request_failed"].replace("{status}", "?"));
   });
-  assert.equal(errors.length, 1, "only the no-message case logs (it is a real gap)");
+  assert.deepEqual(errors, [], "the chain is quiet: it probes, it never logs");
+});
+
+test("fieldLabel maps the 422 field names to their rows", () => {
+  assert.equal(fieldLabel("price_cents", "da"), MESSAGES.da["common.price"]);
+  assert.equal(fieldLabel("new_password", "en"), MESSAGES.en["field.new_password"]);
+  assert.equal(fieldLabel("barcode", "da"), MESSAGES.da["field.barcode"]);
+  assert.equal(fieldLabel("delta", "en"), MESSAGES.en["field.delta"]);
+  assert.equal(fieldLabel("image_url", "en"), MESSAGES.en["field.image_url"]);
+  assert.equal(fieldLabel("unmapped_field", "da"), "unmapped_field");
+  assert.equal(fieldLabel(null, "en"), "");
 });
 
 test("hasMessage/messagesFor are quiet probes over the compiled table", () => {

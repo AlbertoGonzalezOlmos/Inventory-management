@@ -20,6 +20,7 @@ from sqlmodel import Session, select
 
 from app.database import get_session
 from app.deps import get_current_user, require_staff
+from app.error_codes import ERRORS, api_error, coded_detail
 from app.models import Item, ScanRequest, User, utcnow
 from app.qrbadge import parse_badge_payload
 from app.routers.cart import _upsert_line
@@ -67,7 +68,7 @@ def _request_out(session: Session, request: ScanRequest) -> ScanRequestOut:
 def _get_open_request(session: Session, request_id: int) -> ScanRequest:
     request = session.get(ScanRequest, request_id)
     if request is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Scan request not found")
+        raise api_error("scan_request_not_found")
     if request.status != "open":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -86,33 +87,28 @@ def file_request(
     """File an 'unknown item' request (any authenticated user — the member
     path; staff can file too). The classification is re-derived server-side."""
     if parse_badge_payload(payload.code) is not None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail={"status": "badge",
-                    "message": "QR badge payload — badges log in via "
-                               "POST /api/auth/qr-login, they are not "
-                               "catalogue items"},
+        raise coded_detail(
+            "scan_badge",
+            {"status": "badge", "message": ERRORS["scan_badge"].message},
         )
     verdict = resolve_scan(DbLookup(session), payload.code,
                            symbology=payload.symbology)
     if verdict.analysis.kind == "invalid-gtin":
         # Misreads are never filed — re-scan instead (intake doctrine).
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"status": "misread",
-                    "message": "MISREAD — check digit fails; re-scan, "
-                               "do not file"},
+        raise coded_detail(
+            "scan_misread",
+            {"status": "misread", "message": ERRORS["scan_misread"].message},
         )
     if verdict.item is not None:
         # The code resolves now (staff may have created it after the scan
         # 404'd): offer the existing item instead of queueing a duplicate.
         # (model_dump: HTTPException.detail is rendered by plain json.dumps.)
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"status": "already",
-                    "message": "This code is already in the catalogue",
-                    "item": ItemOut.model_validate(verdict.item).model_dump(
-                        mode="json")},
+        raise coded_detail(
+            "intake_already",
+            {"status": "already",
+             "message": ERRORS["intake_already"].message,
+             "item": ItemOut.model_validate(verdict.item).model_dump(
+                 mode="json")},
         )
     duplicate = session.exec(
         select(ScanRequest).where(
@@ -122,12 +118,12 @@ def file_request(
         )
     ).first()
     if duplicate is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"status": "duplicate",
-                    "message": "You already have an open request for this code",
-                    "request": _request_out(session, duplicate).model_dump(
-                        mode="json")},
+        raise coded_detail(
+            "intake_duplicate",
+            {"status": "duplicate",
+             "message": ERRORS["intake_duplicate"].message,
+             "request": _request_out(session, duplicate).model_dump(
+                 mode="json")},
         )
 
     analysis = verdict.analysis
@@ -171,10 +167,8 @@ def list_requests(
 ):
     """The staff queue. Default: open requests, oldest first (queue order)."""
     if status_filter not in VALID_STATUSES + ("all",):
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"status must be one of {VALID_STATUSES + ('all',)}",
-        )
+        raise api_error("scan_request_status_invalid",
+                        statuses=VALID_STATUSES + ("all",))
     statement = select(ScanRequest)
     if status_filter != "all":
         statement = statement.where(ScanRequest.status == status_filter)
@@ -200,7 +194,7 @@ def resolve_request(
     request = _get_open_request(session, request_id)
     item = session.get(Item, payload.item_id)
     if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+        raise api_error("item_not_found")
 
     request.status = "resolved"
     request.resolved_item_id = item.id

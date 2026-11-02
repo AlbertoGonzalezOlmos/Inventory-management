@@ -41,6 +41,7 @@ from sqlmodel import Session, select
 
 from app.database import get_session
 from app.deps import get_current_user
+from app.error_codes import ERRORS, api_error, coded_detail
 from app.models import CartItem, Item, User, utcnow
 from app.qrbadge import parse_badge_payload
 from app.routers.items import DbLookup, suggest_items
@@ -193,12 +194,9 @@ def scan_code(
     payload is a login credential, not an item.
     """
     if parse_badge_payload(payload.code) is not None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail={"status": "badge",
-                    "message": "QR badge payload — badges log in via "
-                               "POST /api/auth/qr-login, they are not "
-                               "catalogue items"},
+        raise coded_detail(
+            "scan_badge",
+            {"status": "badge", "message": ERRORS["scan_badge"].message},
         )
 
     verdict = resolve_scan(DbLookup(session), payload.code,
@@ -208,11 +206,11 @@ def scan_code(
         # Misread: mirrors GET /api/items?barcode='s 422-on-invalid — a
         # misread is a client error, never an empty result, never a filing.
         # NO suggestions: a misread must not be suggested around.
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"status": "misread",
-                    "message": verdict_message(verdict.analysis),
-                    "analysis": _analysis_out(verdict.analysis)},
+        raise coded_detail(
+            "scan_misread",
+            {"status": "misread",
+             "message": verdict_message(verdict.analysis),
+             "analysis": _analysis_out(verdict.analysis)},
         )
 
     if verdict.item is not None:
@@ -270,7 +268,7 @@ def add_item(
     """Add-or-increment: re-adding an item already in the cart raises its
     quantity — a re-scan is a quantity, not an error (never 409)."""
     if not _upsert_line(session, user.id, payload.item_id, payload.qty):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+        raise api_error("item_not_found")
     return _cart_out(session, user)
 
 
@@ -286,7 +284,7 @@ def set_line_qty(
     creation is the add endpoint's job."""
     line = _get_line(session, user.id, item_id)
     if line is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not in cart")
+        raise api_error("cart_line_missing")
     if payload.qty == 0:
         session.delete(line)
     else:
@@ -305,7 +303,7 @@ def remove_line(
 ):
     line = _get_line(session, user.id, item_id)
     if line is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not in cart")
+        raise api_error("cart_line_missing")
     session.delete(line)
     session.commit()
     return _cart_out(session, user)
@@ -327,19 +325,14 @@ def replace_cart(
     ids = [line.item_id for line in payload.lines]
     duplicates = sorted({i for i in ids if ids.count(i) > 1})
     if duplicates:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"Duplicate item_id in lines: {duplicates}",
-        )
+        raise api_error("cart_duplicate_lines", duplicates=duplicates)
     if ids:
         existing = set(
             session.exec(select(Item.id).where(Item.id.in_(ids))).all()
         )
         missing = sorted(set(ids) - existing)
         if missing:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, f"Item(s) not found: {missing}"
-            )
+            raise api_error("cart_items_missing", missing=missing)
 
     now = utcnow()
     # The DELETE must be emitted as its own statement, BEFORE the ORM adds:

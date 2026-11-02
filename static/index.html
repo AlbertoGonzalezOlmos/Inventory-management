@@ -355,7 +355,7 @@
             <input type="password" autocomplete="current-password"
                    v-model="emailForm.current_password" required />
           </label>
-          <p v-if="emailError" class="error">{{ emailError }}</p>
+          <p v-if="emailError" class="error">{{ msg(emailError) }}</p>
           <p v-if="emailOk" class="ok">{{ t('account.email_updated') }}</p>
           <button class="btn block" :disabled="busy">{{ t('account.change_email') }}</button>
         </form>
@@ -367,7 +367,7 @@
             <input type="tel" v-model="phoneForm.phone"
                    placeholder="+34 600 123 456" />
           </label>
-          <p v-if="phoneError" class="error">{{ phoneError }}</p>
+          <p v-if="phoneError" class="error">{{ msg(phoneError) }}</p>
           <button class="btn block" :disabled="busy">{{ t('account.save_phone') }}</button>
         </form>
       </div>
@@ -384,7 +384,7 @@
             <input type="password" autocomplete="new-password"
                    v-model="pwForm.new_password" minlength="8" required />
           </label>
-          <p v-if="pwError" class="error">{{ pwError }}</p>
+          <p v-if="pwError" class="error">{{ msg(pwError) }}</p>
           <p v-if="pwOk" class="ok">{{ t('account.password_updated') }}</p>
           <button class="btn block" :disabled="busy">{{ t('auth.change_password') }}</button>
         </form>
@@ -701,7 +701,7 @@
           <label>{{ t('item.image_url') }}
             <input v-model="itemForm.image_url" :placeholder="t('field.image_url_placeholder')" />
           </label>
-          <p v-if="itemError" class="error">{{ itemError }}</p>
+          <p v-if="itemError" class="error">{{ msg(itemError) }}</p>
           <div class="row">
             <button class="btn" :disabled="busy">{{ itemEditingId ? t('item.save') : t('item.add') }}</button>
             <button v-if="itemEditingId" type="button" class="btn ghost" @click="resetItemForm">{{ t('common.cancel') }}</button>
@@ -754,7 +754,7 @@
               <option v-if="user && user.role === 'admin'" value="admin">{{ t('auth.role.admin_option') }}</option>
             </select>
           </label>
-          <p v-if="memberError" class="error">{{ memberError }}</p>
+          <p v-if="memberError" class="error">{{ msg(memberError) }}</p>
           <button class="btn" :disabled="busy">{{ t('admin.member_create') }}</button>
         </form>
 

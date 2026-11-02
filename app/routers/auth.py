@@ -4,7 +4,7 @@ whoami, password change, kiosk logoff scheduling, badge identification."""
 import hmac
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 from app import security
 from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
+from app.error_codes import ERRORS, api_error, coded_detail
 from app.models import AuthToken, User, utcnow
 from app.qrbadge import (
     badge_svg,
@@ -45,12 +46,6 @@ from app.security import (
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-WELL_KNOWN_DETAIL = (
-    "That password is published in this project's documentation/seed code; "
-    "choose another one"
-)
-
-
 def _issue_token(session: Session, user: User) -> AuthOut:
     # Housekeeping: drop expired tokens so the table does not grow forever.
     for expired in session.exec(
@@ -67,11 +62,11 @@ def _issue_token(session: Session, user: User) -> AuthOut:
 @router.post("/register", response_model=RegisterOut, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterIn, session: Session = Depends(get_session)):
     if is_well_known_password(payload.password):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
+        raise api_error("well_known_password")
     email = payload.email.strip().lower()
     existing = session.exec(select(User).where(User.email == email)).first()
     if existing:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+        raise api_error("email_taken")
 
     user = User(
         email=email,
@@ -95,7 +90,7 @@ def register(payload: RegisterIn, session: Session = Depends(get_session)):
     except IntegrityError:
         # Concurrent registration with the same email raced past the check.
         session.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+        raise api_error("email_taken")
     session.refresh(user)
     auth_out = _issue_token(session, user)
     # badge_svg is rendered after the commit (pure CPU over the payload;
@@ -116,7 +111,7 @@ def login(payload: LoginIn, session: Session = Depends(get_session)):
     # response time does not reveal whether the account exists.
     stored = user.password_hash if user is not None else DUMMY_HASH
     if not verify_password(payload.password, stored) or user is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+        raise api_error("invalid_credentials")
     return _issue_token(session, user)
 
 
@@ -167,7 +162,7 @@ def qr_login(payload: QrLoginIn, session: Session = Depends(get_session)):
     if user is None:
         # Same status as password login: do not distinguish "no such badge"
         # from other failures (a badge either matches or it doesn't).
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid QR badge")
+        raise api_error("invalid_badge")
     return _issue_token(session, user)
 
 
@@ -196,25 +191,21 @@ def badge_view_response(session, user) -> QrBadgeViewOut:
     discriminator, never a bare detail string."""
     result = view_badge(session, user)
     if result.status == "none":
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            detail={"status": "none",
-                    "message": "No QR badge for this account — generate one first"})
+        raise coded_detail(
+            "badge_none",
+            {"status": "none", "message": ERRORS["badge_none"].message},
+        )
     if result.status == "no_key":
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"status": "no_key",
-                    "message": "Badge re-viewing is unavailable (no derivation "
-                               "key) — logins are unaffected; regenerate the "
-                               "badge once a key exists"})
+        raise coded_detail(
+            "badge_no_key",
+            {"status": "no_key", "message": ERRORS["badge_no_key"].message},
+        )
     if result.status == "key_mismatch":
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"status": "key_mismatch",
-                    "message": "The badge key changed since this badge was "
-                               "issued — regenerate the badge to re-enable "
-                               "viewing (logins are unaffected: they verify "
-                               "by hash)"})
+        raise coded_detail(
+            "badge_key_mismatch",
+            {"status": "key_mismatch",
+             "message": ERRORS["badge_key_mismatch"].message},
+        )
     return QrBadgeViewOut(
         status=result.status,          # "ok" | "migrated"
         payload=result.payload,
@@ -353,24 +344,19 @@ def change_password(
     session: Session = Depends(get_session),
 ):
     if not verify_password(payload.current_password, user.password_hash):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Current password is incorrect"
-        )
+        raise api_error("current_password_incorrect")
     # A no-op "change" must not count as a change: accepting new == current
     # returned 204 AND cleared must_change_password, so a staff-issued
     # temporary password could be kept indefinitely — B9 through the back door
     # (the account stays on a password somebody else chose and knows).
     if payload.new_password == payload.current_password:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "New password must differ from the current password",
-        )
+        raise api_error("password_unchanged")
     # Rejecting the published defaults here is what closes the loop: without it,
     # `change-password changeme -> changeme` returned 204 AND cleared
     # must_change_password, leaving a well-known credential with full API access
     # until the next boot (PLAN-v2 §0 B10).
     if is_well_known_password(payload.new_password):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
+        raise api_error("well_known_password")
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False  # self-service change satisfies the flag
     session.add(user)
@@ -431,18 +417,13 @@ def change_email(
        pinned in tests/test_profile.py.
     """
     if not verify_password(payload.current_password, user.password_hash):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Current password is incorrect"
-        )
+        raise api_error("current_password_incorrect")
     email = payload.new_email.strip().lower()
     if email == user.email:  # normalise-then-compare, BEFORE any revocation
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "New email must differ from the current email",
-        )
+        raise api_error("email_unchanged")
     existing = session.exec(select(User).where(User.email == email)).first()
     if existing:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+        raise api_error("email_taken")
 
     user.email = email
     session.add(user)
@@ -460,7 +441,7 @@ def change_email(
         # Concurrent change raced past the pre-check (register's pattern:
         # the pre-check is courtesy, the unique index is the law).
         session.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+        raise api_error("email_taken")
     return UserOut.model_validate(user)
 
 

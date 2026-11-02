@@ -7,12 +7,13 @@ Privilege rules:
   (so the system can never end up with zero admins).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.database import get_session
 from app.deps import require_admin, require_staff
+from app.error_codes import api_error
 from app.models import AuthToken, CartItem, Purchase, PurchaseLine, ScanRequest, User
 from app.qrbadge import badge_svg, new_badge_for
 from app.schemas import (MemberCreatedOut, MemberIn, MemberPatch, PurchaseOut,
@@ -28,12 +29,6 @@ from app.routers.orders import _history
 router = APIRouter(prefix="/api/members", tags=["members"])
 
 VALID_ROLES = ("member", "staff", "admin")
-
-WELL_KNOWN_DETAIL = (
-    "That password is published in this project's documentation/seed code; "
-    "choose another one"
-)
-
 
 def _admin_count(session: Session) -> int:
     return len(session.exec(select(User).where(User.role == "admin")).all())
@@ -65,17 +60,15 @@ def create_member(
     POST /api/members/{id}/qr-badge.
     """
     if payload.role not in VALID_ROLES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid role")
+        raise api_error("invalid_role")
     if is_well_known_password(payload.password):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
+        raise api_error("well_known_password")
     if payload.role == "admin" and staff.role != "admin":
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Only admins can create admin accounts"
-        )
+        raise api_error("admin_create_forbidden")
 
     email = payload.email.strip().lower()
     if session.exec(select(User).where(User.email == email)).first():
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+        raise api_error("email_taken")
 
     user = User(
         email=email,
@@ -103,7 +96,7 @@ def create_member(
         session.commit()
     except IntegrityError:
         session.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+        raise api_error("email_taken")
     session.refresh(user)
     return MemberCreatedOut(
         **UserOut.model_validate(user).model_dump(),
@@ -120,44 +113,36 @@ def update_member(
 ):
     user = session.get(User, user_id)
     if user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+        raise api_error("member_not_found")
 
     changes = payload.model_dump(exclude_unset=True)
     actor_is_admin = staff.role == "admin"
 
     # Staff can never modify an admin account.
     if user.role == "admin" and not actor_is_admin:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Admin accounts can only be modified by admins"
-        )
+        raise api_error("admin_modified_forbidden")
 
     new_role = changes.get("role")
     if new_role is not None:
         if new_role not in VALID_ROLES:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid role")
+            raise api_error("invalid_role")
         if new_role == "admin" and not actor_is_admin:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN, "Only admins can grant the admin role"
-            )
+            raise api_error("admin_role_grant_forbidden")
         if (
             user.role == "admin"
             and new_role != "admin"
             and _admin_count(session) <= 1
         ):
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "Cannot demote the last admin"
-            )
+            raise api_error("last_admin_demote")
 
     password = changes.pop("password", None)
     if password is not None:
         if not actor_is_admin:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN, "Only admins can reset passwords"
-            )
+            raise api_error("admin_password_reset_forbidden")
         if is_well_known_password(password):
             # An admin reset used to accept `changeme` (200), re-arming the
             # well-known default on any account (PLAN-v2 §0 B10).
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, WELL_KNOWN_DETAIL)
+            raise api_error("well_known_password")
         if user.id == staff.id:
             # Reject self-service reset here: this path does not verify the
             # current password, so allowing it (an earlier revision spared the
@@ -165,11 +150,7 @@ def update_member(
             # and persist while locking out the real owner. Own-password
             # changes must go through POST /api/auth/change-password, which
             # requires the current password.
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                "Use POST /api/auth/change-password to change your own password "
-                "(it verifies your current password)",
-            )
+            raise api_error("use_change_password")
 
     for field, value in changes.items():
         setattr(user, field, value)
@@ -192,9 +173,7 @@ def update_member(
         # Backstop fired: the DB trigger rejected a concurrent last-admin
         # demotion that raced past the check above.
         if "last admin" in str(exc):
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "Cannot demote the last admin"
-            )
+            raise api_error("last_admin_demote")
         raise
     session.refresh(user)
     return UserOut.model_validate(user)
@@ -205,11 +184,9 @@ def _get_manageable_member(session: Session, user_id: int, actor: User) -> User:
     as account edits: staff can never touch an admin account."""
     user = session.get(User, user_id)
     if user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+        raise api_error("member_not_found")
     if user.role == "admin" and actor.role != "admin":
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Admin accounts can only be managed by admins"
-        )
+        raise api_error("admin_managed_forbidden")
     return user
 
 
@@ -281,16 +258,14 @@ def delete_member(
     session: Session = Depends(get_session),
 ):
     if user_id == admin.id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete yourself")
+        raise api_error("self_delete")
 
     user = session.get(User, user_id)
     if user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+        raise api_error("member_not_found")
 
     if user.role == "admin" and _admin_count(session) <= 1:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Cannot delete the last admin"
-        )
+        raise api_error("last_admin_delete")
 
     for token in session.exec(
         select(AuthToken).where(AuthToken.user_id == user_id)
@@ -332,7 +307,5 @@ def delete_member(
     except IntegrityError as exc:
         session.rollback()
         if "last admin" in str(exc):
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "Cannot delete the last admin"
-            )
+            raise api_error("last_admin_delete")
         raise

@@ -23,10 +23,11 @@ available and the receipt records the ordered amount (``qty``) alongside
 import sqlite3
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlmodel import Session, select
 
 from app.database import engine, get_session
+from app.error_codes import api_error
 from app.deps import get_current_user
 from app.models import CartItem, Item, Purchase, PurchaseLine, User, utcnow
 from app.schemas import (
@@ -89,7 +90,7 @@ def checkout(
         select(CartItem).where(CartItem.user_id == user_id)
     ).all()
     if not cart_rows:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cart is empty")
+        raise api_error("cart_empty")
 
     # Release the connection the auth dependency used BEFORE checking out
     # the write connection — the adjust_stock doctrine (two pooled
@@ -107,10 +108,8 @@ def checkout(
             cur.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
             if "locked" in str(exc).lower():
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "database is locked by another writer; retry the checkout",
-                    headers={"Retry-After": "1"},
+                raise api_error(
+                    "checkout_db_locked", headers={"Retry-After": "1"}
                 ) from exc
             raise
         try:
@@ -182,7 +181,7 @@ def checkout(
         raw.close()
 
     if empty:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cart is empty")
+        raise api_error("cart_empty")
 
     purchase = PurchaseOut(
         id=purchase_id,
