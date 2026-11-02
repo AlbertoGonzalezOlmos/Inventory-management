@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HCRM</title>
+  <title>Hertha's Butik</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -40,7 +40,7 @@
 
   <!-- ================= Header / navigation ================= -->
   <header class="topbar">
-    <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">HCRM <span>{{ t('app.brand_shop') }}</span></a>
+    <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">{{ t('app.brand') }}</a>
 
     <nav v-if="user" class="nav">
       <a href="#/catalogue" :class="{active: currentView === 'catalogue' || currentView === 'checkout'}">{{ t('nav.catalogue') }}</a>
@@ -71,6 +71,46 @@
           <rect x="27" y="0" width="6" height="30" fill="#C8102E"/>
           <rect x="0" y="12" width="60" height="6" fill="#C8102E"/></svg>
       </button>
+      <!-- Font size (design refresh C2): two native buttons right beside the
+           language flag, scaling the ROOT font — the stylesheet is rem-based,
+           so the whole UI follows one value. The glyphs are inline SVG
+           strokes, NOT a literal "A+"/"A-" text node (that would be
+           untranslatable hardcoded copy); the accessible names and the
+           current-percentage title are CSV rows. The ends are :disabled, so a
+           press at 85 %/135 % is visibly impossible rather than silently
+           ignored, and the wrapper is .no-print (a receipt shows no UI
+           chrome). Both data payload bindings are machine values. -->
+      <div class="font-scale no-print" data-font-scale-control
+           :data-font-scale="fontScalePercent">
+        <button type="button" class="font-step" data-font-step="down"
+                :disabled="!canShrinkFont"
+                :aria-label="t('ui.font_smaller')" :title="fontScaleHint"
+                @click="smallerFont">
+          <svg viewBox="0 0 20 16" fill="none" stroke="currentColor"
+               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false">
+            <path d="M2 13.5 6 2.5 10 13.5 M3.6 10 h4.8" />
+            <path d="M13.5 8 h5" />
+          </svg>
+        </button>
+        <button type="button" class="font-step" data-font-step="up"
+                :disabled="!canGrowFont"
+                :aria-label="t('ui.font_larger')" :title="fontScaleHint"
+                @click="largerFont">
+          <svg viewBox="0 0 20 16" fill="none" stroke="currentColor"
+               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false">
+            <path d="M2 13.5 6 2.5 10 13.5 M3.6 10 h4.8" />
+            <path d="M13.5 8 h5 M16 5.5 v5" />
+          </svg>
+        </button>
+      </div>
+      <!-- C2: the stepper's OUTCOME for assistive tech only. The region is
+           persistent and starts EMPTY (a first paint must not announce
+           100 %); the fontScale watcher writes the current
+           ui.font_scale_hint after each change. .sr-only keeps it in the
+           accessibility tree without a visual box. -->
+      <div class="sr-only" role="status" aria-live="polite">{{ fontScaleAnnouncement }}</div>
       <!-- Round 4: which scan path is live. "live" = the grab daemon is
            paired and the queue poll succeeds; "off" = paired but the
            server is unreachable (polling continues); "unpaired" = the
@@ -287,9 +327,31 @@
         </div>
         <div class="selection-actions">
           <button class="btn ghost block" @click="keepShopping">{{ t('checkout.keep_shopping') }}</button>
-          <button class="btn block" :disabled="busy || purchase.length === 0"
-                  @click="donePurchase">{{ t('checkout.done') }}</button>
+          <button class="btn block hold-btn no-print"
+                  :disabled="busy || purchase.length === 0"
+                  :data-holding="holdActive ? 'on' : null"
+                  aria-describedby="checkout-hold-hint"
+                  @pointerdown="beginPurchaseHold"
+                  @pointerup="endPurchaseHold('pointerup')"
+                  @pointerleave="endPurchaseHold('pointerleave')"
+                  @pointercancel="endPurchaseHold('pointercancel')"
+                  @keydown="purchaseHoldKeydown"
+                  @keyup="purchaseHoldKeyup"
+                  @blur="cancelPurchaseHold('blur')"
+                  @contextmenu.prevent>
+            <!-- C3: the fill is painted per rAF frame via --hold (0..1); the
+                 label sits above it. No @click: a quick click must NOT commit
+                 — it releases before the threshold and shows the visible hint
+                 below (also the button's aria-describedby target). -->
+            <span class="hold-fill" aria-hidden="true"></span>
+            <span class="hold-label">{{ t('checkout.done') }}</span>
+          </button>
         </div>
+        <!-- The hold requirement must be VISIBLE (title tooltips never show on
+             touch and are unreliable to AT): the button points here with
+             aria-describedby, and the line states the duration. .no-print:
+             the control is UI chrome, not part of a printed review. -->
+        <p class="muted hold-hint no-print" id="checkout-hold-hint">{{ t('checkout.hold_hint') }}</p>
         <p class="muted scan-hint">{{ t('checkout.scan_hint') }}</p>
       </aside>
 
@@ -1012,8 +1074,15 @@
   </div>
 
   <!-- ================= Toast ================= -->
+  <!-- The OUTCOME announcement is a STABLE sr-only live region whose text
+       mirrors the toast; the visible box below is aria-hidden so the same
+       sentence is not read twice. A v-if region inserted WITH its text is
+       announced inconsistently (the greeting's comment records the same
+       finding), which is why the region is permanent and only its text
+       changes. -->
+  <div class="sr-only" role="status" aria-live="polite">{{ toastText }}</div>
   <transition name="fade">
-    <div class="toast" v-if="toast">{{ toastText }}</div>
+    <div class="toast" v-if="toast" aria-hidden="true">{{ toastText }}</div>
   </transition>
 </div>
 
@@ -1034,6 +1103,11 @@
      scan bus — pinned in tests/test_frontend_contract.py). -->
 <script src="/scancapture.js"></script>
 <script src="/scanfeed.js"></script>
+<!-- interaction.js MUST load before app.js: the boot read (readScale) and the
+     fontScale watcher (applyScale/writeScale) reference the HcrmInteraction
+     global, and a reversed order is an undefined reference in data(). Script
+     order pinned in tests/test_font_scale.py. -->
+<script src="/interaction.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

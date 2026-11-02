@@ -183,7 +183,7 @@ def test_exit_codes_are_distinct():
 def _lang_dom(current, target, flag, label, html_lang=None):
     """A minimal app DOM with the toggle sentinel pair in a given polarity."""
     return (
-        f'<html lang="{html_lang or current}"><head><title>HCRM</title></head><body>'
+        f'<html lang="{html_lang or current}"><head><title>Brand</title></head><body>'
         f'<button type="button" class="lang-toggle" data-lang="{current}" '
         f'data-lang-toggle="{target}" aria-label="{label}">'
         f'<svg data-flag="{flag}" viewBox="0 0 37 28"></svg></button></body></html>'
@@ -255,10 +255,18 @@ def test_copy_pins_are_the_csv_cells_of_the_target_language():
     """The gate holds no copy: an id resolves to that language's CSV cell, the
     two languages differ (or the pins could not tell them apart), and a missing
     cell would fail as a not-rendered assertion rather than pass silently."""
+    # `app.brand` is exempt from "the languages must differ": it is a proper
+    # noun, identical in both columns BY DESIGN, and the pin it supports is
+    # PRESENCE (the lockup renders), not language direction.
+    SAME_IN_BOTH = {"app.brand"}
     for ids in (uic.LOGIN_COPY_IDS, uic.REGISTER_COPY_IDS):
         da = dict(uic._copy_cells(ids, "da"))
         en = dict(uic._copy_cells(ids, "en"))
         assert set(da) == set(en) == set(ids)
         for rid in ids:
             assert da[rid].strip() and en[rid].strip(), rid
-            assert da[rid] != en[rid], f"{rid}: both languages render the same cell"
+            if rid in SAME_IN_BOTH:
+                assert da[rid] == en[rid], f"{rid}: a proper noun is not translated"
+            else:
+                assert da[rid] != en[rid], (
+                    f"{rid}: both languages render the same cell")

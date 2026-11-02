@@ -84,9 +84,9 @@ def test_static_title_is_language_neutral():
     """The pre-JS title carries only the brand: `applyLang` sets the real one from the
     compiled copy before mount, so a wrong-language title can never be printed."""
     html = _read(INDEX_HTML)
-    assert "<title>HCRM</title>" in html
-    assert "Shop Catalogue" not in html, (
-        "the English title lives in i18n/strings.csv now (app.title)")
+    assert "<title>Hertha's Butik</title>" in html
+    assert "Shop Catalogue" not in html and "Butikskatalog" not in html, (
+        "the page-name half lives in i18n/strings.csv now (app.title)")
 
 
 def test_runtime_exports_the_item2_api_and_never_writes_a_preference():

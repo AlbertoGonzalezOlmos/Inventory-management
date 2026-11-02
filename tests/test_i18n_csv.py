@@ -94,15 +94,22 @@ def test_seed_rows_are_still_present():
     assert OLD_SYMBOL not in "".join(row.en + row.da for row in rows)
 
 
-def test_en_title_is_byte_identical_to_todays_static_title():
-    """The zero-visible-change invariant for the one boot-time lookup.
+def test_the_static_title_is_the_language_neutral_brand():
+    """The pre-JS <title> is the shop's proper noun, and it IS the CSV row.
 
-    `applyLang` writes `document.title` from `app.title`; if the English row differed
-    from the title the app ships today, item 2 would silently retitle the tab.
+    Decision 13: a static title cannot be language-specific (the tab must not
+    print the wrong language before `applyLang` runs), so it carries `app.brand`
+    — a proper noun, identical in both columns — while `app.title` (brand +
+    page name, per language) is what `applyLang` writes a moment later.
     """
     rows, _ = i18n.read_rows(CSV_PATH)
     by_id = {row.id: row for row in rows}
-    assert by_id["app.title"].en == "HCRM — Shop Catalogue"
+    assert by_id["app.brand"].en == by_id["app.brand"].da == "Hertha's Butik"
+    assert by_id["app.title"].en == "Hertha's Butik — Shop Catalogue"
+    assert by_id["app.title"].da == "Hertha's Butik — Butikskatalog"
+    index = open(INDEX_HTML, encoding="utf-8").read()
+    assert f"<title>{by_id['app.brand'].en}</title>" in index, (
+        "the static title must be the brand row, not a second copy of it")
 
 
 def test_repair_hint_fragments_rebuild_the_sentence_in_both_languages():

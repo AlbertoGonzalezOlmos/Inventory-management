@@ -98,14 +98,16 @@ def test_i18n_runtime_loads_between_vendor_and_scan_adapters():
     i18n = html.find('src="/i18n.js"')
     capture = html.find('src="/scancapture.js"')
     feed = html.find('src="/scanfeed.js"')
+    interaction = html.find('src="/interaction.js"')
     app = html.find('src="/app.js"')
     for needle, idx in (("autotable", autotable), ("i18n.messages.js", messages),
                         ("i18n.js", i18n), ("scancapture.js", capture),
-                        ("scanfeed.js", feed), ("app.js", app)):
+                        ("scanfeed.js", feed), ("interaction.js", interaction),
+                        ("app.js", app)):
         assert idx != -1, f"index.html no longer loads {needle}"
-    assert autotable < messages < i18n < capture < feed < app, (
+    assert autotable < messages < i18n < capture < feed < interaction < app, (
         "script order must be vendor → i18n.messages → i18n → scancapture → "
-        "scanfeed → app")
+        "scanfeed → interaction → app")
 
 
 def _html_section(view: str) -> str:
@@ -582,7 +584,7 @@ def test_cart_and_checkout_toasts_are_csv_bound():
         "_announceCartRestored() {": ['key: "cart.restored", plural: this.cart.total_qty'],
         "async importLegacyPurchase() {": ['key: "cart.imported", plural: lines.length',
                                           'key: "cart.imported_partial"'],
-        "async donePurchase() {": ['key: "cart.empty_toast"',
+        "async _donePurchase() {": ['key: "cart.empty_toast"',
                                    'key: "checkout.purchase_complete"',
                                    'this.errDescriptor(',
                                    'key: "checkout.failed", vars: { status: r.status }'],

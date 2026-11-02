@@ -6,6 +6,6 @@
 # An entry is stale only when NO finding has that (path, kind, literal) — i.e. when the
 # copy itself changed. The list can only SHRINK: an unused entry is an error.
 static/index.html:attr:general  # items.category default SLUG (app/models.py:60) — a data value the form writes, not copy: translating the hint would invite a duplicate "generel" category (no slice removes it)
-static/index.html:text:HCRM  # brand token — the static <title> HCRM (plan decision 13: a language-neutral title; applyLang then writes app.title) and the brand lockup share this one literal (no slice removes it)
+static/index.html:text:Hertha's Butik  # brand token — the static <title> is the shop's proper noun before JS (decision 13: language-neutral; applyLang then writes app.title). The header lockup renders app.brand instead, so this is the only literal left (no slice removes it)
 static/index.html:text:scanner_daemon.py --register  # shell command, not copy — the operator types it verbatim (no slice removes it; plan §20: machine interfaces stay English)
 static/index.html:text:ℹ  # info glyph, not copy — the button's title carries the label (no slice removes it)

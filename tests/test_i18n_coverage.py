@@ -179,7 +179,7 @@ def test_planted_literal_text_node(tmp_path):
     """(a) A hardcoded text node whose text matches a migrated row."""
     tree = _copy_tree(tmp_path)
     line = _insert_before(tree / "static" / "index.html", "</main>",
-                          "  <p>HCRM — Shop Catalogue</p>")
+                          "  <p>Hertha's Butik — Shop Catalogue</p>")
     _assert_planted(_run("--json", root=tree), "static/index.html", line, kind="text")
 
 
@@ -388,8 +388,8 @@ def test_usage_and_source_errors_exit_two(tmp_path):
     tree = _copy_tree(tmp_path)
     path = tree / "i18n" / "strings.csv"
     path.write_text(path.read_text(encoding="utf-8").replace(
-        "app.title,HCRM — Shop Catalogue,HCRM — Butikskatalog",
-        "app.title,HCRM — Shop Catalogue,HCRM — Butikskatalog\n"
+        "app.title,Hertha's Butik — Shop Catalogue,Hertha's Butik — Butikskatalog",
+        "app.title,Hertha's Butik — Shop Catalogue,Hertha's Butik — Butikskatalog\n"
         "app.title,Duplicate,Duplicate"), encoding="utf-8")
     proc = _run("--json", root=tree)
     assert proc.returncode == 2

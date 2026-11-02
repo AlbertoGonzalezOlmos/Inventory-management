@@ -99,8 +99,8 @@ analysis.price_std,Price σ,Pris σ
 analysis.selected,({rows} × {cols}),({rows} × {cols})
 analysis.title,Analysis,Analyse
 analysis.total_stock,Total stock,Lager i alt
-app.brand_shop,Shop,Butik
-app.title,HCRM — Shop Catalogue,HCRM — Butikskatalog
+app.brand,Hertha's Butik,Hertha's Butik
+app.title,Hertha's Butik — Shop Catalogue,Hertha's Butik — Butikskatalog
 auth.already_member,Already a member?,Er du allerede medlem?
 auth.badge_check_failed,Badge check failed,Badgekontrollen mislykkedes
 auth.badges_not_items,"Badges log in, they are not catalogue items","Badges logger ind, de er ikke katalogvarer"
@@ -182,6 +182,7 @@ checkout.complete,Complete purchase,Gennemfør køb
 checkout.done,Done — complete purchase,Færdig — gennemfør køb
 checkout.empty,Your purchase list is empty — add items from the catalogue or by scanning them.,"Din indkøbsliste er tom — tilføj varer fra kataloget, eller scan dem."
 checkout.failed,Checkout failed ({status}),Købet kunne ikke gennemføres ({status})
+checkout.hold_hint,Hold the button to complete the purchase (about one second).,Hold knappen nede for at gennemføre købet (cirka et sekund).
 checkout.keep_shopping,Keep shopping,Fortsæt med at handle
 checkout.order_number,Order #{order},Ordre #{order}
 checkout.purchase_complete,Purchase complete — {total},Køb gennemført — {total}
@@ -312,7 +313,7 @@ error.well_known_password,That password is published in this project's documenta
 export.done,Exported {rows} × {cols} as {format},Eksporterede {rows} × {cols} som {format}
 export.empty,Nothing to export,Intet at eksportere
 export.pdf_prices,Prices in DKK,Priser i DKK
-export.pdf_title,HCRM — Items export,HCRM — Vareeksport
+export.pdf_title,Hertha's Butik — Items export,Hertha's Butik — Vareeksport
 export.pdf_unavailable,PDF library not loaded,PDF-biblioteket er ikke indlæst
 export.summary,{rows} × {cols} — {date},{rows} × {cols} — {date}
 field.barcode,Barcode,Stregkode
@@ -413,3 +414,6 @@ table.selected_rows.one,{n} selected row,{n} markeret række
 table.selected_rows.other,{n} selected rows,{n} markerede rækker
 table.selection_hint,Click a row or a column header to select it · Shift-click for a range · Ctrl/Cmd-click to add/remove · analysis and exports use the current selection (or everything shown if nothing is selected).,"Klik på en række eller en kolonneoverskrift for at markere den · Skift-klik for et interval · Ctrl/Cmd-klik for at tilføje eller fjerne · analysen og eksporten bruger den aktuelle markering (eller alt det, der vises, hvis intet er markeret)."
 table.title,Items in the database,Varer i databasen
+ui.font_larger,Make the text larger,Gør teksten større
+ui.font_scale_hint,Text size: {percent}%,Tekststørrelse: {percent} %
+ui.font_smaller,Make the text smaller,Gør teksten mindre

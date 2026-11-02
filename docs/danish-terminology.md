@@ -8,6 +8,18 @@ The English column is the canonical English wording; the Danish column is what t
 headers are listed separately where the Danish differs from the prose form (for example a money column
 header states the currency).
 
+## Brand and naming (binding)
+
+The product surface is **Hertha's Butik** (`app.brand`; the owner's design-refresh directive). It is a
+proper noun, identical in both language columns, and is always written with the apostrophe: the owner's
+official spelling keeps the English possessive even though Danish genitive would normally be `Herthas`.
+That is deliberate, not a typo — never "correct" it to `Herthas`, translate it, or split it into a
+second word.
+
+`HCRM` survives only as a MACHINE identifier: `HCRM_*` environment variables, `hcrm.db`, `hcrm_*`
+storage keys (`hcrm_lang`, `hcrm_token`, `hcrm_font_scale`, …), the package/repo name and code
+identifiers. It is never the user-facing brand and never appears in copy as a shop name.
+
 ## Money and numbers
 
 | English | Danish |
@@ -62,6 +74,9 @@ header states the currency).
 | Account → Security | Konto → Sikkerhed |
 | Security (tab) | Sikkerhed |
 | role | rolle |
+| text size | tekststørrelse |
+| make the text larger | Gør teksten større |
+| make the text smaller | Gør teksten mindre |
 
 ## People and roles
 
@@ -141,6 +156,7 @@ header states the currency).
 | checkout | kasse |
 | review purchase | gennemse køb |
 | complete purchase | gennemfør køb |
+| hold (the button) | hold nede |
 | purchase (noun) / purchase (day count) | køb (invariant plural: 1 køb / 3 køb) |
 | receipt | kvittering |
 | order | ordre |
@@ -207,5 +223,5 @@ disagree, **this glossary and the shipped implementation win**:
 | Translate literals in place, no catalogue | one CSV of strings compiled into the message bundle the app loads | owner requirements 2 and 3 |
 | Currency `kr. / DKK` | `DKK` only | owner requirement 1 |
 | Cart = `Kurv` | cart = `Indkøbsliste` | the app's own concept is "purchase list"; one term everywhere |
-| Brand rename HCRM → `Lageret` | brand stays the language-neutral `HCRM` | not requested by the owner; the title must not be language-specific |
+| Brand rename HCRM → `Lageret` | product surface is `Hertha's Butik` (`app.brand`), identical in both languages; `HCRM` remains only as a machine identifier | the owner's design-refresh directive replaced the 2026-10-20 naming; the shop name is a proper noun written as the owner chooses (English possessive kept; Danish genitive would be `Herthas`) |
 | Seed catalogue translated to Danish | user-supplied content stays as entered | item names are data, not UI copy |
