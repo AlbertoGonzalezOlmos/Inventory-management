@@ -144,3 +144,40 @@ def test_healthz_reports_mode_and_hashing_cost(client):
     body = client.get("/api/healthz").json()
     assert body["insecure_dev_admin"] is DEV_ADMIN is False  # conftest disables it
     assert body["pbkdf2_iterations"] == PBKDF2_ITERATIONS
+
+
+def test_first_party_assets_must_be_revalidated(client):
+    """A deploy replaces files at stable URLs, so the browser must revalidate.
+
+    Without Cache-Control, browsers apply *heuristic* freshness to /app.js and
+    /i18n.messages.js. A cached pre-i18n /i18n.js then pairs with a new
+    /app.js, `HcrmI18n.translate` is undefined, and the SPA renders blank —
+    reported in production as "I deployed and the catalogue disappeared".
+    `no-cache` keeps caching but forces the ETag check the server already
+    answers with a 304.
+    """
+    for path in ("/", "/app.js", "/i18n.js", "/i18n.messages.js", "/style.css"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["Cache-Control"] == "no-cache", path
+
+
+def test_api_responses_are_revalidated_too(client):
+    response = client.get("/api/healthz")
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-cache"
+
+
+def test_route_level_cache_control_is_not_clobbered():
+    """The media route owns photo caching; the middleware must defer to it.
+
+    Two sources of truth would drift (this middleware once overwrote the
+    media route's hour with a day, which the media test caught).
+    """
+    from app.main import _cache_control_for
+    from app.routers.media import CACHE_CONTROL
+
+    assert _cache_control_for("/catalogue-images/5704297113423.png") == ""
+    assert CACHE_CONTROL == "public, max-age=3600"
+    assert _cache_control_for("/app.js") == "no-cache"
+    assert _cache_control_for("/") == "no-cache"

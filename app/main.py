@@ -359,6 +359,10 @@ _vector_status: bool | None = None
 _DOCS_PATHS = ("/docs", "/redoc")
 _OPENAPI_PATH = "/openapi.json"
 
+#: Catalogue photos are content-addressed by barcode and never rewritten in
+#: place, so they are the one thing this app may cache for a while.
+_IMMUTABLE_MEDIA_PREFIX = "/catalogue-images/"
+
 
 def _is_docs_path(path: str) -> bool:
     """True for the interactive-docs routes, which are exempt from the CSP.
@@ -395,6 +399,28 @@ CSP_POLICY = (
 )
 
 
+def _cache_control_for(path: str) -> str:
+    """The Cache-Control value for a response path.
+
+    First-party assets are served from STABLE URLs and are replaced in place
+    when the app is updated (the SPA and its compiled copy bundle live at
+    /app.js and /i18n.messages.js), so they must be revalidated before use.
+    Without this header browsers fall back to *heuristic* freshness — a cached
+    pre-i18n `/i18n.js` can then be paired with a new `/app.js`, which throws on
+    the missing `HcrmI18n.translate` and leaves a blank app: the exact "I
+    deployed and the catalogue vanished" report. `no-cache` does not disable
+    caching, it forces the ETag revalidation these files already support (a
+    304 is cheap and keeps a kiosk correct).
+
+    A route that already decided its own caching wins: the media route sets an
+    hour for barcode-addressed photos (see `app.routers.media.CACHE_CONTROL`),
+    and this middleware must not silently outlive it.
+    """
+    if path.startswith(_IMMUTABLE_MEDIA_PREFIX):
+        return ""                          # the media route owns this one
+    return "no-cache"
+
+
 def apply_security_headers(response: Response, path: str) -> Response:
     """Attach the hardening headers (single source of truth).
 
@@ -407,6 +433,10 @@ def apply_security_headers(response: Response, path: str) -> Response:
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
+    if "cache-control" not in response.headers:
+        policy = _cache_control_for(path)
+        if policy:
+            response.headers["Cache-Control"] = policy
     if not _is_docs_path(path):
         response.headers["Content-Security-Policy"] = CSP_POLICY
     return response
