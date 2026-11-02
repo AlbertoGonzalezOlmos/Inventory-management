@@ -272,12 +272,15 @@ def count(pattern: str, text: str) -> int:
 #: from i18n/strings.csv for the target's language (see `_copy_cells`), so the
 #: gate holds no copy of its own: a wording change cannot redden it, and a
 #: language flip only changes which column is asserted.
+#: `app.brand` is in both lists on purpose: the header lockup renders on EVERY
+#: view, and the cell is a proper noun identical in both languages — so the
+#: assertion proves the lockup is there without depending on a language.
 LOGIN_COPY_IDS = (
-    "auth.email_or_username", "auth.password", "auth.login",
+    "app.brand", "auth.email_or_username", "auth.password", "auth.login",
     "auth.scan_anywhere", "auth.no_account",
 )
 REGISTER_COPY_IDS = (
-    "auth.register_title", "auth.full_name", "auth.email",
+    "app.brand", "auth.register_title", "auth.full_name", "auth.email",
     "auth.password_min", "auth.signup",
 )
 
@@ -514,7 +517,7 @@ def _check_targets(browser: str, base: str, workdir: str, report: dict) -> list[
     # Both-direction proof, copy from the CSV only: the DEFAULT target ("/") and
     # the ?lang= opposite must each render THEIR language's `app.title` cell
     # (applyLang sets it before mount), the two must differ (so a stuck language
-    # can never pass) and both must carry the brand token.
+    # can never pass) and both must carry the `app.brand` proper noun.
     default = next(spec for spec in APP_TARGETS if spec[1] == "/")
     other = next(spec for spec in APP_TARGETS if spec[3] != default[3])
     for label, lang in ((default[0], default[3]), (other[0], other[3])):
@@ -526,12 +529,14 @@ def _check_targets(browser: str, base: str, workdir: str, report: dict) -> list[
             failures.append(f"[lang-direction] {label} title must be the {lang} "
                             f"app.title cell {expected!r}, got {rendered!r}")
     default_title, other_title = titles.get(default[0]), titles.get(other[0])
+    brand = _copy_source()["app.brand"].en      # a proper noun: one column's worth
     if default_title is not None and default_title == other_title:
         failures.append(f"[lang-direction] {default[0]} and {other[0]} must not "
                         "share a title (the language did not switch)")
     elif default_title is not None and other_title is not None \
-            and ("HCRM" not in default_title or "HCRM" not in other_title):
-        failures.append("[lang-direction] both titles must carry the brand token")
+            and (brand not in default_title or brand not in other_title):
+        failures.append(f"[lang-direction] both titles must carry the brand "
+                        f"{brand!r} (the app.brand row)")
     return failures
 
 

@@ -53,8 +53,11 @@ function captureErrors(fn) {
 }
 
 test("translate: both languages resolve from the compiled copy", () => {
-  assert.equal(translate("app.title", null, "en"), "HCRM — Shop Catalogue");
-  assert.equal(translate("app.title", null, "da"), "HCRM — Butikskatalog");
+  assert.equal(translate("app.title", null, "en"), "Hertha's Butik — Shop Catalogue");
+  assert.equal(translate("app.title", null, "da"), "Hertha's Butik — Butikskatalog");
+  assert.equal(translate("app.brand", null, "en"), "Hertha's Butik");
+  assert.equal(translate("app.brand", null, "da"), "Hertha's Butik",
+    "the brand is a proper noun: identical in both languages");
   assert.equal(translate("catalogue.search_placeholder", null, "da"), "Søg i kataloget…");
   // Item 7's flip: the default UI language is Danish. The copy assertions above
   // stay CSV pins; anything about the DEFAULT derives from the constant.
@@ -152,10 +155,10 @@ test("applyLang: sets <html lang> and the title from the copy, idempotently", ()
   const doc = { documentElement: {}, title: "" };
   assert.equal(applyLang("da", doc), "da");
   assert.equal(doc.documentElement.lang, "da");
-  assert.equal(doc.title, "HCRM — Butikskatalog");
+  assert.equal(doc.title, "Hertha's Butik — Butikskatalog");
   assert.equal(applyLang("en", doc), "en");
   assert.equal(doc.documentElement.lang, "en");
-  assert.equal(doc.title, "HCRM — Shop Catalogue");
+  assert.equal(doc.title, "Hertha's Butik — Shop Catalogue");
   assert.equal(applyLang("de", doc), DEFAULT_LANG,
     "an unsupported language normalises to the default");
   assert.equal(doc.documentElement.lang, DEFAULT_LANG);

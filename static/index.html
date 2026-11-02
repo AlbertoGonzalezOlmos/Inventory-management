@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HCRM</title>
+  <title>Hertha's Butik</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -40,7 +40,7 @@
 
   <!-- ================= Header / navigation ================= -->
   <header class="topbar">
-    <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">HCRM <span>{{ t('app.brand_shop') }}</span></a>
+    <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">{{ t('app.brand') }}</a>
 
     <nav v-if="user" class="nav">
       <a href="#/catalogue" :class="{active: currentView === 'catalogue' || currentView === 'checkout'}">{{ t('nav.catalogue') }}</a>
