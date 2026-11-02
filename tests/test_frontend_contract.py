@@ -83,6 +83,31 @@ def test_scancapture_loads_before_app_js():
         "HcrmScanCapture global at install time")
 
 
+def test_i18n_runtime_loads_between_vendor_and_scan_adapters():
+    """The compiled copy and the runtime must exist before app.js mounts.
+
+    `i18n.messages.js` (generated from i18n/strings.csv) publishes the global the
+    runtime reads at load time, and `formatPrice` delegates to the runtime at
+    render time — a reversed order is a ReferenceError in the first money render
+    (the browser gate's login/register targets render no price, which is why THIS
+    pin carries it). Both sit above the scan adapters so item 3 never moves them.
+    """
+    html = _read("index.html")
+    autotable = html.find('src="/vendor/jspdf.plugin.autotable.min.js"')
+    messages = html.find('src="/i18n.messages.js"')
+    i18n = html.find('src="/i18n.js"')
+    capture = html.find('src="/scancapture.js"')
+    feed = html.find('src="/scanfeed.js"')
+    app = html.find('src="/app.js"')
+    for needle, idx in (("autotable", autotable), ("i18n.messages.js", messages),
+                        ("i18n.js", i18n), ("scancapture.js", capture),
+                        ("scanfeed.js", feed), ("app.js", app)):
+        assert idx != -1, f"index.html no longer loads {needle}"
+    assert autotable < messages < i18n < capture < feed < app, (
+        "script order must be vendor → i18n.messages → i18n → scancapture → "
+        "scanfeed → app")
+
+
 def _html_section(view: str) -> str:
     """Extract one <section> block from index.html by its currentView guard
     (from the guard to the next <section tag) — for pins that a view's own
@@ -121,8 +146,8 @@ def test_badge_field_is_gone_scan_anywhere_is_the_path():
     assert "async badgeLogin(code)" in app, (
         "the scan bus's badge login entry point must survive the field's "
         "removal")
-    assert "logs you in automatically" in html, (
-        "the scan-anywhere copy is the only badge affordance left")
+    assert "t('auth.scan_anywhere')" in html, (
+        "the scan-anywhere copy is the only badge affordance left (CSV-bound)")
 
 
 def test_capture_never_checks_is_trusted():
@@ -374,8 +399,8 @@ def test_unpair_is_operator_gated_and_the_pill_discloses():
         "pill is a one-click action button, present when it discloses")
     assert re.search(r":aria-haspopup=\"scannerFeed === 'unpaired' \? null", html), (
         "aria-haspopup must be state-conditional for the same reason")
-    assert 'role="dialog" aria-label="Scanner pairing"' in html, (
-        "the popover must be a labelled dialog")
+    assert 'role="dialog" :aria-label="t(\'scanner.pairing_label\')"' in html, (
+        "the popover must be a labelled dialog (the label is CSV copy now)")
 
 
 def test_unpair_closes_the_popover_and_states_the_recovery():
@@ -391,6 +416,23 @@ def test_unpair_closes_the_popover_and_states_the_recovery():
     assert "--register" in body, (
         "the unpair toast must name the recovery (re-run --register, then "
         "click the pill)")
+
+
+def test_repair_hint_keeps_the_register_command_in_code():
+    """The re-pair hint is the one DELIBERATE two-key fragment pair (the
+owner's exception to "one key, no concatenation"): the two CSV fragments
+render AROUND `<code>scanner_daemon.py --register</code>`, so the command
+keeps its monospace styling and each language still owns its own word
+order. Slice A's single key flattened the command into sentence text;
+this pin makes that regression impossible without also editing the rows."""
+    html = _read("index.html")
+    assert re.search(
+        r"\{\{ t\('scanner\.repair_prefix'\) \}\}\s*"
+        r"<code>scanner_daemon\.py --register</code>"
+        r"\{\{ t\('scanner\.repair_suffix'\) \}\}", html), (
+        "the re-pair hint must render scanner_daemon.py --register inside "
+        "<code>, between the scanner.repair_prefix and "
+        "scanner.repair_suffix rows")
 
 
 def test_terminal_token_key_is_the_persisted_binding():
@@ -461,3 +503,413 @@ def test_stale_search_responses_are_generation_guarded():
     body = _method_body("async loadMore() {")
     assert body.count("gen !== this._itemsGen) continue") == 2, \
         "both the resolve and the reject path must refetch when superseded"
+
+
+# --- Slice B: the catalogue / cart / checkout copy bindings -----------------
+
+def test_catalogue_toolbar_and_suggestion_copy_is_csv_bound():
+    """Slice B binds the toolbar and the intake suggestion dropdown: the
+    search placeholder is an ATTRIBUTE (the seeded catalogue.search_placeholder
+    row had to be bound, not merely present), the semantic toggle's title and
+    label and the category placeholder follow, and the suggestion group labels
+    are t()-computed (not literal labels)."""
+    html = _read("index.html")
+    assert ":placeholder=\"t('catalogue.search_placeholder')\"" in html
+    assert 'placeholder="Search the catalogue…"' not in html, (
+        "the search placeholder must render from the CSV row in both languages")
+    assert ":title=\"t('catalogue.semantic_title')\"" in html
+    assert ">{{ t('catalogue.search') }}</button>" in html
+    assert ">{{ t('catalogue.all_categories') }}</option>" in html
+    groups = _method_body("intakeGroups() {")
+    for key in ("catalogue.suggest_prefix", "catalogue.suggest_keyword",
+                "catalogue.suggest_semantic"):
+        assert f'this.t("{key}")' in groups, key
+
+
+def test_cart_panels_render_through_rows_with_placeholders():
+    """The two cart panels: price-each and the stock warning are ONE row each
+    (the price/number travels as a placeholder), the total is the shared
+    common.total row, and no 'each'/'>Total<' literal survives. Rendering
+    `formatPrice(...) + ' each'` was the concatenation class slice A banned."""
+    html = _read("index.html")
+    assert html.count(
+        "t('cart.price_each', { price: formatPrice(entry.item.price_cents) })") == 2
+    assert html.count("t('cart.only_in_stock', { n: entry.item.stock })") == 2
+    assert html.count("<span>{{ t('common.total') }}</span>") == 2
+    assert ">Total<" not in html
+    assert "}} each" not in html, "the price must not be concatenated outside t()"
+    for key in ("cart.title", "cart.empty", "cart.clear", "checkout.complete",
+                "checkout.review_title", "checkout.keep_shopping", "checkout.done",
+                "checkout.scan_hint"):
+        assert f"t('{key}')" in html, key
+
+
+def test_receipt_counts_render_through_plural_pairs():
+    """The receipt is slice B's count surface: the line count uses the shared
+    common.item_count pair, the skipped-orphans sentence its own
+    checkout.skipped pair, and the order id/clamped quantities travel as
+    placeholders — never a literal 'item(s)' or an id concatenation. The
+    money column header states the currency (item-1 decision 4), so it uses
+    common.price_dkk, not the form-label common.price row."""
+    html = _read("index.html")
+    assert "tp('common.item_count', lastReceipt.purchase.lines.length)" in html
+    assert "tp('checkout.skipped', lastReceipt.skipped.length)" in html
+    assert "t('checkout.order_number', { order: lastReceipt.purchase.id })" in html
+    assert ("t('checkout.clamped', { applied: line.applied_qty, "
+            "requested: line.qty })") in html
+    receipt = html.split("Checkout receipt modal", 1)[1] \
+        .split("================= Toast", 1)[0]
+    for key in ("common.item", "common.qty", "common.price_dkk", "common.total"):
+        assert f"<th>{{{{ t('{key}') }}}}</th>" in receipt, key
+    assert "<th>{{ t('common.price') }}</th>" not in receipt, (
+        "a money column header must state DKK (item-1 decision 4)")
+    assert "(s)" not in receipt, "the receipt must never render the '(s)' idiom"
+
+
+def test_cart_and_checkout_toasts_are_csv_bound():
+    """Every cart/checkout toast is a {key, vars} descriptor (an open toast
+    re-renders with the flag) or a tp() plural. Method-body scoped: the scan
+    and intake flows still carry the same English sentence until slice D, so a
+    whole-file grep would over-claim.
+
+    The server's 400 empty-cart verdict renders through item 6's coded
+    descriptor (`error.cart_empty`), so the client-side row it used to name is
+    gone — one row per sentence."""
+    expected = {
+        "_stockWarn(line) {": ['key: "cart.only_stock"'],
+        "addToPurchase(item) {": ['key: "cart.added", vars: { name: item.name }'],
+        "setLineQty(id, ev) {": ['key: "cart.qty_invalid"'],
+        "_announceCartRestored() {": ['key: "cart.restored", plural: this.cart.total_qty'],
+        "async importLegacyPurchase() {": ['key: "cart.imported", plural: lines.length',
+                                          'key: "cart.imported_partial"'],
+        "async donePurchase() {": ['key: "cart.empty_toast"',
+                                   'key: "checkout.purchase_complete"',
+                                   'this.errDescriptor(',
+                                   'key: "checkout.failed", vars: { status: r.status }'],
+    }
+    for header, keys in expected.items():
+        body = _method_body(header)
+        for key in keys:
+            assert key in body, (header, key)
+        for gone in ("item(s)", '"Only " +', " added to your purchase list"):
+            assert gone not in body, (header, gone)
+
+
+# --- Slice C: purchase history and the spend calendar ----------------------
+
+def test_purchase_history_copy_is_csv_bound():
+    """The history list's counts, chips and line metadata: the order count is
+    the shared plural pair, the clamped chip reuses the receipt's
+    checkout.clamped row for its visible text and gets its own row for the
+    title, and the line SKU is one placeholder row (no 'SKU ' concatenation)."""
+    html = _read("index.html")
+    assert "tp('common.item_count', order.lines.length)" in html
+    assert "t('purchases.new')" in html
+    assert "t('common.sku', { sku: line.sku })" in html
+    assert ("t('purchases.clamped_title', { requested: line.qty, "
+            "applied: line.applied_qty })") in html
+    assert ("t('checkout.clamped', { applied: line.applied_qty, "
+            "requested: line.qty })") in html
+    assert "t('purchases.locked')" in html and "t('purchases.empty')" in html
+    assert "t('purchases.load_more')" in html
+    assert "item(s)" not in html
+    assert ">new<" not in html
+    assert ">Load more<" not in html
+
+
+def test_calendar_labels_come_from_the_csv_and_dates_from_the_locale():
+    """The calendar must not borrow Intl for names: the weekday labels and the
+    compact grid-header month (date.dow.*/date.month.*) are CSV rows chosen by
+    index (see the checker's DYNAMIC_FAMILIES); PROSE uses date.month_long.* so
+    "Brugt i marts 2026" is not the telegraphic "Brugt i mar 2026". Numeric
+    dates go through formatLang() (da-DK / en-GB), never the browser default."""
+    html = _read("index.html")
+    assert ":title=\"t('calendar.previous')\"" in html
+    assert ":title=\"t('calendar.next')\"" in html
+    assert "calendarMonthLabel || t('calendar.title')" in html
+    assert ":title=\"calendarDayTitle(cell.key)\"" in html
+
+    weekdays = _method_body("calendarWeekdays() {")
+    assert 'this.t("date.dow." + key)' in weekdays
+    assert "toLocaleDateString" not in weekdays, "names come from the CSV, not Intl"
+
+    month = _method_body("calendarMonthLabel() {")
+    assert 'this.t("date.month." + this.calMonth)' in month
+    assert '"calendar.month_year"' in month
+    assert "toLocaleDateString" not in month
+
+    month_long = _method_body("calendarMonthLongLabel() {")
+    assert 'this.t("date.month_long." + this.calMonth)' in month_long
+    assert '"calendar.month_year"' in month_long
+    assert "toLocaleDateString" not in month_long
+
+    total = _method_body("calendarTotalLabel() {")
+    assert 'this.t("calendar.spent_this_month")' in total
+    assert 'this.t("calendar.spent_in", { month: this.calendarMonthLongLabel })' in total
+
+    day = _method_body("calendarDayTitle(key) {")
+    assert 'this.tp("calendar.day_tooltip", day.count' in day
+    assert "formatPrice(day.cents)" in day
+
+    date = _method_body("formatDate(iso) {")
+    assert "toLocaleDateString(this.formatLang())" in date
+
+
+# --- Slice D: account, security and item capture ----------------------------
+
+def test_account_screens_copy_is_csv_bound():
+    """The account tabs, identity line and the email/phone/password forms.
+    The identity line is one row with the role LABEL (auth.role.*) as a
+    placeholder value — not the raw machine value; Price (DKK) in the requests
+    table is the money-column row, not the form-label row."""
+    html = _read("index.html")
+    assert ("t('account.identity', { name: user.name, role: roleLabel, "
+            "email: user.email })") in html
+    assert "t('account.must_change')" in html
+    for key in ("account.tab_profile", "account.tab_security",
+                "account.tab_badge", "account.tab_requests"):
+        assert f"t('{key}')" in html, key
+    for key in ("account.new_email", "auth.current_password",
+                "account.change_email", "account.email_updated",
+                "account.phone_hint", "account.save_phone",
+                "auth.change_password", "auth.new_password_min",
+                "account.password_updated"):
+        assert f"t('{key}')" in html, key
+    for key in ("account.badge_login_heading", "account.badge_intro",
+                "account.badge_active", "account.badge_none",
+                "account.show_qr", "account.regenerate_badge",
+                "account.generate_badge", "account.revoke_badge",
+                "account.requests_empty"):
+        assert f"t('{key}')" in html, key
+    assert "t('common.price_dkk')" in html, (
+        "the requests table's money column states DKK (item-1 decision 4)")
+    for gone in (">Profile<", ">Security<", ">My QR badge<", "Show my QR",
+                 "Change password</button>", "New email", "Save phone"):
+        assert gone not in html, gone
+
+
+def test_account_modals_copy_is_csv_bound():
+    """Badge view/print, password reset and the logoff overlay: titles and
+    notices travel as rows with placeholders (name/email), and the print
+    layout's buttons share common.print/close/done."""
+    html = _read("index.html")
+    assert "t('account.badge_modal_title', { name: memberBadge.name })" in html
+    assert "t('account.badge_modal_notice', { email: memberBadge.email })" in html
+    assert "t('account.reset_title', { name: pwResetMember.name })" in html
+    assert "t('account.reset_notice', { email: pwResetMember.email })" in html
+    assert "t('account.temp_password')" in html
+    assert "t('account.set_password')" in html
+    assert "t('account.logoff_title', { name: logoff.name })" in html
+    for key in ("account.logoff_self", "account.logoff_auto",
+                "account.logoff_stay", "account.logoff_now"):
+        assert f"t('{key}')" in html, key
+    assert "t('account.badge_warn_fallback')" in html
+    assert "t('common.close')" in html
+    assert html.count("t('common.print')") == 3, (
+        "account badge tab, member badge modal and badge print modal")
+    assert ">Print<" not in html and ">Close<" not in html
+
+
+def test_scan_intake_and_item_form_copy_is_csv_bound():
+    """The intake modal and the item add/edit form: labels/placeholders are
+    bound, the price field is the money-column row (common.price_dkk), the
+    suggestion SKU line uses common.sku's placeholder, and the field labels
+    (Name/Category/Description/Stock/SKU) are the shared `field.*` rows slice E
+    landed — the same rows the admin tables' headers use."""
+    html = _read("index.html")
+    for key in ("intake.title", "intake.item_name", "intake.also_cart",
+                "intake.staff_note", "intake.submit_staff", "intake.submit_member",
+                "common.sku"):
+        assert f"t('{key}'" in html, key
+    assert ":placeholder=\"t('intake.name_placeholder')\"" in html
+    assert "t('item.edit_title', { id: itemEditingId })" in html
+    assert "t('item.new_title')" in html
+    assert ":placeholder=\"t('item.description_placeholder')\"" in html
+    assert "t('item.image_url')" in html
+    assert "t('item.save')" in html and "t('item.add')" in html
+    assert "t('common.cancel')" in html
+    assert html.count("<label>{{ t('common.price_dkk') }}") == 2, (
+        "the intake price field and the item-form price field")
+    assert "Price (DKK)" not in html, (
+        "the legacy Price (DKK) literal must come from common.price_dkk now")
+
+
+def test_slice_d_toasts_are_csv_bound():
+    """Every account/badge/logoff/intake/item toast or confirm in this slice is
+    a descriptor (or a t() built at call time for native confirm()), not a
+    literal, and the badge warnings are rows too."""
+    js = _read("app.js")
+    for needle in (
+        'key: "account.password_updated_toast"', 'key: "account.badge_generated"',
+        'confirm(this.t("account.revoke_confirm"))', 'key: "account.badge_revoked"',
+        'key: "account.email_updated_toast"', 'key: "account.phone_saved"',
+        'key: "account.phone_cleared"', 'key: "account.badge_not_allowed"',
+        'key: "account.badge_no_key"', 'key: "account.badge_key_mismatch"',
+        'key: "account.badge_view_failed"', 'key: "account.badge_none_self"',
+        'key: "account.badge_none_member"', 't("account.badge_warn_migrated")',
+        't("account.badge_warn")', 't("account.badge_login_title")',
+        't("account.badge_welcome", { name: data.user.name })',
+        't("account.badge_warn_register")', 't("account.badge_rotated")',
+        't("account.badge_self_title")',
+        't("account.badge_modal_title", { name: member.name })',
+        'key: "account.logoff_arm_failed"', 'key: "account.logged_off"',
+        'key: "account.logoff_cancelled"', 'key: "scan.staged_saved"',
+        'key: "scan.added_assigned"', 'key: "scan.staged_misread"',
+        'key: "scan.staged_failed"', 't("intake.restricted")',
+        'key: "intake.name_required"', 'key: "intake.already_filed"',
+        'key: "intake.added"', 'key: "intake.resolved"',
+        'key: "intake.resolved_also"', 'key: "intake.resolve_failed"',
+        'key: "intake.reported"', 'key: "intake.duplicate"',
+        'key: "scan.busy_dialog"', 't("scan.misread")',
+        't("scan.failed", { status })', 'key: "item.updated"',
+        'key: "item.added"', 't("intake.request_from", { name: req.requester.name })',
+        't("account.password_too_short")', 'key: "account.password_reset"',
+    ):
+        assert needle in js, needle
+    assert 'showToast("QR badge revoked")' not in js
+    assert 'showToast("Logged off")' not in js
+    assert 'confirm("Revoke your QR badge?' not in js
+
+
+# --- Slice E: the table view, its analysis panel and the exports ------------
+
+def test_table_view_copy_is_csv_bound():
+    """The data explorer: toolbar, hint, pagination, empty state, the column
+    header's tooltip, and the analysis panel's every stat label. The column
+    LABELS are CSV rows too (DATA_COLUMNS carries labelKey), which is what
+    lets one row feed the header, the picker, the CSV head and the PDF head."""
+    html = _read("index.html")
+    for key in ("table.title", "table.reload", "table.clear_selection",
+                "table.export_csv", "table.export_pdf", "table.selection_hint",
+                "table.column_title", "table.empty", "table.previous",
+                "table.page", "table.next", "analysis.title",
+                "analysis.by_category"):
+        assert f"t('{key}'" in html, key
+    assert ':title="t(\'table.column_title\')"' in html, (
+        "the column header's tooltip is a bound row, not a literal title=")
+    for key in ("analysis.items", "analysis.inventory_value", "analysis.avg_price",
+                "analysis.median_price", "analysis.min_max_price",
+                "analysis.price_std", "analysis.total_stock", "analysis.avg_stock",
+                "analysis.min_max_stock"):
+        assert f"t('{key}')" in html, key
+    for gone in (">Items in the database<", ">Clear selection<", ">No items.<",
+                 "← Previous", ">Analysis<", ">By category<", "Inventory value",
+                 "Median price", "Total stock", "Avg stock"):
+        assert gone not in html, gone
+    # The '(s)' count idiom is gone from the template: the scope line is one
+    # computed that picks a plural pair per count.
+    assert "? 's' : ''" not in html and "selected row{{" not in html, (
+        "no template-level plural suffix — use a .one/.other pair through tp()")
+    assert "{{ analysisScopeLabel }}" in html
+    js = _read("app.js")
+    scope = _method_body("analysisScopeLabel() {")
+    assert 't("analysis.all_shown"' in scope
+    assert 'tp("common.rows"' in scope and 'tp("table.selected_rows"' in scope
+    assert 'tp("common.cols"' in scope and "this.exportCols.length" in scope
+
+
+def test_data_columns_carry_label_keys_not_literals():
+    """DATA_COLUMNS is the one place a column label could be resurrected as a
+    literal; every column names a CSV row instead (the money column included:
+    its old `Price (DKK)` literal was the last allowlisted key finding)."""
+    js = _read("app.js")
+    columns = js[js.index("const DATA_COLUMNS = ["):js.index("];", js.index("const DATA_COLUMNS = ["))]
+    assert columns.count("labelKey:") == 9, "nine data columns, nine CSV rows"
+    assert "label:" not in columns, "a literal label would bypass the CSV"
+    for key in ("table.col.id", "field.sku", "field.name", "field.category",
+                "common.price_dkk", "field.stock", "field.description",
+                "table.col.embedded", "table.col.created"):
+        assert f'labelKey: "{key}"' in columns, key
+    allcols = _method_body("allColumns() {")
+    assert "this.t(c.labelKey)" in allcols, (
+        "the labels must be resolved per language (a computed, so a flip "
+        "relabels the open table)")
+    assert 'head: [cols.map((c) => c.label)]' in _method_body("exportPDF() {")
+
+
+def test_admin_screens_copy_is_csv_bound():
+    """The administration screen: its three tabs, the scan-request queue (intro,
+    filter, headers, row actions, empty state), the item table and the members
+    table + their action buttons. The queue's headers are the SHARED
+    table.col.* rows the account tab's request table uses too."""
+    html = _read("index.html")
+    for key in ("admin.tab_items", "admin.tab_members", "admin.tab_requests",
+                "admin.requests_intro", "admin.request_create",
+                "admin.request_dismiss", "admin.requests_empty",
+                "admin.filter_all", "admin.catalogue_count",
+                "admin.member_create_title", "admin.member_create",
+                "admin.members_count", "admin.role_member", "admin.role_staff",
+                "admin.badge_show", "admin.reset_password"):
+        assert f"t('{key}'" in html, key
+    assert html.count("{{ t('admin.tab_requests') }}") == 2, (
+        "the tab and the panel heading share one row")
+    for key in ("table.col.requested", "table.col.requester", "table.col.code",
+                "table.col.proposed_item", "field.status", "table.col.badge",
+                "table.col.joined", "field.sku", "field.name",
+                "field.category", "field.description", "field.stock",
+                "table.col.ai", "common.edit", "common.delete", "common.view",
+                "common.revoke"):
+        assert f"t('{key}" in html, key
+    assert html.count("t('table.col.requested')") == 2, (
+        "the member request table and the staff queue share the header row")
+    assert html.count("t('field.status')") == 3, (
+        "two request tables' Status header + the queue's filter label")
+    for key in ("status.open", "status.resolved", "status.dismissed"):
+        assert f"t('{key}')" in html, key
+    assert ':placeholder="t(\'field.image_url_placeholder\')"' in html
+    assert "{{ m.has_qr_badge ? t('table.badge_active') : \"—\" }}" in html
+    for gone in (">Catalogue input<", ">Members (", ">Scan requests<",
+                 ">Create member account<", ">Temporary password (min. 8 chars)",
+                 ">Member (buyer)<", ">Staff (can input items)<",
+                 ">Create account<", ">QR badge</button>", ">Reset PW<",
+                 ">Edit</button>", ">Revoke</button>", "No requests with this status.",
+                 'placeholder="https://…"'):
+        assert gone not in html, gone
+    js = _read("app.js")
+    assert '"status." + status' in _method_body("statusLabel(status) {")
+    assert '<span class="status-chip" :class="req.status">{{ statusLabel(req.status) }}</span>' in html, (
+        "the chip's machine value stays the CSS class; only the label is copy")
+
+
+def test_slice_e_toasts_confirms_and_exports_are_csv_bound():
+    """Every remaining global toast/confirm and the whole export surface."""
+    js = _read("app.js")
+    for needle in (
+        'key: "scanner.paired_toast"', 'key: "scanner.unpaired_toast"',
+        # Item 6 moved the two operator instructions to the registry
+        # (error.pair_loopback_only / error.no_pairing_file): the pairing
+        # branch renders the coded row, keeping this row only as the uncoded
+        # fallback.
+        't("scanner.pair_failed", { status })',
+        'key: "export.empty"', 'key: "export.pdf_unavailable"',
+        'key: "admin.request_dismissed"', 'key: "admin.item_deleted"',
+        'key: "admin.member_created"', 'key: "admin.member_deleted"',
+        'key: "admin.badge_revoked_for"',
+        't("admin.request_dismiss_confirm"', 't("admin.item_delete_confirm"',
+        't("admin.member_delete_confirm"', 't("admin.badge_revoke_confirm"',
+        't("admin.badge_print_now")', 't("admin.badge_warn_member")',
+    ):
+        assert needle in js, needle
+    for gone in ('showToast("Nothing to export")',
+                 'showToast("PDF library not loaded")',
+                 'showToast("Item deleted")',
+                 'showToast("Account deleted")',
+                 'showToast("Scan request dismissed")',
+                 "row(s)", "column(s)"):
+        assert gone not in js, gone
+
+    csv_export = _method_body("exportCSV() {")
+    pdf_export = _method_body("exportPDF() {")
+    for body in (csv_export, pdf_export):
+        assert 'key: "export.done"' in body
+        assert 'rows: { key: "common.rows", plural: this.exportRows.length }' in body
+        assert 'cols: { key: "common.cols", plural: cols.length }' in body
+    # A PDF is a document: its title, summary and currency note are rows too,
+    # and the summary's counts are plural pairs (never a "row(s)" idiom).
+    assert 'doc.text(this.t("export.pdf_title"), 14, 15)' in pdf_export
+    assert 'doc.text(this.t("export.pdf_prices"), 14, 28)' in pdf_export
+    assert 't("export.summary", {' in pdf_export
+    assert 'tp("common.rows", this.exportRows.length)' in pdf_export
+    assert 'tp("common.cols", cols.length)' in pdf_export
+    assert 'format: "CSV"' in csv_export and 'format: "PDF"' in pdf_export, (
+        "the file format is the one machine token the sentence takes as a var")

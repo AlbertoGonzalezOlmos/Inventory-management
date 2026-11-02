@@ -150,7 +150,7 @@ One `handleScan(code, source)` in the SPA classifies with the `HCRM1:` prefix
   classification (region/usage/notes), the suggestion list (click one → adds
   *that* item to the cart and closes), live keyword/semantic suggestions as
   the operator types a name (existing `q=` / `vector-search` endpoints), and
-  a name + price (€ → cents) + category form. Submit is **role-aware** (all
+  a name + price in DKK (converted to `price_cents`) + category form. Submit is **role-aware** (all
   plans agree the staff-only catalogue-write invariant must not be weakened
   by a scanner):
   - staff/admin → existing `POST /api/items` prefilled with the normalised

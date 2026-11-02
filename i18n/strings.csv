@@ -1,0 +1,415 @@
+﻿id,en,da
+account.badge_active,A badge is currently active for this account.,Der er i øjeblikket en aktiv badge for denne konto.
+account.badge_generated,QR badge generated — print it and keep it safe,"QR-badge oprettet — udskriv den, og opbevar den sikkert"
+account.badge_intro,"A QR badge logs you in without email and password — anyone holding the printed code can log in as you, so treat it like a password.","En QR-badge logger dig ind uden e-mail og adgangskode — alle med den trykte kode kan logge ind som dig, så behandl den som en adgangskode."
+account.badge_key_mismatch,The badge key changed — regenerate your badge to re-enable viewing (logins are unaffected),Badge-nøglen er ændret — opret din badge igen for at slå visning til (login påvirkes ikke)
+account.badge_login_heading,QR badge login,Log ind med QR-badge
+account.badge_login_title,Your QR login badge,Din QR-badge til login
+account.badge_modal_notice,{email} · any previous badge for this account was just revoked. Whoever holds this code can log in as the member — hand it over privately.,{email} · enhver tidligere badge for denne konto er netop tilbagekaldt. Alle med denne kode kan logge ind som medlemmet — giv den videre privat.
+account.badge_modal_title,QR badge — {name},QR-badge — {name}
+account.badge_no_key,Badge viewing is unavailable (no key) — logins are unaffected; ask an admin to restore the badge key,Badgevisning er ikke tilgængelig (ingen nøgle) — login påvirkes ikke; bed en administrator om at gendanne badge-nøglen
+account.badge_none,No badge is active for this account.,Der er ingen aktiv badge for denne konto.
+account.badge_none_member,This member has no badge yet — they can generate one from their profile,Dette medlem har ingen badge endnu — medlemmet kan oprette en fra sin profil
+account.badge_none_self,You have no badge yet — generate one below,Du har ingen badge endnu — opret en nedenfor
+account.badge_not_allowed,Cannot view this member's badge,Kan ikke vise dette medlems badge
+account.badge_revoked,QR badge revoked,QR-badge tilbagekaldt
+account.badge_rotated,Rotated just now — the previous badge stopped working,Netop roteret — den forrige badge virker ikke længere
+account.badge_self_title,Your QR badge,Din QR-badge
+account.badge_view_failed,Could not view the badge,Kunne ikke vise badgen
+account.badge_warn,Anyone holding this code can log in as you — keep it private.,Alle med denne kode kan logge ind som dig — hold den privat.
+account.badge_warn_fallback,Anyone holding this code can log in — keep it private.,Alle med denne kode kan logge ind — hold den privat.
+account.badge_warn_migrated,Your PREVIOUS printed badge stopped working when you viewed this one — print the new card now and replace it.,"Din FORRIGE trykte badge holdt op med at virke, da du åbnede denne — udskriv det nye kort nu, og erstat det."
+account.badge_warn_register,Anyone holding this code can log in as you — keep it private. Print it now while you have it.,"Alle med denne kode kan logge ind som dig — hold den privat. Udskriv den nu, mens du har den."
+account.badge_welcome,"Welcome, {name}!","Velkommen, {name}!"
+account.change_email,Change email,Skift e-mail
+account.email_hint,Your email is your login identifier. Changing it signs out your other sessions.,"Din e-mail er dit login. Hvis du ændrer den, logges dine andre sessioner ud."
+account.email_updated,Email updated — other sessions were signed out.,E-mail opdateret — andre sessioner blev logget ud.
+account.email_updated_toast,Email updated — you were signed out on other devices,E-mail opdateret — du blev logget ud på andre enheder
+account.generate_badge,Generate QR badge,Opret QR-badge
+account.identity,{name} · role: {role} · {email},{name} · rolle: {role} · {email}
+account.logged_off,Logged off,Logget ud
+account.logoff_arm_failed,Could not arm the logoff countdown,Kunne ikke starte nedtællingen til udlogning
+account.logoff_auto,Logging off automatically when the countdown reaches zero.,"Du bliver logget ud automatisk, når nedtællingen er slut."
+account.logoff_cancelled,Logoff cancelled,Udlogning annulleret
+account.logoff_now,Log off now,Log ud nu
+account.logoff_self,You scanned your own badge.,Du scannede din egen badge.
+account.logoff_stay,Stay logged in,Forbliv logget ind
+account.logoff_title,Log off {name}?,Log {name} ud?
+account.must_change,You are using a default or admin-issued password — you must change it before using the app.,"Du bruger en standardadgangskode eller en adgangskode udstedt af en administrator — du skal skifte den, før du kan bruge appen."
+account.new_email,New email,Ny e-mail
+account.password_reset,Password reset for {name} (their sessions were signed out),Adgangskoden for {name} er nulstillet (sessionerne blev logget ud)
+account.password_too_short,Password must be at least 8 characters,Adgangskoden skal være på mindst 8 tegn
+account.password_updated,Password updated. Other sessions were signed out.,Adgangskoden er opdateret. Andre sessioner blev logget ud.
+account.password_updated_toast,Password updated — other sessions were signed out,Adgangskoden er opdateret — andre sessioner blev logget ud
+account.phone,Phone,Telefon
+account.phone_cleared,Phone cleared,Telefonnummer ryddet
+account.phone_hint,"Optional: an optional leading ""+"" and 6–15 digits. Saving an empty field clears it.","Valgfrit: et eventuelt indledende ""+"" og 6–15 cifre. Gemmer du et tomt felt, ryddes nummeret."
+account.phone_saved,Phone saved,Telefonnummer gemt
+account.regenerate_badge,Regenerate badge (revokes the old one),Opret badgen igen (den gamle tilbagekaldes)
+account.requests_empty,"Unknown items you report at the counter appear here, with their status.","Ukendte varer, du rapporterer ved disken, vises her med deres status."
+account.reset_notice,{email} · their sessions will be signed out.,{email} · sessionerne bliver logget ud.
+account.reset_title,Reset password — {name},Nulstil adgangskode — {name}
+account.revoke_badge,Revoke badge,Tilbagekald badge
+account.revoke_confirm,Revoke your QR badge? It will stop working immediately.,Tilbagekald din QR-badge? Den holder op med at virke med det samme.
+account.save_phone,Save phone,Gem telefon
+account.set_password,Set password,Angiv adgangskode
+account.show_qr,Show my QR,Vis min QR
+account.tab_badge,My QR badge,Min QR-badge
+account.tab_profile,Profile,Profil
+account.tab_requests,My scan requests,Mine scananmodninger
+account.tab_security,Security,Sikkerhed
+account.temp_password,Temporary password (min. 8 characters),Midlertidig adgangskode (min. 8 tegn)
+admin.badge_print_now,Print the membership card now,Udskriv medlemskortet nu
+admin.badge_revoke_confirm,Revoke the QR badge of {name}?,Tilbagekald QR-badget for {name}?
+admin.badge_revoked_for,QR badge revoked for {name},QR-badget blev tilbagekaldt for {name}
+admin.badge_show,QR badge,QR-badge
+admin.badge_warn_member,Anyone holding this code can log in as the member — hand it over privately. Print it now while you have it.,"Alle med denne kode kan logge ind som medlemmet — udlever den personligt. Udskriv den nu, mens du har den."
+admin.catalogue_count,Catalogue ({n}),Katalog ({n})
+admin.filter_all,All,Alle
+admin.item_delete_confirm,Delete “{name}” from the catalogue?,Slet “{name}” fra kataloget?
+admin.item_deleted,Item deleted,Varen blev slettet
+admin.member_create,Create account,Opret konto
+admin.member_create_title,Create member account,Opret medlemskonto
+admin.member_created,Account created for {name},Kontoen blev oprettet for {name}
+admin.member_delete_confirm,Delete the account of {name}?,Slet kontoen for {name}?
+admin.member_deleted,Account deleted,Kontoen blev slettet
+admin.members_count,Members ({n}),Medlemmer ({n})
+admin.request_create,Create & resolve,Opret og behandl
+admin.request_dismiss,Dismiss,Afvis
+admin.request_dismiss_confirm,Dismiss the scan request from {name} for “{item}”?,Afvis scananmodningen fra {name} om “{item}”?
+admin.request_dismissed,Scan request dismissed,Scananmodningen blev afvist
+admin.requests_empty,No requests with this status.,Ingen scananmodninger med denne status.
+admin.requests_intro,"Unknown items reported by members at the counter. Create the catalogue entry (prefilled from their proposal) to resolve, or dismiss as junk.","Ukendte varer, som medlemmer rapporterer ved disken. Opret katalogvaren (forudfyldt fra deres forslag) for at behandle anmodningen, eller afvis den som skrald."
+admin.reset_password,Reset password,Nulstil adgangskode
+admin.role_member,Member (buyer),Medlem (køber)
+admin.role_staff,Staff (can input items),Personale (kan indtaste varer)
+admin.tab_items,Catalogue input,Vareindtastning
+admin.tab_members,Members,Medlemmer
+admin.tab_requests,Scan requests,Scananmodninger
+analysis.all_shown,(all {rows} shown),(alle {rows} vist)
+analysis.avg_price,Avg price,Gennemsnitspris
+analysis.avg_stock,Avg stock,Gennemsnitligt lager
+analysis.by_category,By category,Efter kategori
+analysis.inventory_value,Inventory value,Lagerværdi
+analysis.items,Items,Varer
+analysis.median_price,Median price,Medianpris
+analysis.min_max_price,Min / Max price,Mindste / største pris
+analysis.min_max_stock,Min / Max stock,Mindste / største lager
+analysis.price_std,Price σ,Pris σ
+analysis.selected,({rows} × {cols}),({rows} × {cols})
+analysis.title,Analysis,Analyse
+analysis.total_stock,Total stock,Lager i alt
+app.brand_shop,Shop,Butik
+app.title,HCRM — Shop Catalogue,HCRM — Butikskatalog
+auth.already_member,Already a member?,Er du allerede medlem?
+auth.badge_check_failed,Badge check failed,Badgekontrollen mislykkedes
+auth.badges_not_items,"Badges log in, they are not catalogue items","Badges logger ind, de er ikke katalogvarer"
+auth.change_password,Change password,Skift adgangskode
+auth.change_password_required,Please change your password before continuing,Skift din adgangskode for at fortsætte
+auth.change_password_scanner,Change your password before using the scanner,"Skift din adgangskode, før du bruger scanneren"
+auth.create_account,Create a member account,Opret en medlemskonto
+auth.current_password,Current password,Nuværende adgangskode
+auth.discard,Discard,Kassér
+auth.email,Email,E-mail
+auth.email_or_username,Email or username,E-mail eller brugernavn
+auth.full_name,Full name,Fuldt navn
+auth.greeting,Hi {name},Hej {name}
+auth.list_saved,Your list was saved — it will be here when you log back in,"Din indkøbsliste blev gemt — den er her, når du logger ind igen"
+auth.login,Log in,Log ind
+auth.login_subtitle,Members: browse and select items. Staff: manage the catalogue.,Medlemmer: find og vælg varer. Personale: administrér kataloget.
+auth.logout,Log out,Log ud
+auth.new_password_min,New password (min. 8 characters),Ny adgangskode (min. 8 tegn)
+auth.no_account,No account yet?,Har du ingen konto?
+auth.password,Password,Adgangskode
+auth.password_min,Password (min. 8 characters),Adgangskode (min. 8 tegn)
+auth.register_title,Create your member account,Opret din medlemskonto
+auth.role.admin,admin,administrator
+auth.role.admin_option,Admin,Administrator
+auth.role.member,member,medlem
+auth.role.staff,staff,personale
+auth.scan_anywhere,Scan anywhere — your QR badge logs you in automatically.,Scan hvor som helst — din QR-badge logger dig automatisk ind.
+auth.session_expired,Session expired — please log in again.,Sessionen er udløbet — log ind igen.
+auth.signup,Sign up,Opret konto
+auth.staged_waiting.one,{n} scanned item waiting — scan your QR badge or log in to add it to your list.,{n} scannet vare venter — scan din QR-badge eller log ind for at tilføje den til din indkøbsliste.
+auth.staged_waiting.other,{n} scanned items waiting — scan your QR badge or log in to add them to your list.,{n} scannede varer venter — scan din QR-badge eller log ind for at tilføje dem til din indkøbsliste.
+auth.switch_failed,Switch failed: {message},Skiftet mislykkedes: {message}
+auth.switched_must_change,Switched to {name} — change the password to continue,Skiftet til {name} — skift adgangskoden for at fortsætte
+auth.switched_saved,Switched to {name} — {old}'s list was saved and will be back when {old} signs in,"Skiftet til {name} — {old}s indkøbsliste blev gemt og kommer tilbage, når {old} logger ind"
+calendar.day_tooltip.one,{n} purchase · {price},{n} køb · {price}
+calendar.day_tooltip.other,{n} purchases · {price},{n} køb · {price}
+calendar.month_year,{month} {year},{month} {year}
+calendar.next,Next month,Næste måned
+calendar.previous,Previous month,Forrige måned
+calendar.spent_in,Spent in {month},Brugt i {month}
+calendar.spent_this_month,Spent this month,Brugt denne måned
+calendar.title,Calendar,Kalender
+cart.add_to_purchase,Add to purchase list,Tilføj til indkøbslisten
+cart.added,{name} added to your purchase list,{name} blev tilføjet til din indkøbsliste
+cart.clear,Clear list,Ryd listen
+cart.empty,Click items in the catalogue to add them to your purchase list.,Klik på varer i kataloget for at tilføje dem til din indkøbsliste.
+cart.empty_toast,Your purchase list is empty,Din indkøbsliste er tom
+cart.imported.one,Imported {n} item from your old purchase list,Importerede {n} vare fra din gamle indkøbsliste
+cart.imported.other,Imported {n} items from your old purchase list,Importerede {n} varer fra din gamle indkøbsliste
+cart.imported_partial,Imported your old purchase list (some items are gone),Din gamle indkøbsliste blev importeret (nogle varer findes ikke længere)
+cart.only_in_stock,— only {n} in stock,— kun {n} på lager
+cart.only_stock,Only {n} in stock,Kun {n} på lager
+cart.price_each,{price} each,{price} pr. stk.
+cart.qty_invalid,Enter a whole number of units (0 removes the line),Indtast et helt antal enheder (0 fjerner linjen)
+cart.qty_title,Set the quantity (0 removes the line),Angiv antallet (0 fjerner linjen)
+cart.restored.one,Your purchase list was restored ({n} item),Din indkøbsliste blev gendannet ({n} vare)
+cart.restored.other,Your purchase list was restored ({n} items),Din indkøbsliste blev gendannet ({n} varer)
+cart.title,Purchase list,Indkøbsliste
+catalogue.all_categories,All categories,Alle kategorier
+catalogue.detail_meta,{category} · SKU {sku},{category} · SKU {sku}
+catalogue.empty,No items found.,Ingen varer fundet.
+catalogue.empty_staff,Add some in the Admin section.,Tilføj nogle varer i Administration.
+catalogue.in_stock,{n} in stock,{n} på lager
+catalogue.no_description,No description.,Ingen beskrivelse.
+catalogue.out_of_stock,Out of stock,Ikke på lager
+catalogue.relevance,{pct}% relevance,{pct}% relevans
+catalogue.search,Search,Søg
+catalogue.search_placeholder,Search the catalogue…,Søg i kataloget…
+catalogue.semantic_note,Semantic search: results ranked by meaning-similarity to “{query}”.,Semantisk søgning: resultater rangeret efter betydningslighed med “{query}”.
+catalogue.semantic_title,Semantic search uses AI embeddings of item descriptions,Semantisk søgning bruger AI-embeddings af varebeskrivelser
+catalogue.similar,Similar items,Lignende varer
+catalogue.stock_out,out of stock,ikke på lager
+catalogue.suggest_keyword,Similar code or name,Lignende kode eller navn
+catalogue.suggest_prefix,Same barcode family,Samme stregkodefamilie
+catalogue.suggest_semantic,Similar meaning,Lignende betydning
+catalogue.view_details,View details,Se detaljer
+checkout.clamped,{applied} of {requested},{applied} af {requested}
+checkout.complete,Complete purchase,Gennemfør køb
+checkout.done,Done — complete purchase,Færdig — gennemfør køb
+checkout.empty,Your purchase list is empty — add items from the catalogue or by scanning them.,"Din indkøbsliste er tom — tilføj varer fra kataloget, eller scan dem."
+checkout.failed,Checkout failed ({status}),Købet kunne ikke gennemføres ({status})
+checkout.keep_shopping,Keep shopping,Fortsæt med at handle
+checkout.order_number,Order #{order},Ordre #{order}
+checkout.purchase_complete,Purchase complete — {total},Køb gennemført — {total}
+checkout.receipt_cleared,Your purchase list was cleared. The receipt also appears in Purchase history.,Din indkøbsliste blev ryddet. Kvitteringen vises også i Købshistorik.
+checkout.receipt_title,Purchase complete,Køb gennemført
+checkout.review_title,Review your purchase,Gennemse køb
+checkout.scan_hint,You can still scan items to add them — quantity changes here are saved as you make them.,Du kan stadig scanne varer for at tilføje dem — ændringer i antallet her gemmes med det samme.
+checkout.skipped.one,{n} scanned item no longer exists and was skipped.,{n} scannet vare findes ikke længere og blev sprunget over.
+checkout.skipped.other,{n} scanned items no longer exist and were skipped.,{n} scannede varer findes ikke længere og blev sprunget over.
+common.cancel,Cancel,Annuller
+common.close,Close,Luk
+common.cols.one,{n} column,{n} kolonne
+common.cols.other,{n} columns,{n} kolonner
+common.delete,Delete,Slet
+common.done,Done,Færdig
+common.edit,Edit,Redigér
+common.item,Item,Vare
+common.item_count.one,{n} item,{n} vare
+common.item_count.other,{n} items,{n} varer
+common.loading,Loading…,Indlæser…
+common.price,Price,Pris
+common.price_dkk,Price (DKK),Pris (DKK)
+common.print,Print,Udskriv
+common.qty,Qty,Antal
+common.revoke,Revoke,Tilbagekald
+common.rows.one,{n} row,{n} række
+common.rows.other,{n} rows,{n} rækker
+common.sku,SKU {sku},SKU {sku}
+common.total,Total,I alt
+common.view,View,Vis
+date.dow.fri,Fri,fr
+date.dow.mon,Mon,ma
+date.dow.sat,Sat,lø
+date.dow.sun,Sun,sø
+date.dow.thu,Thu,to
+date.dow.tue,Tue,ti
+date.dow.wed,Wed,on
+date.month.1,January,jan
+date.month.10,October,okt
+date.month.11,November,nov
+date.month.12,December,dec
+date.month.2,February,feb
+date.month.3,March,mar
+date.month.4,April,apr
+date.month.5,May,maj
+date.month.6,June,jun
+date.month.7,July,jul
+date.month.8,August,aug
+date.month.9,September,sep
+date.month_long.1,January,januar
+date.month_long.10,October,oktober
+date.month_long.11,November,november
+date.month_long.12,December,december
+date.month_long.2,February,februar
+date.month_long.3,March,marts
+date.month_long.4,April,april
+date.month_long.5,May,maj
+date.month_long.6,June,juni
+date.month_long.7,July,juli
+date.month_long.8,August,august
+date.month_long.9,September,september
+error.admin_create_forbidden,Only admins can create admin accounts,Kun administratorer kan oprette administratorkonti
+error.admin_managed_forbidden,Admin accounts can only be managed by admins,Administratorkonti kan kun administreres af administratorer
+error.admin_modified_forbidden,Admin accounts can only be modified by admins,Administratorkonti kan kun ændres af administratorer
+error.admin_password_reset_forbidden,Only admins can reset passwords,Kun administratorer kan nulstille adgangskoder
+error.admin_required,Admin privileges required,Kræver administratoradgang
+error.admin_role_grant_forbidden,Only admins can grant the admin role,Kun administratorer kan give administratorrollen
+error.already_paired,This terminal is already paired — DELETE it (staff or loopback) and re-register to re-pair,"Denne terminal er allerede parret — SLET den (personale eller loopback), og registrér den igen for at parre på ny"
+error.bad_pairing,Unknown terminal or wrong pairing code,Ukendt terminal eller forkert parringskode
+error.bad_pairing_file,The pairing file is malformed — regenerate it with scanner_daemon.py --register,Parringsfilen er ugyldig — opret den igen med scanner_daemon.py --register
+error.badge_key_mismatch,The badge key changed since this badge was issued — regenerate the badge to re-enable viewing (logins are unaffected: they verify by hash),"Badge-nøglen er ændret, siden badgen blev udstedt — opret badgen igen for at slå visning til (login påvirkes ikke: de bekræftes via hash)"
+error.badge_no_key,Badge re-viewing is unavailable (no derivation key) — logins are unaffected; regenerate the badge once a key exists,"Badgevisning er ikke tilgængelig (ingen afledningsnøgle) — login påvirkes ikke; opret badgen igen, når der findes en nøgle"
+error.badge_none,No QR badge for this account — generate one first,Kontoen har ingen QR-badge — opret en først
+error.barcode_taken,Barcode already assigned to item {sku},Stregkoden er allerede tildelt varen {sku}
+error.barcode_taken_concurrent,Barcode already assigned to another item (concurrent update),Stregkoden er allerede tildelt en anden vare (samtidig opdatering)
+error.cart_duplicate_lines,Duplicate item_id in lines: {duplicates},Duplikeret item_id i linjerne: {duplicates}
+error.cart_empty,Cart is empty,Indkøbslisten er tom
+error.cart_items_missing,Items not found: {missing},Varer blev ikke fundet: {missing}
+error.cart_line_missing,Item not in cart,Varen er ikke i indkøbslisten
+error.checkout_db_locked,database is locked by another writer; retry the checkout,databasen er låst af en anden skribent; prøv købet igen
+error.current_password_incorrect,Current password is incorrect,Den nuværende adgangskode er forkert
+error.email_taken,Email already registered,E-mailen er allerede registreret
+error.email_unchanged,New email must differ from the current email,Den nye e-mail skal være forskellig fra den nuværende
+error.embedding_unavailable_create,Embedding model unavailable; cannot create items right now (they would be invisible to semantic search). Try again shortly.,Embedding-modellen er utilgængelig; varer kan ikke oprettes lige nu (de ville være usynlige i semantisk søgning). Prøv igen om lidt.
+error.embedding_unavailable_update,Embedding model unavailable; cannot change item name or description right now. No changes were saved.,Embedding-modellen er utilgængelig; varens navn eller beskrivelse kan ikke ændres lige nu. Ingen ændringer blev gemt.
+error.intake_already,This code is already in the catalogue,Denne kode findes allerede i kataloget
+error.intake_duplicate,You already have an open request for this code,Du har allerede en åben anmodning om denne kode
+error.internal_error,Internal server error,Der opstod en intern fejl
+error.invalid_badge,Invalid QR badge,Ugyldig QR-badge
+error.invalid_credentials,Invalid email or password,Forkert e-mail eller adgangskode
+error.invalid_gtin,not a valid GTIN (bad check digit or length): {barcode},Ugyldig GTIN (forkert kontrolciffer eller længde): {barcode}
+error.invalid_role,Invalid role,Ugyldig rolle
+error.item_conflict_create,SKU or barcode already exists (concurrent create),SKU eller stregkode findes allerede (samtidig oprettelse)
+error.item_not_found,Item not found,Varen blev ikke fundet
+error.json_required,Content-Type: application/json is required,Content-Type: application/json er påkrævet
+error.last_admin_delete,Cannot delete the last admin,Den sidste administrator kan ikke slettes
+error.last_admin_demote,Cannot demote the last admin,Den sidste administrator kan ikke nedgraderes
+error.member_not_found,Member not found,Medlemmet blev ikke fundet
+error.no_pairing_file,No pairing file on this host — run scanner_daemon.py --register first,Der er ingen parringsfil på denne vært — kør scanner_daemon.py --register først
+error.not_authenticated,Not authenticated,Du er ikke logget ind
+error.offset_requires_limit,offset requires a limit (omit limit to rank every item),offset kræver en limit (udelad limit for at rangere alle varer)
+error.pair_loopback_only,One-click pairing is loopback-only by default (HCRM_SCANNER_PAIR_ANY=1 to open for a LAN deployment),Parring med ét klik virker kun fra loopback som standard (HCRM_SCANNER_PAIR_ANY=1 åbner for en LAN-opsætning)
+error.pairing_file_unreadable,"The pairing file {path} exists but cannot be read — the daemon and the server must run as the same user (systemd User=), or set HCRM_SCANNER_PAIRING_FILE","Parringsfilen {path} findes, men kan ikke læses — daemonen og serveren skal køre som samme bruger (systemd User=), eller sæt HCRM_SCANNER_PAIRING_FILE"
+error.password_change_required,Password change required: change your password (Account → Change password) before using the app,"Adgangskodeskift påkrævet: skift din adgangskode (Konto → Sikkerhed), før du bruger appen"
+error.password_unchanged,New password must differ from the current password,Den nye adgangskode skal være forskellig fra den nuværende
+error.register_loopback_only,Terminal registration is loopback-only by default (HCRM_SCANNER_REGISTER_ANY=1 to open for a LAN deployment),Terminalregistrering virker kun fra loopback som standard (HCRM_SCANNER_REGISTER_ANY=1 åbner for en LAN-opsætning)
+error.request_failed,Request failed ({status}),Anmodningen mislykkedes ({status})
+error.scan_badge,"QR badge payload — badges log in via POST /api/auth/qr-login, they are not catalogue items","QR-badge-payload — badges logger ind via POST /api/auth/qr-login, de er ikke katalogvarer"
+error.scan_misread,"MISREAD — check digit fails; re-scan, do not file","Læst forkert — kontrolcifferet fejler; scan igen, og registrér ikke"
+error.scan_request_not_found,Scan request not found,Scananmodningen blev ikke fundet
+error.scan_request_status_invalid,status must be one of {statuses},status skal være en af {statuses}
+error.secret_in_use,That secret is already registered to terminal {owner} — generate a fresh secret per terminal,Den hemmelighed er allerede registreret til terminalen {owner} — opret en ny hemmelighed pr. terminal
+error.self_delete,Cannot delete yourself,Du kan ikke slette dig selv
+error.sku_taken,SKU already exists,SKU'en findes allerede
+error.staff_required,Staff privileges required,Kræver personaleadgang
+error.stock_db_locked,database is locked by another writer; retry the adjustment,databasen er låst af en anden skribent; prøv justeringen igen
+error.terminal_already_registered,"Terminal {terminal} is already registered — recovery is DELETE /api/scanner/terminals/{terminal_url} (staff or loopback), then re-register","Terminalen {terminal} er allerede registreret — gendannelse er DELETE /api/scanner/terminals/{terminal_url} (personale eller loopback), og derefter registrere igen"
+error.terminal_not_found,No terminal {terminal},Ingen terminal {terminal}
+error.terminal_staff_required,Deleting a terminal requires staff privileges (or a loopback caller),Sletning af en terminal kræver personaleadgang (eller en loopback-kalder)
+error.token_invalid,Token invalid or expired,Sessionen er ugyldig eller udløbet
+error.use_change_password,Use POST /api/auth/change-password to change your own password (it verifies your current password),Brug POST /api/auth/change-password til at skifte din egen adgangskode (den bekræfter din nuværende adgangskode)
+error.user_gone,User no longer exists,Brugeren findes ikke længere
+error.validation,Check the highlighted fields,Kontrollér de fremhævede felter
+error.validation_field,{field} is not valid,Ugyldig værdi for {field}
+error.vector_extension_unavailable,Vector search unavailable (sqlite-vector extension not loaded),Vektorsøgning er utilgængelig (sqlite-vector-udvidelsen er ikke indlæst)
+error.vector_model_unavailable,Vector search unavailable (embedding model not loaded),Vektorsøgning er utilgængelig (embedding-modellen er ikke indlæst)
+error.well_known_password,That password is published in this project's documentation/seed code; choose another one,Den adgangskode er offentliggjort i projektets dokumentation/seed-kode; vælg en anden
+export.done,Exported {rows} × {cols} as {format},Eksporterede {rows} × {cols} som {format}
+export.empty,Nothing to export,Intet at eksportere
+export.pdf_prices,Prices in DKK,Priser i DKK
+export.pdf_title,HCRM — Items export,HCRM — Vareeksport
+export.pdf_unavailable,PDF library not loaded,PDF-biblioteket er ikke indlæst
+export.summary,{rows} × {cols} — {date},{rows} × {cols} — {date}
+field.barcode,Barcode,Stregkode
+field.category,Category,Kategori
+field.delta,Stock change,Lagerændring
+field.description,Description,Beskrivelse
+field.image_url,Image URL,Billed-URL
+field.image_url_placeholder,https://…,https://…
+field.name,Name,Navn
+field.new_password,New password,Ny adgangskode
+field.role,Role,Rolle
+field.sku,SKU,SKU
+field.status,Status,Status
+field.stock,Stock,Lager
+intake.added,{name} added to the catalogue and your purchase list,{name} blev tilføjet til kataloget og din indkøbsliste
+intake.already_filed,Already filed as {sku} — added instead,Allerede registreret som {sku} — tilføjet i stedet
+intake.also_cart,Also add the item to {name}'s purchase list,Tilføj også varen til {name}s indkøbsliste
+intake.duplicate,You already reported this code — staff know,Du har allerede rapporteret denne kode — personalet ved det
+intake.item_name,Item name,Varenavn
+intake.name_placeholder,What is this item?,Hvad er det for en vare?
+intake.name_required,Enter the item name first,Indtast varenavnet først
+intake.reported,Reported to staff — scan it again once it's in the catalogue,"Sendt til personalet — scan koden igen, når varen er i kataloget"
+intake.request_from,Scan request from {name},Scananmodning fra {name}
+intake.resolve_failed,"Created, but resolving the request failed: {message}","Oprettet, men behandlingen af anmodningen mislykkedes: {message}"
+intake.resolved,Scan request resolved,Scananmodning behandlet
+intake.resolved_also,Also resolved {name}'s request for this code,Behandlede også {name}s anmodning om denne kode
+intake.restricted,restricted circulation,begrænset cirkulation
+intake.staff_note,Staff will review the request and add the item to the catalogue.,Personalet gennemgår anmodningen og tilføjer varen til kataloget.
+intake.submit_member,Send to staff,Send til personalet
+intake.submit_staff,Add to catalogue & purchase list,Tilføj til kataloget og indkøbslisten
+intake.title,Unknown item,Ukendt vare
+item.add,Add to catalogue,Tilføj til kataloget
+item.added,Item added to the catalogue,Varen blev tilføjet til kataloget
+item.description_placeholder,Please enter a brief description of the product,Indtast en kort beskrivelse af varen
+item.edit_title,Edit item #{id},Redigér vare #{id}
+item.image_url,Image URL (optional),Billed-URL (valgfri)
+item.new_title,Input new item,Indtast ny vare
+item.save,Save changes,Gem ændringer
+item.updated,Item updated,Varen blev opdateret
+lang.switch_to,Switch to Danish,Skift til engelsk
+money.code,DKK,DKK
+nav.admin,Admin,Administration
+nav.catalogue,Catalogue,Katalog
+nav.profile,My profile,Min profil
+nav.purchases,Purchase history,Købshistorik
+nav.table,Table,Tabel
+purchases.clamped_title,"requested {requested}, only {applied} in stock","bestilt {requested}, kun {applied} på lager"
+purchases.empty,Nothing purchased yet — complete a purchase from your list in the catalogue.,Intet købt endnu — gennemfør et køb fra din indkøbsliste i kataloget.
+purchases.load_more,Load more,Indlæs flere
+purchases.locked,Change your password (Account → Security) to unlock your purchase history.,Skift din adgangskode (Konto → Sikkerhed) for at låse din købshistorik op.
+purchases.new,new,ny
+scan.added_assigned,{name} added (assigned scan),{name} tilføjet (tildelt scanning)
+scan.busy_dialog,Finish the current dialog first,Afslut den aktuelle dialog først
+scan.failed,Scan failed ({status}),Scanningen mislykkedes ({status})
+scan.misread,Misread — re-scan,Læst forkert — scan igen
+scan.staged_failed,A staged scan could not be added,En midlertidigt gemt scanning kunne ikke tilføjes
+scan.staged_misread,A staged scan was a misread — dropped,En midlertidigt gemt scanning var læst forkert — kasseret
+scan.staged_saved,Scan saved — log in or scan your badge to assign it,"Scanning gemt — log ind, eller scan din badge for at tildele den"
+scanner.label.live,scanner,scanner
+scanner.label.off,scanner offline,scanner inaktiv
+scanner.label.unpaired,no scanner,ingen scanner
+scanner.pair_failed,Pairing failed ({status}),Parringen mislykkedes ({status})
+scanner.paired,"Paired — scans from this terminal now arrive here, even with this window unfocused.","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus."
+scanner.paired_offline,"Paired — scans from this terminal now arrive here, even with this window unfocused (server unreachable — retrying).","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus (serveren er ikke tilgængelig — prøver igen)."
+scanner.paired_toast,"Scanner paired — scans from this terminal now arrive here, even with this window unfocused","Scanner parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke har fokus"
+scanner.pairing_label,Scanner pairing,Scannerparring
+scanner.repair_prefix,"To re-pair: DELETE the terminal (staff or loopback), re-run","For at parre igen: SLET terminalen (personale eller loopback), kør igen"
+scanner.repair_suffix,", then click the pill.",", og klik derefter på statusknappen."
+scanner.title.live,Scans arrive via the grab daemon (no window focus needed) — click to manage the pairing,Scanninger ankommer via grab-daemonen (vinduet behøver ikke have fokus) — klik for at administrere parringen
+scanner.title.off,"Paired, but the server is unreachable — retrying — click to manage the pairing","Parret, men serveren er ikke tilgængelig — prøver igen — klik for at administrere parringen"
+scanner.title.unpaired,Not paired — click to pair this kiosk from the pairing file the daemon wrote,"Ikke parret — klik for at parre denne kiosk ud fra den parringsfil, daemonen skrev"
+scanner.unpair,Unpair,Fjern parring
+scanner.unpaired_toast,"Unpaired — re-run scanner_daemon.py --register, then click the pill to pair again","Ikke parret — kør scanner_daemon.py --register igen, og klik derefter på statusknappen for at parre igen"
+status.dismissed,Dismissed,Afvist
+status.open,Open,Åben
+status.resolved,Resolved,Behandlet
+table.badge_active,✓ active,✓ aktiv
+table.clear_selection,Clear selection,Ryd markering
+table.col.ai,AI,AI
+table.col.badge,Badge,Badge
+table.col.code,Code,Kode
+table.col.created,Created,Oprettet
+table.col.embedded,Embedded,Embedding
+table.col.id,ID,ID
+table.col.joined,Joined,Medlem siden
+table.col.proposed_item,Proposed item,Foreslået vare
+table.col.requested,Requested,Anmodet
+table.col.requester,Requester,Anmodende medlem
+table.column_title,Click to select column · Shift-click for a range · Ctrl/Cmd-click to add/remove,Klik for at markere kolonnen · Skift-klik for et interval · Ctrl/Cmd-klik for at tilføje eller fjerne
+table.empty,No items.,Ingen varer.
+table.export_csv,Export CSV,Eksportér CSV
+table.export_pdf,Export PDF,Eksportér PDF
+table.next,Next,Næste
+table.page,Page {n},Side {n}
+table.previous,Previous,Forrige
+table.reload,Reload,Opdatér
+table.selected_rows.one,{n} selected row,{n} markeret række
+table.selected_rows.other,{n} selected rows,{n} markerede rækker
+table.selection_hint,Click a row or a column header to select it · Shift-click for a range · Ctrl/Cmd-click to add/remove · analysis and exports use the current selection (or everything shown if nothing is selected).,"Klik på en række eller en kolonneoverskrift for at markere den · Skift-klik for et interval · Ctrl/Cmd-klik for at tilføje eller fjerne · analysen og eksporten bruger den aktuelle markering (eller alt det, der vises, hvis intet er markeret)."
+table.title,Items in the database,Varer i databasen

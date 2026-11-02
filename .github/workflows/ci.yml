@@ -36,6 +36,17 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
+      # The served copy is compiled from i18n/strings.csv; a stale artifact must
+      # fail here, and the check must never write (the hygiene step below asserts
+      # a clean tree). scripts/run.sh runs the same check before boot.
+      - name: i18n artifact is fresh (read-only)
+        run: uv run python scripts/build_i18n.py --check
+      # The coverage ratchet: unknown/dead ids, hardcoded copy in a migrated
+      # namespace, a stale allowlist entry. Read-only; the summary carries the
+      # INFO count (hardcoded copy not yet migrated), pinned by
+      # tests/test_i18n_coverage.py.
+      - name: i18n coverage ratchet (read-only)
+        run: uv run python scripts/i18n_check.py --quiet
       - name: suite
         run: uv run pytest -q
       # Order-independence is a claimed property, so it is checked, not assumed.

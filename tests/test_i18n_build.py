@@ -1,0 +1,237 @@
+"""The compiled copy artifact: freshness gate, determinism, serving (item 2).
+
+`static/i18n.messages.js` is generated, committed and served, and three things hold it
+together: `scripts/build_i18n.py --check` (run by `scripts/run.sh` before boot and by
+CI), the byte-identical rebuild in this file, and `tests/js/i18n.test.mjs`, which runs
+the runtime against the same bytes. The tests below therefore care about *bytes* and
+*sides effects*: a check that writes, or a build that depends on the clock, is the
+defect class this file exists to catch.
+"""
+
+import importlib.util
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+
+import pytest
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS = os.path.join(REPO_ROOT, "scripts")
+ARTIFACT = os.path.join(REPO_ROOT, "static", "i18n.messages.js")
+CSV = os.path.join(REPO_ROOT, "i18n", "strings.csv")
+CI = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
+RUN_SH = os.path.join(REPO_ROOT, "scripts", "run.sh")
+
+if SCRIPTS not in sys.path:
+    sys.path.insert(0, SCRIPTS)
+import build_i18n  # noqa: E402  (imports scripts/_i18n.py from the same directory)
+
+
+def _load_i18n():
+    path = os.path.join(SCRIPTS, "_i18n.py")
+    spec = importlib.util.spec_from_file_location("_i18n_under_test_build", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+i18n = _load_i18n()
+
+
+def _tmp_copy(tmp_path):
+    """A private CSV + artifact pair, so a test can never touch the checkout."""
+    csv_path = tmp_path / "strings.csv"
+    csv_path.write_bytes(open(CSV, "rb").read())
+    out_path = tmp_path / "i18n.messages.js"
+    out_path.write_bytes(build_i18n.render_artifact(i18n.read_rows(csv_path)[0]))
+    return csv_path, out_path
+
+
+# --- freshness gate ---------------------------------------------------------
+
+
+def test_check_is_fresh_silent_and_never_writes(capsys):
+    before = open(ARTIFACT, "rb").read()
+    stat_before = os.stat(ARTIFACT).st_mtime_ns
+    assert build_i18n.main(["--check"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "", "a fresh check must be silent (run.sh stdout is asserted)"
+    assert captured.err == ""
+    assert open(ARTIFACT, "rb").read() == before
+    assert os.stat(ARTIFACT).st_mtime_ns == stat_before, "--check must never rewrite"
+
+
+def test_check_is_red_after_a_one_cell_edit(tmp_path, capsys):
+    csv_path, out_path = _tmp_copy(tmp_path)
+    # A legitimate translation edit (the placeholder must survive, or the validator
+    # rejects it before the freshness check — which is its own test below).
+    edited = csv_path.read_bytes().replace("Hej {name}".encode(), "Hej med dig {name}".encode())
+    csv_path.write_bytes(edited)
+    out_before = out_path.read_bytes()
+
+    assert build_i18n.main(["--check", "--csv", str(csv_path), "--out", str(out_path)]) == 1
+    err = capsys.readouterr().err
+    assert "is stale" in err
+    assert "uv run python scripts/build_i18n.py --write" in err, "the fix command is named"
+    assert "auth.greeting" in err, "the diff names the changed row"
+    assert out_path.read_bytes() == out_before, "a red check still never writes"
+
+
+def test_check_reports_a_missing_artifact(tmp_path, capsys):
+    csv_path, out_path = _tmp_copy(tmp_path)
+    out_path.unlink()
+    assert build_i18n.main(["--check", "--csv", str(csv_path), "--out", str(out_path)]) == 1
+    err = capsys.readouterr().err
+    assert "is missing" in err and "--write" in err
+
+
+def test_invalid_csv_exits_2_and_names_the_line(tmp_path, capsys):
+    csv_path, out_path = _tmp_copy(tmp_path)
+    raw = csv_path.read_bytes()
+    line_no = raw.count(b"\n", 0, raw.index(b"app.title,")) + 1
+    csv_path.write_bytes(raw.replace(b"app.title,", b"App.Title,"))
+    assert build_i18n.main(["--check", "--csv", str(csv_path), "--out", str(out_path)]) == 2
+    err = capsys.readouterr().err
+    # The row's own line, wherever the growing CSV puts it.
+    assert f"i18n/strings.csv:{line_no}: invalid id 'App.Title'" in err
+    assert "nothing was written" in err
+
+
+# --- the artifact itself ----------------------------------------------------
+
+
+def test_committed_artifact_is_the_rebuild():
+    rows, problems = i18n.read_rows(CSV)
+    assert problems == []
+    assert build_i18n.render_artifact(rows) == open(ARTIFACT, "rb").read()
+
+
+def test_two_writes_are_byte_identical(tmp_path, capsys):
+    csv_path, out_path = _tmp_copy(tmp_path)
+    out_path.unlink()
+    assert build_i18n.main(["--write", "--csv", str(csv_path), "--out", str(out_path)]) == 0
+    first = out_path.read_bytes()
+    capsys.readouterr()
+    assert build_i18n.main(["--write", "--csv", str(csv_path), "--out", str(out_path)]) == 0
+    second = out_path.read_bytes()
+    captured = capsys.readouterr()
+    assert first == second
+    assert "up to date" in captured.out, "a no-op write says so instead of rewriting"
+
+
+def test_artifact_shape_is_pinned():
+    rows, _ = i18n.read_rows(CSV)
+    raw = open(ARTIFACT, "rb").read()
+    text = raw.decode("utf-8")
+    assert text.startswith("/* GENERATED by scripts/build_i18n.py from i18n/strings.csv")
+    # The count is derived from the CSV, but one LITERAL stays: it is the
+    # churn guard — adding a row without touching this line must go red.
+    assert f"rows: {len(rows)}" in text and "rows: 414" in text
+    assert "DO NOT EDIT" in text
+    assert raw.endswith(b"\n") and not raw.endswith(b"\n\n"), "exactly one trailing LF"
+    assert b"\r" not in raw
+    assert "<" not in text, "data only: the generator never emits HTML"
+    assert text.count("function ") == 1, "data only: the wrapper is the only function"
+    assert text.index('"en": {') < text.index('"da": {'), "en is emitted before da"
+    assert 'module.exports = MESSAGES' in text and "global.HCRM_MESSAGES = MESSAGES" in text
+    assert not any(marker in text for marker in ("2026-", "2025-", "generated at")), "no timestamp"
+
+
+def test_artifact_passes_node_check():
+    proc = subprocess.run(["node", "--check", ARTIFACT], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_artifact_is_served_with_the_csp(client):
+    response = client.get("/i18n.messages.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+    assert "Content-Security-Policy" in response.headers
+
+
+def test_report_is_read_only(capsys):
+    before = open(ARTIFACT, "rb").read()
+    stat_before = os.stat(ARTIFACT).st_mtime_ns
+    assert build_i18n.main(["--report"]) == 0
+    out = capsys.readouterr().out
+    rows, _ = i18n.read_rows(CSV)
+    assert f"{len(rows)} ids" in out and "414 ids" in out and "current" in out
+    assert "prefixes:" in out and "error 66" in out and "lang 1" in out
+    identical = next(line for line in out.splitlines()
+                     if line.strip().startswith("identical en/da:"))
+    assert "money.code" in identical
+    assert open(ARTIFACT, "rb").read() == before
+    assert os.stat(ARTIFACT).st_mtime_ns == stat_before
+
+
+# --- the boot/CI wiring -----------------------------------------------------
+
+
+def test_run_sh_checks_without_ever_writing():
+    text = open(RUN_SH, encoding="utf-8").read()
+    assert "scripts/build_i18n.py --check" in text
+    for line in text.splitlines():
+        stripped = line.strip()
+        assert not (stripped.startswith("uv run python scripts/build_i18n.py --write")), (
+            "the boot path must never write the served artifact")
+
+
+def _uv_shim(directory, log, check_exit):
+    """A fake `uv`: logs argv, fails only the i18n check when asked to."""
+    path = os.path.join(directory, "uv")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "#!/usr/bin/env bash\n"
+            f'echo "ARGS=$*" >> "{log}"\n'
+            f'case "$*" in *build_i18n.py*--check*) exit {check_exit} ;; esac\n'
+            "exit 0\n")
+    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+    return directory
+
+
+def test_run_sh_refuses_a_stale_artifact_before_uvicorn():
+    with tempfile.TemporaryDirectory(prefix="hcrm-i18n-shim-") as tmp:
+        log = os.path.join(tmp, "calls.log")
+        bin_dir = _uv_shim(tmp, log, check_exit=1)
+        env = dict(os.environ)
+        env["PATH"] = bin_dir + os.pathsep + env["PATH"]
+        env["HCRM_SCRATCH"] = "1"
+        env["HCRM_PORT"] = "8199"
+        proc = subprocess.run(["bash", "scripts/run.sh"], cwd=REPO_ROOT, env=env,
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode != 0, proc.stdout + proc.stderr
+        assert "refusing to boot" in proc.stderr
+        assert "build_i18n.py --write" in proc.stderr, "the operator is told the fix"
+        calls = open(log, encoding="utf-8").read()
+        assert "build_i18n.py --check" in calls
+        assert "run uvicorn" not in calls, "a stale artifact must never reach uvicorn"
+
+
+def test_run_sh_still_boots_when_the_check_is_fresh():
+    with tempfile.TemporaryDirectory(prefix="hcrm-i18n-shim-ok-") as tmp:
+        log = os.path.join(tmp, "calls.log")
+        bin_dir = _uv_shim(tmp, log, check_exit=0)
+        env = dict(os.environ)
+        env["PATH"] = bin_dir + os.pathsep + env["PATH"]
+        env["HCRM_SCRATCH"] = "1"
+        env["HCRM_PORT"] = "8199"
+        proc = subprocess.run(["bash", "scripts/run.sh"], cwd=REPO_ROOT, env=env,
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        calls = open(log, encoding="utf-8").read().splitlines()
+        assert any("run uvicorn" in call for call in calls)
+        assert "run uvicorn" in calls[-1], "uvicorn is still the last command"
+
+
+def test_ci_runs_the_read_only_check():
+    text = open(CI, encoding="utf-8").read()
+    assert "uv run python scripts/build_i18n.py --check" in text
+    for line in text.splitlines():
+        assert "--write" not in line, "CI must never regenerate the artifact"
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(pytest.main([__file__]))

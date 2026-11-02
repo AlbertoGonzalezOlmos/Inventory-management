@@ -79,6 +79,46 @@ On first run the app seeds:
 > defaults to **`/tmp/fastembed_cache`**, so a tmp-cleaner wipes it and the next
 > boot re-downloads. Set `FASTEMBED_CACHE_PATH` to a stable path to avoid that.
 
+## Internationalisation
+
+The UI is **Danish by default** and switches to English with the flag in the topbar
+(a per-device preference in `localStorage.hcrm_lang`) or a `?lang=en` link (applied,
+persisted, then stripped from the URL so a stale link can never beat a later toggle).
+English stays the fallback for a row whose Danish translation is missing.
+
+- **One copy source.** `i18n/strings.csv` (UTF-8 **with BOM**, header `id,en,da`) is
+  the only hand-edited user-visible copy. `static/i18n.messages.js` is **generated**
+  from it and committed; the app loads that data first, then the small runtime
+  `static/i18n.js` (`t()`, `tp()` plural pairs, `money()`/`moneyCode()`,
+  `errorText()`, language detection and everything else).
+- **Edit → build → commit.** Edit the CSV, run
+  `uv run python scripts/build_i18n.py --write`, commit **both** files.
+  `--check` proves the artifact is fresh (`scripts/run.sh` and CI refuse to serve a
+  stale one); `--report` prints row/prefix counts.
+- **The checker (a ratchet).** `uv run python scripts/i18n_check.py` is read-only:
+  CSV shape, every `t()`/`tp()` reference, dead rows, hardcoded copy in
+  `index.html`/`static/*.js`, and which findings are fatal. It exits `1` with
+  `file:line` and a fix per class. The ratchet is **global** now — `i18n/migrated.txt`
+  (the migration's namespace allowlist) was deleted at the flip, so any hardcoded
+  literal that matches a CSV cell is an **error**, and the pinned INFO count is `0`.
+  `i18n/copy-allowlist.txt` exempts only content that must not be translated (a shell
+  command, a glyph, the brand token, a default category slug), says why, and may only
+  shrink.
+- **Money is DKK.** Amounts are formatted by a hand-rolled integer formatter:
+  `0,00 DKK` / `1.234,50 DKK` / `-1.234,50 DKK`, Danish numerals in **both** UI
+  languages, ASCII space, never `Intl` currency mode (it emits a non-breaking space
+  before the code and drifts with the browser's ICU build). The code itself is the
+  `money.code` CSV row; CSV cells of an export stay numeric, PDF cells are formatted.
+- **Server errors follow the UI language.** Backend errors carry an additive
+  `X-Error-Code` header (plus `X-Error-Vars` for a parameterised message); the SPA
+  renders the `error.<code>` row, so a 401/403/404/409/422 reads Danish — **without
+  changing any response body**.
+- **Adding a language.** The CSV is `en` + `da` today. A third language means a third
+  column in `i18n/strings.csv` and in `LANGUAGES` (`scripts/_i18n.py`), a new code in
+  `SUPPORTED_LANGS` plus its flag/label in `static/i18n.js` and the topbar toggle, and
+  `build_i18n.py --write`. The tests and `ui_check` read their expectations from the
+  CSV, so they need no new copy — only the new column.
+
 ## Configuration
 
 | Environment variable | Default | Purpose |
@@ -166,11 +206,12 @@ bearer), read-only, and never creates the directory. Root order: `$HCRM_CATALOGU
 **Known gaps**: 14 supplier SKUs have **no photo on the site**, so their `URL to photo` cell and DB
 `image_url` stay empty — `1327, 1709c, 1717B, 1773, 1842, 1989, 2223A, 2401, 2962, 2974, 4219, 4270, 4472,
 6700` (the crawler reports them as `no_result`; nothing is invented). Prices are stored as the supplier's DKK
-amounts while `static/app.js` still formats them as EUR — a display-only follow-up, deliberately not changed
-here. If the embedding model is unavailable the importer defers a row rather than writing text without a
-vector (the API enforces the same rule), so boot the app once (or run `uv run python -c "from app.embeddings
-import warm_up; warm_up()"`) before the first import; `app/seed.py::backfill_embeddings()` repairs any NULL
-embedding at boot.
+amounts (integer øre) and rendered as `1.234,50 DKK` — fixed Danish numerals regardless of UI language — by the
+hand-rolled formatter in `static/i18n.js`, deliberately not `Intl` currency mode (which emits a non-breaking
+space before the code and drifts with the browser's ICU build). If the embedding model is unavailable the
+importer defers a row rather than writing text without a vector (the API enforces the same rule), so boot
+the app once (or run `uv run python -c "from app.embeddings import warm_up; warm_up()"`) before the first
+import; `app/seed.py::backfill_embeddings()` repairs any NULL embedding at boot.
 
 ## Features
 
@@ -585,7 +626,6 @@ touching `./data`).
 | **Refunds / voids / receipt re-issue** | Checkout exists (`POST /api/orders`: snapshots, clamp-and-report stock, immutable receipts); what remains open is the after-sale: refunds, voiding an order, re-sending a receipt. |
 | **`PRAGMA foreign_keys` is OFF** | `auth_tokens.user_id` is declarative only; enforcing it needs a table rebuild. The only user-deleting path removes tokens first. |
 | **Quantized ANN scans** (`vector_quantize`) | Exact `vector_full_scan` is comfortable to ~100k items; see the measurements above. |
-| **Supplier prices displayed as EUR** | The Biogan catalogue is priced in DKK (`price_cents` holds the supplier amount) but `static/app.js` formats every price with the EUR symbol. Display-only; changing it would touch all price rendering, so it is a separate, deliberate change. |
 
 ## Next steps (barebones placeholders)
 

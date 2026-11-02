@@ -53,6 +53,36 @@ body {
 .userbox { display: flex; align-items: center; gap: .75rem; position: relative; }
 .user-name small { color: var(--muted); }
 
+/* Language switch (item 3): the flag of the language you would switch TO.
+ * Fixed 32×28 hit area (flex: 0 0 auto) so the 900px reflow can never squeeze
+ * it; the focus ring mirrors .feed-pill's, so the two topbar buttons read as
+ * one family. */
+.lang-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 28px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.lang-toggle:hover { background: var(--bg); }
+.lang-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.lang-toggle svg {
+  display: block;
+  width: 24px;
+  height: 16px;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(16, 24, 40, .12);
+}
+
 /* ---------- buttons, forms ---------- */
 .btn {
   display: inline-block;

@@ -174,7 +174,8 @@ def test_run_sh_announces_and_exports_the_resolved_data_dir():
 
 def test_python_scripts_are_syntactically_valid():
     """Cheap tripwire: a syntax error in a script is a broken gate, not a warning."""
-    for rel in ("scripts/ui_check.py", "scripts/load_test.py", "scripts/smoke_test.py"):
+    for rel in ("scripts/ui_check.py", "scripts/load_test.py", "scripts/smoke_test.py",
+                "scripts/_i18n.py", "scripts/build_i18n.py", "scripts/i18n_check.py"):
         path = os.path.join(REPO_ROOT, rel)
         if not os.path.exists(path):
             continue

@@ -208,17 +208,28 @@ CITED_PATH_ALLOWLIST = {
     # all", PLAN-v2 §8.2 F3). The probe file was deliberately never
     # committed — PLAN-v2:849 says do not create it in the real tree.
     "static/docs.html",
+    # i18n/README.md, scripts/i18n_check.py and tests/test_i18n_coverage.py cite
+    # the namespace ratchet file to say it was DELETED at the item-7 flip (its
+    # absence is what makes the checker strict). A citation of a deliberately
+    # absent file, exactly like the static/docs.html precedent — and the docs
+    # must keep naming it, or nobody learns why it must never come back.
+    "i18n/migrated.txt",
 }
 
 #: A citation worth pinning carries its directory: one of these prefixes.
 #: Extending the list is a deliberate edit, not a cleanup.
-_CITED_PREFIXES = ("app", "docs", "scripts", "static", "tests")
+_CITED_PREFIXES = ("app", "docs", "i18n", "scripts", "static", "tests")
 
 _CITED_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_./:-])"                   # not the tail of a URL or a
-    r"\b(?:app|docs|scripts|static|tests)/"    # longer path: kills https://…/docs/x.md
+    r"\b(?:app|docs|i18n|scripts|static|tests)/"  # longer path: kills https://…/docs/x.md
     r"[A-Za-z0-9._/-]*[A-Za-z0-9]"             # path chars ONLY — no < > { } * $
     r"\.[A-Za-z0-9]{1,8}\b")                   # must end in a real extension
+
+
+def test_i18n_path_citations_are_in_scope():
+    match = _CITED_PATH_RE.search("see i18n/strings.csv")
+    assert match and match.group(0) == "i18n/strings.csv"
 
 
 def test_shipped_files_cite_only_in_tree_paths():

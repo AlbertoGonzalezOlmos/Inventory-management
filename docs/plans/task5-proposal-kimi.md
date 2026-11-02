@@ -192,7 +192,7 @@ existing `api()` is untouched for everything else):
     name is typed via `GET /items/suggest?q=…&barcode=…`, debounced 300 ms
     — that's where `by_semantic` appears): each row a button →
     `POST /cart/items {item_id}` → cart update, close, toast.
-  - **Form**: name, price (€→cents), and for staff a SKU field prefilled
+  - **Form**: name, price in DKK (converted to `price_cents`), and for staff a SKU field prefilled
     with `analysis.gtin14` when `catalogable` (unique and meaningful),
     empty+required for opaque codes.
     - **Staff submit** → `POST /api/items {sku, name, price_cents,
