@@ -25,7 +25,7 @@ const Vue = new Function(vueSrc + "; return Vue;")();
 
 const {
   otherLang, queryLang, stripLangQuery, bootPlan, descriptorText,
-  detectLang, applyLang, translate,
+  detectLang, applyLang, translate, DEFAULT_LANG,
 } = HcrmI18n;
 
 function extractMethod(header) {
@@ -57,12 +57,12 @@ const throwingStore = { getItem() { throw new Error("denied"); }, setItem() {} }
 
 // --- pure runtime helpers ---------------------------------------------------
 
-test("otherLang round-trips and normalises junk to the en side", () => {
+test("otherLang round-trips and normalises junk to the DEFAULT side", () => {
   assert.equal(otherLang("en"), "da");
   assert.equal(otherLang("da"), "en");
   assert.equal(otherLang(otherLang("en")), "en");
-  assert.equal(otherLang("fr"), "da", "junk normalises to the default first");
-  assert.equal(otherLang(undefined), "da");
+  assert.equal(otherLang("fr"), otherLang(DEFAULT_LANG), "junk normalises to the default first");
+  assert.equal(otherLang(undefined), otherLang(DEFAULT_LANG));
 });
 
 test("stripLangQuery removes only the lang pair", () => {
@@ -76,7 +76,7 @@ test("stripLangQuery removes only the lang pair", () => {
 
 test("bootPlan: ?lang beats stored, stored beats default, junk is stripped not persisted", () => {
   assert.deepEqual(bootPlan("", store(null)),
-    { lang: "en", persist: false, strip: false, search: "" });
+    { lang: DEFAULT_LANG, persist: false, strip: false, search: "" });
   assert.deepEqual(bootPlan("", store("da")),
     { lang: "da", persist: false, strip: false, search: "" });
   assert.deepEqual(bootPlan("?lang=da", store("en")),
@@ -84,7 +84,7 @@ test("bootPlan: ?lang beats stored, stored beats default, junk is stripped not p
   assert.deepEqual(bootPlan("?x=1&lang=da", store(null)),
     { lang: "da", persist: true, strip: true, search: "?x=1" });
   assert.deepEqual(bootPlan("?lang=fr", store(null)),
-    { lang: "en", persist: false, strip: true, search: "" },
+    { lang: DEFAULT_LANG, persist: false, strip: true, search: "" },
     "junk is cleaned from the URL but never persisted");
   const plan = bootPlan("?lang=da", throwingStore);
   assert.equal(plan.lang, "da", "a storage-blocked device still applies ?lang");
@@ -191,17 +191,17 @@ test("apiError: the response headers become code, vars, field and copy", (t) => 
   assert.equal(coded.detail, "Barcode already assigned to item SKU-A",
     "the body detail stays verbatim (the flows branch on it)");
   assert.equal(coded.message,
-    MESSAGES.en["error.barcode_taken"].replace("{sku}", "SKU-A"));
+    MESSAGES[DEFAULT_LANG]["error.barcode_taken"].replace("{sku}", "SKU-A"));
 
   const validated = apiError(res({ "X-Error-Code": "validation_field" }, 422),
     { detail: [{ loc: ["body", "price_cents"], msg: "Input should be >= 0" }] });
   assert.equal(validated.field, "price_cents", "loc[-1] is the field");
-  assert.equal(validated.message, MESSAGES.en["error.validation_field"]
-    .replace("{field}", MESSAGES.en["common.price"]));
+  assert.equal(validated.message, MESSAGES[DEFAULT_LANG]["error.validation_field"]
+    .replace("{field}", MESSAGES[DEFAULT_LANG]["common.price"]));
 
   const fallback = apiError(res({}), null, "invalid_credentials");
   assert.equal(fallback.code, "invalid_credentials", "our own 401 row is the fallback");
-  assert.equal(fallback.message, MESSAGES.en["error.invalid_credentials"]);
+  assert.equal(fallback.message, MESSAGES[DEFAULT_LANG]["error.invalid_credentials"]);
 });
 
 test("errDescriptor: a coded error becomes a re-renderable {key, vars}", () => {
@@ -286,7 +286,7 @@ test("toggleLang flips and the watcher persists + applies, both directions", () 
 
 test("detectLang never writes (a first visit stays unwritten)", () => {
   const s = store(null);
-  assert.equal(detectLang(s, ""), "en");
+  assert.equal(detectLang(s, ""), DEFAULT_LANG);
   assert.equal(detectLang(s, "?lang=da"), "da");
   assert.deepEqual(s.writes, []);
 });
@@ -389,10 +389,11 @@ test("the SHIPPED boot block: applies, writes once, strips, keeps hash (and neve
   }
 
   const first = runBoot();
-  assert.equal(first.plan.lang, "en");
+  assert.equal(first.plan.lang, DEFAULT_LANG);
   assert.deepEqual(first.writes, [], "a first visit writes NOTHING");
   assert.deepEqual(first.replaces, [], "and rewrites no URL");
-  assert.deepEqual(first.applied, ["en"], "the language is still applied before mount");
+  assert.deepEqual(first.applied, [DEFAULT_LANG],
+    "the language is still applied before mount");
 
   const linked = runBoot({ search: "?x=1&lang=da", hash: "#/catalogue", stored: "en" });
   assert.equal(linked.plan.lang, "da", "the query beats the stored preference");
@@ -406,7 +407,7 @@ test("the SHIPPED boot block: applies, writes once, strips, keeps hash (and neve
   assert.deepEqual(denied.replaces, ["/"], "and the strip still happens");
 
   const junk = runBoot({ search: "?lang=fr", stored: "en" });
-  assert.equal(junk.plan.lang, "en");
+  assert.equal(junk.plan.lang, "en", "the stored preference survives a junk query");
   assert.deepEqual(junk.writes, [], "an unsupported language is stripped, never persisted");
   assert.deepEqual(junk.replaces, ["/"]);
 });

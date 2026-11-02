@@ -18,8 +18,9 @@
  * file runs in its own process, so importing only this one keeps the "DKK" fallback
  * honest for the money suite).
  *
- * Defaults: `DEFAULT_LANG = "en"` (item 7 flips that single constant), no persistence
- * writes, no query rewriting — this item is machinery only and renders nothing new.
+ * Defaults: `DEFAULT_LANG = "da"` (item 7's flip: Danish is the UI a fresh device
+ * gets; `en` stays the FALLBACK for a missing row and is reachable through the
+ * toggle or `?lang=en`), no persistence writes, no query rewriting.
  *
  * Dual classic-script/CommonJS export, exactly the scan-capture / scan-feed idiom.
  */
@@ -44,7 +45,7 @@
 
   const LANG_KEY = "hcrm_lang";              // the hcrm_* storage family
   const SUPPORTED_LANGS = ["da", "en"];
-  const DEFAULT_LANG = "en";                 // item 7: the flip commit changes this one line
+  const DEFAULT_LANG = "da";                 // item 7's flip: the shop is Danish-first
   const FALLBACK_LANG = "en";                // the chain is lang -> en -> marker, always
   const MISSING_PREFIX = "[missing: ";
 

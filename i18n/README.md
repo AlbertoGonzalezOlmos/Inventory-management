@@ -2,7 +2,9 @@
 
 `strings.csv` is the **only** hand-edited source of user-visible copy. The app never
 reads it: `scripts/build_i18n.py` compiles it into `static/i18n.messages.js`, which is
-served and committed.
+served and committed. **Danish is the default UI language** (`DEFAULT_LANG` in
+`static/i18n.js`): a fresh device boots Danish, the toggle or `?lang=en` switches to
+English, and English remains the fallback for a row missing from `da`.
 
 ## Loop
 
@@ -42,11 +44,13 @@ are fatal). Exit `0` clean, `1` violations, `2` cannot run (bad args, invalid CS
 `--quiet` prints only the summary, `--json` the findings; `scripts/run.sh` and CI refuse
 a failing tree.
 
-The ratchet: `migrated.txt` lists migrated namespaces (`app.`, `lang.`, …). A hardcoded
-literal matching a row in a listed namespace is an **error**; anything else is **INFO**
-until its slice lands. Slices ADD their namespace; the file is DELETED at the item-7
-flip, which makes every hardcoded-copy finding fatal. The INFO count is pinned in
-`tests/test_i18n_coverage.py` — lower it in the slice commit, never raise it.
+The ratchet is **global** now: `migrated.txt` (the namespace allowlist the migration
+slices grew) is **deleted** — that deletion IS the flip, and it is why the file must
+never come back. With no file, nothing is exempt: a hardcoded literal that matches any
+CSV cell is an **error**, and the pinned INFO count is `0` (it may only ever shrink;
+`tests/test_i18n_coverage.py` also asserts the file stays absent). During the migration
+the file let unmigrated namespaces report INFO instead of failing; the price of that
+transition is gone, and a new hardcoded string fails the gate immediately.
 
 `copy-allowlist.txt` exempts findings by CONTENT — `<path>:<kind>:<escaped literal>`
 (brand tokens, commands) — so an entry survives a line move and only goes stale when the

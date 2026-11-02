@@ -191,15 +191,17 @@ def _lang_dom(current, target, flag, label, html_lang=None):
 
 
 def test_lang_direction_passes_in_both_directions():
-    for lang, target, label in (("en", "da", "Switch to Danish"),
-                                ("da", "en", "Skift til engelsk")):
-        dom = _lang_dom(lang, target, target, label)
-        assert uic.check_lang_direction(dom, lang) == [], (lang, label)
+    # The accessible name is the CSV's `lang.switch_to` cell for the CURRENT
+    # language — the fixture reads it, so the tool and this test hold no copy.
+    labels = uic._lang_labels()
+    for lang, target in (("en", "da"), ("da", "en")):
+        dom = _lang_dom(lang, target, target, labels[lang])
+        assert uic.check_lang_direction(dom, lang) == [], lang
 
 
 def test_lang_direction_flags_an_inverted_toggle():
     # The classic bug: the toggle carries the CURRENT language as its target.
-    dom = _lang_dom("en", "en", "da", "Switch to Danish")
+    dom = _lang_dom("en", "en", "da", uic._lang_labels()["en"])
     failures = uic.check_lang_direction(dom, "en")
     assert any("inversion" in f for f in failures), failures
     assert any('data-lang="en"' not in dom or True for _ in [0])  # shape sanity
@@ -207,7 +209,7 @@ def test_lang_direction_flags_an_inverted_toggle():
 
 def test_lang_direction_flags_a_swapped_flag_drawing():
     # Right attributes, wrong drawing: the en page must show the Dannebrog.
-    dom = _lang_dom("en", "da", "en", "Switch to Danish")
+    dom = _lang_dom("en", "da", "en", uic._lang_labels()["en"])
     failures = uic.check_lang_direction(dom, "en")
     assert any("flag" in f for f in failures), failures
 
@@ -222,6 +224,41 @@ def test_lang_direction_flags_a_missing_toggle_and_a_wrong_html_lang():
 def test_lang_direction_checks_the_accessible_name_against_the_csv():
     # The label must be the CSV row for the CURRENT language — a stale or
     # wrong-language label is a failure even when the polarity is right.
-    dom = _lang_dom("en", "da", "da", "Skift til engelsk")
+    dom = _lang_dom("en", "da", "da", uic._lang_labels()["da"])
     failures = uic.check_lang_direction(dom, "en")
     assert any("accessible name" in f for f in failures), failures
+
+
+# --- item 7: the Danish flip's coverage table -------------------------------- #
+
+def test_the_gate_targets_danish_by_default_and_english_by_query():
+    """Danish is the default now, so "/" asserts the DANISH column.
+
+    The ?lang=en target is what proves the switch still works; it is listed
+    BEFORE the default one so a persistence leak (a shared browser profile)
+    would surface as a failing Danish pin rather than a silent no-op.
+    """
+    by_path = {path: (label, view, lang, ids) for label, path, view, lang, ids
+               in uic.APP_TARGETS}
+    assert by_path["/"][2] == "da", "the default target must assert Danish"
+    assert by_path["/?lang=en"][2] == "en", "the query target must assert English"
+    assert by_path["/#/register"][2] == "da", "the register view is Danish too"
+    order = [label for label, *_ in uic.APP_TARGETS]
+    assert order.index("app-lang-en") < order.index("app-root"), (
+        "the English target runs first, so its persisted preference would leak "
+        "into (and fail) the Danish default if profiles were ever shared")
+    assert all(ids for _, _, _, _, ids in uic.APP_TARGETS), (
+        "every target asserts at least one copy row")
+
+
+def test_copy_pins_are_the_csv_cells_of_the_target_language():
+    """The gate holds no copy: an id resolves to that language's CSV cell, the
+    two languages differ (or the pins could not tell them apart), and a missing
+    cell would fail as a not-rendered assertion rather than pass silently."""
+    for ids in (uic.LOGIN_COPY_IDS, uic.REGISTER_COPY_IDS):
+        da = dict(uic._copy_cells(ids, "da"))
+        en = dict(uic._copy_cells(ids, "en"))
+        assert set(da) == set(en) == set(ids)
+        for rid in ids:
+            assert da[rid].strip() and en[rid].strip(), rid
+            assert da[rid] != en[rid], f"{rid}: both languages render the same cell"

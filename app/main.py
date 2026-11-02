@@ -333,7 +333,7 @@ DOCS_ENABLED = os.environ.get("HCRM_DOCS", "1").strip().lower() not in (
 
 app = FastAPI(
     title="HCRM - Shop Catalogue & Members",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
     docs_url="/docs" if DOCS_ENABLED else None,
     redoc_url="/redoc" if DOCS_ENABLED else None,

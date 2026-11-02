@@ -56,16 +56,19 @@ test("translate: both languages resolve from the compiled copy", () => {
   assert.equal(translate("app.title", null, "en"), "HCRM — Shop Catalogue");
   assert.equal(translate("app.title", null, "da"), "HCRM — Butikskatalog");
   assert.equal(translate("catalogue.search_placeholder", null, "da"), "Søg i kataloget…");
-  assert.equal(DEFAULT_LANG, "en");
+  // Item 7's flip: the default UI language is Danish. The copy assertions above
+  // stay CSV pins; anything about the DEFAULT derives from the constant.
+  assert.equal(DEFAULT_LANG, "da");
   assert.equal(FALLBACK_LANG, "en");
   assert.deepEqual(SUPPORTED_LANGS.slice().sort(), ["da", "en"]);
   assert.equal(LANG_KEY, "hcrm_lang");
 });
 
-test("translate: an unknown language falls back to English, without logging", () => {
+test("translate: an unknown language normalises to the DEFAULT, without logging", () => {
   const errors = captureErrors(() => {
-    assert.equal(translate("app.title", null, "fr"), "HCRM — Shop Catalogue");
-    assert.equal(translate("app.title"), "HCRM — Shop Catalogue", "no lang means the default");
+    assert.equal(translate("app.title", null, "fr"), MESSAGES[DEFAULT_LANG]["app.title"]);
+    assert.equal(translate("app.title"), MESSAGES[DEFAULT_LANG]["app.title"],
+      "no lang means the default");
   });
   assert.deepEqual(errors, []);
 });
@@ -134,9 +137,11 @@ test("detectLang: ?lang beats storage beats the default; junk is ignored", () =>
   assert.equal(detectLang(store("en"), "?lang=da"), "da", "the query wins");
   assert.equal(detectLang(store("da"), "?lang=xx"), "da", "an invalid query is ignored");
   assert.equal(detectLang(store("da"), ""), "da");
-  assert.equal(detectLang(store("fr"), ""), "en", "an invalid stored value is ignored");
-  assert.equal(detectLang(null, ""), "en", "a fresh profile is English in item 2");
-  assert.equal(detectLang({ getItem() { throw new Error("denied"); } }, ""), "en",
+  assert.equal(detectLang(store("fr"), ""), DEFAULT_LANG,
+    "an invalid stored value is ignored");
+  assert.equal(detectLang(null, ""), DEFAULT_LANG,
+    "a fresh profile gets the DEFAULT language (Danish since the flip)");
+  assert.equal(detectLang({ getItem() { throw new Error("denied"); } }, ""), DEFAULT_LANG,
     "storage that throws (private mode) falls back");
   let writes = 0;
   detectLang({ getItem: () => null, setItem: () => { writes += 1; } }, "?lang=da");
@@ -151,8 +156,10 @@ test("applyLang: sets <html lang> and the title from the copy, idempotently", ()
   assert.equal(applyLang("en", doc), "en");
   assert.equal(doc.documentElement.lang, "en");
   assert.equal(doc.title, "HCRM — Shop Catalogue");
-  assert.equal(applyLang("de", doc), "en", "an unsupported language normalises to the default");
-  assert.equal(doc.documentElement.lang, "en");
+  assert.equal(applyLang("de", doc), DEFAULT_LANG,
+    "an unsupported language normalises to the default");
+  assert.equal(doc.documentElement.lang, DEFAULT_LANG);
+  assert.equal(doc.title, MESSAGES[DEFAULT_LANG]["app.title"]);
   assert.equal(applyLang("en", null), "en", "a missing doc must not throw");
 });
 
@@ -167,7 +174,8 @@ test("moneyCode: the compiled row wins, the item-1 literal is the last resort", 
 test("dateLocale: one explicit BCP 47 tag per UI language", () => {
   assert.equal(dateLocale("da"), "da-DK");
   assert.equal(dateLocale("en"), "en-GB");
-  assert.equal(dateLocale("fr"), "en-GB");
+  assert.equal(dateLocale("fr"), dateLocale(DEFAULT_LANG),
+    "an unsupported language follows the default's locale");
 });
 
 test("errorText: item 6's chain, executed against the shipped copy", () => {
@@ -245,7 +253,8 @@ test("hasMessage/messagesFor are quiet probes over the compiled table", () => {
     assert.equal(hasMessage("nope.nothing", "en"), false);
     assert.equal(hasMessage("nope.nothing", "da"), false);
     assert.equal(messagesFor("en")["money.code"], "DKK");
-    assert.equal(messagesFor("fr")["app.title"], "HCRM — Shop Catalogue", "unknown lang → fallback");
+    assert.equal(messagesFor("fr")["app.title"], MESSAGES[DEFAULT_LANG]["app.title"],
+      "unknown lang → the DEFAULT table");
   });
   assert.deepEqual(errors, []);
 });
