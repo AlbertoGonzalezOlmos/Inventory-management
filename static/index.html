@@ -105,6 +105,12 @@
           </svg>
         </button>
       </div>
+      <!-- C2: the stepper's OUTCOME for assistive tech only. The region is
+           persistent and starts EMPTY (a first paint must not announce
+           100 %); the fontScale watcher writes the current
+           ui.font_scale_hint after each change. .sr-only keeps it in the
+           accessibility tree without a visual box. -->
+      <div class="sr-only" role="status" aria-live="polite">{{ fontScaleAnnouncement }}</div>
       <!-- Round 4: which scan path is live. "live" = the grab daemon is
            paired and the queue poll succeeds; "off" = paired but the
            server is unreachable (polling continues); "unpaired" = the
@@ -321,9 +327,31 @@
         </div>
         <div class="selection-actions">
           <button class="btn ghost block" @click="keepShopping">{{ t('checkout.keep_shopping') }}</button>
-          <button class="btn block" :disabled="busy || purchase.length === 0"
-                  @click="donePurchase">{{ t('checkout.done') }}</button>
+          <button class="btn block hold-btn no-print"
+                  :disabled="busy || purchase.length === 0"
+                  :data-holding="holdActive ? 'on' : null"
+                  aria-describedby="checkout-hold-hint"
+                  @pointerdown="beginPurchaseHold"
+                  @pointerup="endPurchaseHold('pointerup')"
+                  @pointerleave="endPurchaseHold('pointerleave')"
+                  @pointercancel="endPurchaseHold('pointercancel')"
+                  @keydown="purchaseHoldKeydown"
+                  @keyup="purchaseHoldKeyup"
+                  @blur="cancelPurchaseHold('blur')"
+                  @contextmenu.prevent>
+            <!-- C3: the fill is painted per rAF frame via --hold (0..1); the
+                 label sits above it. No @click: a quick click must NOT commit
+                 — it releases before the threshold and shows the visible hint
+                 below (also the button's aria-describedby target). -->
+            <span class="hold-fill" aria-hidden="true"></span>
+            <span class="hold-label">{{ t('checkout.done') }}</span>
+          </button>
         </div>
+        <!-- The hold requirement must be VISIBLE (title tooltips never show on
+             touch and are unreliable to AT): the button points here with
+             aria-describedby, and the line states the duration. .no-print:
+             the control is UI chrome, not part of a printed review. -->
+        <p class="muted hold-hint no-print" id="checkout-hold-hint">{{ t('checkout.hold_hint') }}</p>
         <p class="muted scan-hint">{{ t('checkout.scan_hint') }}</p>
       </aside>
 
@@ -1046,8 +1074,15 @@
   </div>
 
   <!-- ================= Toast ================= -->
+  <!-- The OUTCOME announcement is a STABLE sr-only live region whose text
+       mirrors the toast; the visible box below is aria-hidden so the same
+       sentence is not read twice. A v-if region inserted WITH its text is
+       announced inconsistently (the greeting's comment records the same
+       finding), which is why the region is permanent and only its text
+       changes. -->
+  <div class="sr-only" role="status" aria-live="polite">{{ toastText }}</div>
   <transition name="fade">
-    <div class="toast" v-if="toast">{{ toastText }}</div>
+    <div class="toast" v-if="toast" aria-hidden="true">{{ toastText }}</div>
   </transition>
 </div>
 

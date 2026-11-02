@@ -46,6 +46,22 @@
 * { box-sizing: border-box; }
 [v-cloak] { display: none; }
 
+/* Visually hidden, still ANNOUNCED: never display:none / visibility:hidden —
+ * either removes a live region from the accessibility tree. Used by the
+ * font-size result announcer and the toast announcer. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -117,18 +133,18 @@ body {
 }
 
 /* Font-size stepper (design refresh C2): the flag's sibling in the userbox.
- * Same 28px height as .lang-toggle so the cluster keeps one baseline, a 2px
- * internal gap so the pair reads as one control, and flex: 0 0 auto so the
- * 900px reflow can never squeeze either button. The root font — not these
- * buttons — is what scales: the stylesheet is rem-based, so .font-step grows
- * with the UI too. */
-.font-scale { display: inline-flex; gap: 2px; flex: 0 0 auto; }
+ * The size is in REM, not px, so the control grows with the text scale it
+ * controls: 1.8rem is 28.8px at 100% and 24.48px at the 85% floor (13.6px
+ * root), still above the WCAG 2.5.8 24px target; the SVG is rem too. The
+ * 2px-at-100% internal gap reads as one pair, and flex: 0 0 auto keeps the
+ * 900px reflow from squeezing either button. */
+.font-scale { display: inline-flex; gap: .125rem; flex: 0 0 auto; }
 .font-step {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 1.8rem;
+  height: 1.8rem;
   flex: 0 0 auto;
   padding: 0;
   border: 1px solid var(--border);
@@ -144,7 +160,7 @@ body {
   outline-offset: 1px;
 }
 .font-step:disabled { opacity: .45; cursor: not-allowed; }
-.font-step svg { display: block; width: 20px; height: 16px; }
+.font-step svg { display: block; width: 1.25rem; height: 1rem; }
 
 /* ---------- buttons, forms ---------- */
 .btn {
@@ -172,6 +188,46 @@ body {
 .btn.tiny { padding: .15rem .5rem; font-size: .8rem; }
 .btn.danger { background: var(--danger); }
 .btn.danger:hover { background: #b91c1c; }
+
+/* C3: the hold-to-confirm purchase button. The fill is the --hold CSS variable
+ * (0..1) painted per rAF frame; the label sits above it. touch-action/user-
+ * select keep a long press from scrolling or selecting instead of holding.
+ * The pulse is decoration ONLY: the fill and the 700 ms mechanism survive
+ * reduced motion — the media query removes the pulse animation, never the
+ * fill (pinned in tests/test_hold_guard.py). */
+.hold-btn {
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.hold-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--accent-dark);
+  transform: scaleX(var(--hold, 0));
+  transform-origin: left center;
+  pointer-events: none;
+}
+.hold-label { position: relative; z-index: 1; }
+/* The visible hold instruction (the button's aria-describedby target). It
+ * states the duration, so touch and AT users get what the title-only tooltip
+ * never delivered. It is UI chrome: .no-print hides it with the button. The
+ * doubled class beats the later .muted font-size, which would otherwise win. */
+.muted.muted.hold-hint {
+  margin: .1rem 0 0;
+  font-size: .8rem;
+  text-align: center;
+}
+.hold-btn[data-holding="on"] { animation: hold-pulse 1s ease-in-out infinite alternate; }
+@keyframes hold-pulse {
+  from { box-shadow: 0 0 0 0 rgba(14, 107, 98, .45); }
+  to { box-shadow: 0 0 0 .3rem rgba(14, 107, 98, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hold-btn[data-holding="on"] { animation: none; }
+}
 
 label {
   display: block;

@@ -181,6 +181,10 @@ Vue.createApp({
       // 1 — 100 %). Captured at boot by the helper that applied it; the
       // watcher below is the only post-boot writer.
       fontScale: bootFontScale,
+      // C2 accessibility: the text announced by the sr-only live region after
+      // a change. It starts EMPTY so the first paint stays silent; only the
+      // fontScale watcher writes it (never a direct fontScaleHint binding).
+      fontScaleAnnouncement: "",
       route: location.hash || "#/catalogue",
       busy: false,
 
@@ -204,6 +208,10 @@ Vue.createApp({
       // request, so the list is durable at every instant — the foundation
       // the badge account-switch flow relies on.
       cart: { lines: [], total_qty: 0, total_cents: 0 },
+      // C3: true while the final purchase button is held. The fill is a CSS
+      // variable painted per rAF frame; this flag only drives the data-holding
+      // marker/pulse, so it re-renders twice per gesture, not every frame.
+      holdActive: false,
       detailItem: null,
       similar: [],
 
@@ -564,6 +572,12 @@ Vue.createApp({
     fontScale(next) {
       HcrmInteraction.applyScale(next);
       HcrmInteraction.writeScale(localStorage, next);
+      // C2 accessibility: report the new percentage once per change through
+      // the same CSV row the buttons' title uses. Assigning the dedicated
+      // string (not a live binding of fontScaleHint) is what keeps a first
+      // paint — including a stored 120 % boot — silent.
+      this.fontScaleAnnouncement = this.t("ui.font_scale_hint",
+        { percent: Math.round(next * 100) });
     },
     search() {
       this.debouncedReload();
@@ -965,19 +979,21 @@ Vue.createApp({
     },
 
     async revokeMyBadge() {
-      if (!confirm(this.t("account.revoke_confirm"))) return;
-      try {
-        await api("/auth/qr-badge", { method: "DELETE" });
-        this.badgeSvg = "";
-        this.badgePayload = "";
-        if (this.user) {
-          this.user.has_qr_badge = false;
-          localStorage.setItem(USER_KEY, JSON.stringify(this.user));
+      return this._guard.guarded("account:badge:revoke", async () => {
+        if (!confirm(this.t("account.revoke_confirm"))) return;
+        try {
+          await api("/auth/qr-badge", { method: "DELETE" });
+          this.badgeSvg = "";
+          this.badgePayload = "";
+          if (this.user) {
+            this.user.has_qr_badge = false;
+            localStorage.setItem(USER_KEY, JSON.stringify(this.user));
+          }
+          this.showToast({ key: "account.badge_revoked" });
+        } catch (e) {
+          this.showToast(this.errDescriptor(e));
         }
-        this.showToast({ key: "account.badge_revoked" });
-      } catch (e) {
-        this.showToast(this.errDescriptor(e));
-      }
+      });
     },
 
     /* ---------- catalogue ---------- */
@@ -1158,7 +1174,7 @@ Vue.createApp({
     },
 
     addToPurchase(item) {
-      return this._cartOp(async () => {
+      return this._guard.guarded("cart:add:" + item.id, () => this._cartOp(async () => {
         this.cart = await api("/cart/items", {
           method: "POST", body: { item_id: item.id, qty: 1 },
         });
@@ -1166,18 +1182,18 @@ Vue.createApp({
         this._stockWarn(line);
         this.showToast({ key: "cart.added", vars: { name: item.name } });
         this.closeDetail();
-      });
+      }));
     },
     incPurchase(id) {
-      return this._cartOp(async () => {
+      return this._guard.guarded("cart:inc:" + id, () => this._cartOp(async () => {
         this.cart = await api("/cart/items", {
           method: "POST", body: { item_id: id, qty: 1 },
         });
         this._stockWarn(this.cart.lines.find(l => l.item.id === id));
-      });
+      }));
     },
     decPurchase(id) {
-      return this._cartOp(async () => {
+      return this._guard.guarded("cart:dec:" + id, () => this._cartOp(async () => {
         const line = this.cart.lines.find(l => l.item.id === id);
         if (!line) return;
         if (line.qty <= 1) {
@@ -1187,17 +1203,17 @@ Vue.createApp({
             method: "PATCH", body: { qty: line.qty - 1 },
           });
         }
-      });
+      }));
     },
     removeFromPurchase(id) {
-      return this._cartOp(async () => {
+      return this._guard.guarded("cart:remove:" + id, () => this._cartOp(async () => {
         this.cart = await api("/cart/items/" + id, { method: "DELETE" });
-      });
+      }));
     },
     clearPurchase() {
-      return this._cartOp(async () => {
+      return this._guard.guarded("cart:clear", () => this._cartOp(async () => {
         this.cart = await api("/cart", { method: "DELETE" });
-      });
+      }));
     },
     /* ---------- Task D: checkout + profile tab ---------- */
 
@@ -1392,10 +1408,12 @@ Vue.createApp({
      * _cartOp mutation, exactly as durable as in the sidebar. */
 
     goToCheckout() {
-      // Both assignments in one synchronous turn so the hashchange handler's
-      // `navigated` guard stays false and does not fire _closeOverlays.
-      this.route = "#/checkout";
-      location.hash = "#/checkout";
+      return this._guard.guarded("checkout:go", () => {
+        // Both assignments in one synchronous turn so the hashchange handler's
+        // `navigated` guard stays false and does not fire _closeOverlays.
+        this.route = "#/checkout";
+        location.hash = "#/checkout";
+      });
     },
 
     keepShopping() {
@@ -1410,7 +1428,10 @@ Vue.createApp({
       // or a rejected edit reverts the field to the server truth.
       const el = ev && ev.target;
       const raw = el ? el.value : ev;
-      return this._cartOp(async () => {
+      // C3: keyed by the value as well as the line, so a rapid CORRECTION
+      // (2 then 3 within 600 ms) is a different activation and is never
+      // swallowed; only a duplicate change event for the same value is.
+      return this._guard.guarded("cart:qty:" + id + ":" + raw, () => this._cartOp(async () => {
         const n = parseInt(raw, 10);
         if (!Number.isFinite(n) || !Number.isInteger(Number(raw)) || n < 0) {
           this.showToast({ key: "cart.qty_invalid" });
@@ -1431,10 +1452,88 @@ Vue.createApp({
         // qty as displayed would keep the typed garbage visible.
         const line = this.cart.lines.find(l => l.item.id === id);
         if (el && el.isConnected && line) el.value = line.qty;
-      });
+      }));
+    },
+
+    /* ---------- C3: hold-to-confirm on the final purchase button ----------
+     * The state machine lives in interaction.js; this is the DOM adapter.
+     * Pointer: down starts, up releases (fires only once the 700 ms threshold
+     * has passed), leaving the button cancels. Keyboard: HOLDING Enter/Space
+     * does the same (keyup releases, Escape cancels, auto-repeat is ignored).
+     * The visible bar is the --hold CSS variable written per rAF frame, so the
+     * progress costs no Vue re-render; holdActive toggles only the pulse. */
+    beginPurchaseHold(ev) {
+      // Primary button / primary touch only: a right-click or a second finger
+      // must not start a money-committing run.
+      if (ev && ev.button !== undefined && ev.button !== 0) return;
+      if (ev && ev.isPrimary === false) return;
+      this._holdEl = ev && ev.currentTarget ? ev.currentTarget : null;
+      if (!this._hold || !this._hold.start("pointer")) return;
+      this._bindHoldListeners(true);
+    },
+    endPurchaseHold(reason) {
+      if (!this._hold) return;
+      // A source mismatch (a pointerup during a keyboard hold) is ignored by
+      // the machine, so do NOT tear down its listeners or key in that case.
+      if (this._hold.release("pointer", reason)) {
+        this._holdKey = null;
+        if (!this._hold.active()) this._bindHoldListeners(false);
+      }
+    },
+    purchaseHoldKeydown(ev) {
+      const key = ev && ev.key;
+      if (key !== "Enter" && key !== " " && key !== "Spacebar") return;
+      // Space would scroll and Enter/Space would synthesise a click on keyup.
+      // The hold IS the activation, so both defaults must be suppressed.
+      ev.preventDefault();
+      if (ev.repeat) return;         // auto-repeat must not restart or fire
+      this._holdEl = ev.currentTarget;
+      if (!this._hold || !this._hold.start("key")) return;
+      this._holdKey = key;
+      this._bindHoldListeners(true);
+    },
+    purchaseHoldKeyup(ev) {
+      const key = ev && ev.key;
+      if (key !== "Enter" && key !== " " && key !== "Spacebar") return;
+      if (this._holdKey && key !== this._holdKey) return;
+      ev.preventDefault();
+      if (this._hold.release("key", "keyup")) {
+        this._holdKey = null;
+        if (!this._hold.active()) this._bindHoldListeners(false);
+      }
+    },
+    cancelPurchaseHold(reason) {
+      if (!this._hold) return;
+      this._hold.cancel(reason);
+      this._holdKey = null;
+      this._bindHoldListeners(false);
+    },
+    _bindHoldListeners(on) {
+      if (on === this._holdListenersOn) return;
+      this._holdListenersOn = on;
+      const method = on ? "addEventListener" : "removeEventListener";
+      document[method]("pointerup", this._onHoldPointerUp, true);
+      document[method]("keydown", this._onHoldEscape, true);
+      // keyup is document-level too: after the action fires the button may
+      // already be gone (the route moves to purchases), and the machine must
+      // still see the release and leave its latched phase.
+      document[method]("keyup", this._onHoldKeyUp, true);
+      window[method]("blur", this._onHoldBlur);
+    },
+    _paintHold(value) {
+      const el = this._holdEl;
+      if (!el || !el.style || typeof el.style.setProperty !== "function") return;
+      el.style.setProperty("--hold", String(value));
     },
 
     async donePurchase() {
+      // C3: the hold is the UI gate; this guard is the independent double-tap
+      // layer (600 ms, keyed). A hold cannot fire twice by construction, but a
+      // programmatic/second path cannot slip in either.
+      return this._guard.guarded("purchase:confirm", () => this._donePurchase());
+    },
+
+    async _donePurchase() {
       if (this.busy) return;
       if (!this.purchase.length) { this.showToast({ key: "cart.empty_toast" }); return; }
       this.busy = true;   // also drives the button's :disabled binding —
@@ -2167,8 +2266,10 @@ Vue.createApp({
     },
 
     discardStagedScans() {
-      this.stagedScans = [];
-      this.persistStagedScans();
+      this._guard.guarded("scan:discard", () => {
+        this.stagedScans = [];
+        this.persistStagedScans();
+      });
     },
 
     async replayStagedScans() {
@@ -2631,15 +2732,17 @@ Vue.createApp({
     },
 
     async dismissRequest(req) {
-      if (!confirm(this.t("admin.request_dismiss_confirm",
-        { name: req.requester.name, item: req.name }))) return;
-      try {
-        await api(`/scan-requests/${req.id}/dismiss`, { method: "POST" });
-        this.showToast({ key: "admin.request_dismissed" });
-        this.loadScanRequests();
-      } catch (e) {
-        this.showToast(this.errDescriptor(e));
-      }
+      return this._guard.guarded("request:dismiss:" + req.id, async () => {
+        if (!confirm(this.t("admin.request_dismiss_confirm",
+          { name: req.requester.name, item: req.name }))) return;
+        try {
+          await api(`/scan-requests/${req.id}/dismiss`, { method: "POST" });
+          this.showToast({ key: "admin.request_dismissed" });
+          this.loadScanRequests();
+        } catch (e) {
+          this.showToast(this.errDescriptor(e));
+        }
+      });
     },
 
     /* ---------- account: "My scan requests" ---------- */
@@ -2702,15 +2805,17 @@ Vue.createApp({
     },
 
     async deleteItem(item) {
-      if (!confirm(this.t("admin.item_delete_confirm", { name: item.name }))) return;
-      try {
-        await api("/items/" + item.id, { method: "DELETE" });
-        this.showToast({ key: "admin.item_deleted" });
-        this.loadAdminData();
-        if (this.currentView === "table") this.loadDataPage();
-      } catch (e) {
-        this.showToast(this.errDescriptor(e));
-      }
+      return this._guard.guarded("item:delete:" + item.id, async () => {
+        if (!confirm(this.t("admin.item_delete_confirm", { name: item.name }))) return;
+        try {
+          await api("/items/" + item.id, { method: "DELETE" });
+          this.showToast({ key: "admin.item_deleted" });
+          this.loadAdminData();
+          if (this.currentView === "table") this.loadDataPage();
+        } catch (e) {
+          this.showToast(this.errDescriptor(e));
+        }
+      });
     },
 
     /* ---------- admin: members ---------- */
@@ -2742,14 +2847,16 @@ Vue.createApp({
     },
 
     async deleteMember(member) {
-      if (!confirm(this.t("admin.member_delete_confirm", { name: member.name }))) return;
-      try {
-        await api("/members/" + member.id, { method: "DELETE" });
-        this.showToast({ key: "admin.member_deleted" });
-        this.loadAdminData();
-      } catch (e) {
-        this.showToast(this.errDescriptor(e));
-      }
+      return this._guard.guarded("member:delete:" + member.id, async () => {
+        if (!confirm(this.t("admin.member_delete_confirm", { name: member.name }))) return;
+        try {
+          await api("/members/" + member.id, { method: "DELETE" });
+          this.showToast({ key: "admin.member_deleted" });
+          this.loadAdminData();
+        } catch (e) {
+          this.showToast(this.errDescriptor(e));
+        }
+      });
     },
 
     async showMemberBadge(member) {
@@ -2766,15 +2873,17 @@ Vue.createApp({
     },
 
     async revokeMemberBadge(member) {
-      if (!confirm(this.t("admin.badge_revoke_confirm", { name: member.name }))) return;
-      try {
-        await api("/members/" + member.id + "/qr-badge", { method: "DELETE" });
-        this.showToast({ key: "admin.badge_revoked_for", vars: { name: member.name } });
-        if (this.memberBadge && this.memberBadge.id === member.id) this.memberBadge = null;
-        this.loadAdminData();
-      } catch (e) {
-        this.showToast(this.errDescriptor(e));
-      }
+      return this._guard.guarded("member:badge:revoke:" + member.id, async () => {
+        if (!confirm(this.t("admin.badge_revoke_confirm", { name: member.name }))) return;
+        try {
+          await api("/members/" + member.id + "/qr-badge", { method: "DELETE" });
+          this.showToast({ key: "admin.badge_revoked_for", vars: { name: member.name } });
+          if (this.memberBadge && this.memberBadge.id === member.id) this.memberBadge = null;
+          this.loadAdminData();
+        } catch (e) {
+          this.showToast(this.errDescriptor(e));
+        }
+      });
     },
 
     openPwReset(member) {
@@ -2809,6 +2918,39 @@ Vue.createApp({
         this.pwResetError = this.errDescriptor(e);
       }
     },
+  },
+
+  created() {
+    // C3: the keyed double-tap guard (600 ms). ONE instance per app: keys are
+    // action-scoped strings (cart:add:<id>, item:delete:<id>, …), so two
+    // different actions never cross-block.
+    this._guard = HcrmInteraction.createGuard();
+
+    // C3: the hold-to-confirm machine for the final purchase button. This
+    // hook only wires callbacks — the 700 ms run, exactly-once fire and cancel
+    // decisions live in interaction.js (node-tested). The adapter
+    // (beginPurchaseHold & friends) owns pointer/keyboard events and paints
+    // --hold from the machine's progress callback.
+    this._holdEl = null;
+    this._holdKey = null;
+    this._holdListenersOn = false;
+    this._hold = HcrmInteraction.createHold({
+      duration: HcrmInteraction.HOLD_MS,
+      onProgress: (value) => this._paintHold(value),
+      onState: (phase) => { this.holdActive = phase !== "idle"; },
+      onFire: () => this.donePurchase(),
+      onCancel: () => this.showToast({ key: "checkout.hold_hint" }),
+    });
+
+    // A release can land outside the button (or the tab can lose focus):
+    // document/window listeners are the safety net for an in-flight run. They
+    // are bound only while the machine is active, and removed when it ends.
+    this._onHoldPointerUp = () => this.endPurchaseHold("pointerup");
+    this._onHoldKeyUp = (ev) => this.purchaseHoldKeyup(ev);
+    this._onHoldBlur = () => this.cancelPurchaseHold("blur");
+    this._onHoldEscape = (ev) => {
+      if (ev.key === "Escape") this.cancelPurchaseHold("escape");
+    };
   },
 
   mounted() {

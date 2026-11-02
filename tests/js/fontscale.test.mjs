@@ -230,7 +230,7 @@ test("the SHIPPED end guards disable exactly at the stops", () => {
   assert.equal(state(1.35).canShrinkFont(), true);
 });
 
-test("the SHIPPED watcher applies then persists, and applies even when storage throws", (t) => {
+test("the SHIPPED watcher applies, persists, announces, and survives a blocked store", (t) => {
   const watcher = new Function(
     "HcrmInteraction",
     `"use strict"; return ({\n${extractMethod("fontScale(next) {")}\n}).fontScale;`,
@@ -249,20 +249,33 @@ test("the SHIPPED watcher applies then persists, and applies even when storage t
   const doc = fakeDocument();
   globalThis.localStorage = store;
   globalThis.document = doc;
+  const vm = {
+    lang: "en",
+    fontScaleAnnouncement: "",
+    t(id, vars) { return HcrmI18n.translate(id, vars, this.lang); },
+  };
+  assert.equal(vm.fontScaleAnnouncement, "",
+    "a first paint (the watcher never ran) announces nothing");
 
-  watcher.call({}, 1.2);
+  watcher.call(vm, 1.2);
   assert.equal(doc.documentElement.style.fontSize, "19.2px", "apply happens first");
   assert.deepEqual(store.writes, [[FONT_SCALE_KEY, "1.2"]], "then the write");
+  assert.equal(vm.fontScaleAnnouncement, "Text size: 120%",
+    "the live region gets the new percentage through ui.font_scale_hint");
 
-  watcher.call({}, 0.9);
+  watcher.call(vm, 0.9);
   assert.equal(doc.documentElement.style.fontSize, "14.4px");
   assert.deepEqual(store.writes.at(-1), [FONT_SCALE_KEY, "0.9"]);
+  assert.equal(vm.fontScaleAnnouncement, "Text size: 90%");
 
   // A blocked store must not cost the user the size they just chose.
   globalThis.localStorage = throwingStore;
-  watcher.call({}, 1.35);
+  vm.lang = "da";
+  watcher.call(vm, 1.35);
   assert.equal(doc.documentElement.style.fontSize, "21.6px",
     "the session still scales on a storage-blocked kiosk");
+  assert.equal(vm.fontScaleAnnouncement, "Tekststørrelse: 135 %",
+    "the announcement follows the UI language and the Danish percent spacing");
 });
 
 test("the SHIPPED hint renders the live percentage in both languages", () => {

@@ -9,6 +9,11 @@ see cheaply:
   the language toggle and before the scanner pill (whose popover anchors
   right), with no literal text node — the glyph is inline SVG, and every word
   (accessible name, percentage title) is a CSV binding;
+* the stepper is sized in REM (1.8rem => 24.48 px at the 85 % floor, above the
+  WCAG 2.5.8 24 px target) so the control grows with the text scale it controls;
+* every percentage change is announced once through a persistent `sr-only`
+  polite live region bound to `ui.font_scale_hint`, while a first paint (and a
+  stored scale at boot) stays silent;
 * the stored scale is applied to the ROOT element BEFORE mount, with no write
   on that path (a first visit stays unwritten);
 * the `fontScale` watcher is registered as a watcher, applies before it
@@ -133,10 +138,10 @@ def test_markup_is_two_native_buttons_beside_the_language_toggle():
 def test_css_block_keeps_the_cluster_geometry():
     css = _read(STYLE_CSS)
     wrapper = _braced_block(css, ".font-scale {")
-    for pin in ("display: inline-flex", "gap: 2px", "flex: 0 0 auto"):
+    for pin in ("display: inline-flex", "gap: .125rem", "flex: 0 0 auto"):
         assert pin in wrapper, f".font-scale CSS lost {pin!r}"
     step = _braced_block(css, ".font-step {")
-    for pin in ("width: 28px", "height: 28px", "flex: 0 0 auto", "padding: 0",
+    for pin in ("width: 1.8rem", "height: 1.8rem", "flex: 0 0 auto", "padding: 0",
                 "border: 1px solid var(--border)"):
         assert pin in step, f".font-step CSS lost {pin!r}"
     disabled = _braced_block(css, ".font-step:disabled {")
@@ -144,10 +149,48 @@ def test_css_block_keeps_the_cluster_geometry():
     assert "opacity:" in disabled
     focus = _braced_block(css, ".font-step:focus-visible {")
     assert "outline: 2px solid var(--accent)" in focus
-    assert "width: 20px" in _braced_block(css, ".font-step svg {")
+    svg = _braced_block(css, ".font-step svg {")
+    assert "width: 1.25rem" in svg and "height: 1rem" in svg
     # The 900px reflow is grid-only; it must not squeeze or hide the stepper.
     media = _braced_block(css, "@media (max-width: 900px)")
     assert "font-scale" not in media and "font-step" not in media
+
+
+def test_the_stepper_scales_in_rem_and_keeps_the_24px_target_at_85_percent():
+    css = _read(STYLE_CSS)
+    step = _braced_block(css, ".font-step {")
+    width = re.search(r"width:\s*([0-9.]+)rem;", step)
+    height = re.search(r"height:\s*([0-9.]+)rem;", step)
+    assert width and height, (
+        "the stepper box must be sized in rem so it grows with the text scale")
+    assert width.group(1) == height.group(1), "the target must stay square"
+    px_at_85 = float(width.group(1)) * 16 * 0.85   # root px at the 85% stop
+    assert px_at_85 >= 24, (
+        f"the 85% target is {px_at_85:.2f}px — WCAG 2.5.8 needs >= 24px")
+    # The glyph scales with the button, not against it.
+    svg = _braced_block(css, ".font-step svg {")
+    assert "px" not in svg, "the SVG must be sized in rem too"
+
+
+def test_the_percentage_change_is_announced_without_first_paint_noise():
+    html = _read(INDEX_HTML)
+    region = ('<div class="sr-only" role="status" aria-live="polite">'
+              '{{ fontScaleAnnouncement }}</div>')
+    assert region in html, (
+        "the font-size result must have a persistent polite live region")
+    assert "{{ fontScaleHint }}" not in html, (
+        "the region must bind the change-only string, not the hint itself")
+    js = _read(APP_JS)
+    assert 'fontScaleAnnouncement: "",' in js, (
+        "the announcement starts empty: a first paint must stay silent")
+    watcher = _method_body(js, "fontScale(next) {")
+    assert 'this.fontScaleAnnouncement = this.t("ui.font_scale_hint",' in watcher
+    assert "{ percent: Math.round(next * 100) });" in watcher
+    assert js.count("this.fontScaleAnnouncement =") == 1, (
+        "only the watcher may write the announcement")
+    boot = js[js.index("const bootFontScale"):js.index("Vue.createApp({")]
+    assert "fontScaleAnnouncement" not in boot, (
+        "a stored scale at boot must not announce anything")
 
 
 def test_boot_applies_the_stored_scale_before_mount_and_never_writes():

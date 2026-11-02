@@ -182,6 +182,7 @@ checkout.complete,Complete purchase,Gennemfør køb
 checkout.done,Done — complete purchase,Færdig — gennemfør køb
 checkout.empty,Your purchase list is empty — add items from the catalogue or by scanning them.,"Din indkøbsliste er tom — tilføj varer fra kataloget, eller scan dem."
 checkout.failed,Checkout failed ({status}),Købet kunne ikke gennemføres ({status})
+checkout.hold_hint,Hold the button to complete the purchase (about one second).,Hold knappen nede for at gennemføre købet (cirka et sekund).
 checkout.keep_shopping,Keep shopping,Fortsæt med at handle
 checkout.order_number,Order #{order},Ordre #{order}
 checkout.purchase_complete,Purchase complete — {total},Køb gennemført — {total}
