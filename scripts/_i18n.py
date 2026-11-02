@@ -154,7 +154,7 @@ def validate(rows: list[Row]) -> list[str]:
     for row in rows:
         rid = row.id
         if not ID_RE.match(rid):
-            add(row.line, f"invalid id '{rid}' (lowercase, dot-separated, e.g. 'common.greeting')")
+            add(row.line, f"invalid id '{rid}' (lowercase, dot-separated, e.g. 'auth.greeting')")
         if rid in seen:
             add(row.line, f"duplicate id '{rid}' (first seen on line {seen[rid]})")
         else:

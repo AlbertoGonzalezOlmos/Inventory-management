@@ -25,6 +25,22 @@ _OLD = "E" + "UR"            # the old three-letter currency code
 _MANGLED_ZERO = "DKK" + "0.00"
 
 
+def _load_i18n():
+    """The copy loader, imported by path (tests/test_i18n_csv.py's idiom)."""
+    import importlib.util
+    import sys
+
+    scripts = str(REPO_ROOT / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    spec = importlib.util.spec_from_file_location(
+        "_i18n_under_test", REPO_ROOT / "scripts" / "_i18n.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module   # dataclasses resolves cls.__module__ here
+    spec.loader.exec_module(module)
+    return module
+
+
 def _read(name: str) -> str:
     return (STATIC / name).read_text(encoding="utf-8")
 
@@ -212,7 +228,7 @@ def test_pdf_export_declares_the_currency_conditionally():
     assert 'cols.some((c) => c.key === "price_cents")' in body, (
         "the hasPrice probe is what keeps a stock-only export from "
         "claiming a currency it does not show")
-    assert 'doc.text("Prices in DKK", 14, 28)' in body
+    assert 'doc.text(this.t("export.pdf_prices"), 14, 28)' in body
     assert "startY: hasPrice ? 33 : 27" in body, (
         "the table must move down only when the currency note is printed — "
         "a no-price export keeps today's layout")
@@ -220,17 +236,28 @@ def test_pdf_export_declares_the_currency_conditionally():
         "PDF body cells must route through exportPdfValue")
     assert "String(this.exportValue(r, c.key))" not in body, (
         "the PDF body must not fall back to the raw CSV values")
-    # jsPDF's standard fonts are WinAnsi (CP1252): every literal doc.text()
-    # prints must encode there, or the PDF shows garbage escape sequences
-    # (the em dash is 0x97 in CP1252 and is fine; e.g. U+2713 would not be).
-    for literal in re.findall(r'doc\.text\(\s*"((?:[^"\\]|\\.)*)"', body):
-        literal.encode("cp1252")
+    # Slice E: no doc.text() argument is a literal any more — the title, the
+    # summary and the currency note are CSV rows. jsPDF's standard fonts are
+    # WinAnsi (CP1252), so every row that can be PRINTED must encode there
+    # (the em dash is 0x97 and × is 0xD7; the analysis panel's σ is HTML-only).
+    assert not re.findall(r'doc\.text\(\s*"', body), (
+        "doc.text() must take a t()/CSV string, never a hardcoded literal")
+    i18n = _load_i18n()
+    rows, problems = i18n.read_rows()
+    assert problems == []
+    by_id = {row.id: row for row in rows}
+    for rid in ("export.pdf_title", "export.pdf_prices", "export.summary"):
+        for lang in i18n.LANGUAGES:
+            by_id[rid].cell(lang).encode("cp1252")
 
 
 def test_price_column_label_states_the_currency():
-    """One label feeds the table header, the picker, the CSV and PDF heads."""
-    assert '{ key: "price_cents", label: "Price (DKK)" }' in _read("app.js")
-    assert '{ key: "price_cents", label: "Price" }' not in _read("app.js")
+    """One label feeds the table header, the picker, the CSV and PDF heads —
+    and since slice E that label is the `common.price_dkk` row, not a literal."""
+    app = _read("app.js")
+    assert '{ key: "price_cents", labelKey: "common.price_dkk" }' in app
+    assert '{ key: "price_cents", label: ' not in app, (
+        "the money column's label must come from the CSV, not a literal")
 
 
 def test_ba09ca7_doc_hunks_are_repaired():
@@ -269,10 +296,12 @@ _TEMPLATE_MONEY_IDENT = re.compile(
     r"\bpurchaseTotalCents\b|\bcalTotalCents\b|\binventoryValueCents\b|"
     r"\bpriceMean\b|\bpriceMedian\b|\bpriceMin\b|\bpriceMax\b|\bpriceStd\b)")
 
-#: Reviewed count of money-rendering bindings in static/index.html: 27 lines,
-#: index.html:598 carries two. Bumping it is a deliberate, reviewed edit (item
-#: 5 re-points these bindings at CSV keys and updates this number).
-_TEMPLATE_MONEY_BINDINGS = 28
+#: Reviewed count of money-rendering bindings in static/index.html. Slice C
+#: moved the calendar day-dot tooltip's price into calendarDayTitle() in
+#: app.js (it still calls formatPrice), so the template count dropped 28 -> 27.
+#: Bumping it is a deliberate, reviewed edit (item 5 re-points these bindings
+#: at CSV keys and updates this number).
+_TEMPLATE_MONEY_BINDINGS = 27
 
 #: Words that make an interpolation money-bearing for the scaling check.
 _MONEY_WORD = re.compile(r"cent|price|total|amount", re.I)
@@ -329,11 +358,11 @@ def test_template_renders_every_amount_through_format_price():
         f"{_TEMPLATE_MONEY_BINDINGS}: a new price surface is a reviewed change "
         "(and it must call formatPrice)")
 
-    # A currency code may appear only as the two field labels ba09ca7
-    # introduced ("Price (DKK)"; item 5 turns them into CSV keys). A rendered
-    # amount takes its code from the formatter, never from the template.
-    assert html.count("DKK") == 2, (
-        "the only DKK literals allowed in the template are the two "
-        "`Price (DKK)` field labels")
+    # A currency code never appears in the template: the two "Price (DKK)"
+    # field labels ba09ca7 introduced are CSV rows now (common.price_dkk,
+    # slice D), and a rendered amount takes its code from the formatter.
+    assert html.count("DKK") == 0, (
+        "no DKK literal in the template — the label comes from common.price_dkk "
+        "and the amount's code from formatPrice")
     assert _SIGN not in html and "kr." not in html, (
         "no hand-written currency symbol in the template")

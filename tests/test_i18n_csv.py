@@ -72,18 +72,24 @@ def test_committed_csv_is_canonical():
     assert raw == i18n.canonical_csv_bytes(rows), "canonical form (minimal quoting)"
 
 
-def test_seed_rows_are_the_plumbing_set():
+SEED_IDS = (
+    "app.title",
+    "catalogue.search_placeholder",
+    "common.item_count.one",
+    "common.item_count.other",
+    "lang.switch_to",
+    "money.code",
+)
+
+
+def test_seed_rows_are_still_present():
+    """The item-2/3 seed rows survive every migration slice (a SUBSET pin now —
+    the slices legitimately add rows, but a seed cannot be renamed or dropped
+    without this going red)."""
     rows, _ = i18n.read_rows(CSV_PATH)
-    assert [row.id for row in rows] == [
-        "app.title",
-        "catalogue.search_placeholder",
-        "common.greeting",
-        "common.item_count.one",
-        "common.item_count.other",
-        "lang.switch_to",
-        "money.code",
-    ]
     by_id = {row.id: row for row in rows}
+    for rid in SEED_IDS:
+        assert rid in by_id, f"seed row {rid!r} disappeared"
     assert by_id["money.code"].en == by_id["money.code"].da == "DKK"
     assert OLD_SYMBOL not in "".join(row.en + row.da for row in rows)
 
@@ -97,6 +103,31 @@ def test_en_title_is_byte_identical_to_todays_static_title():
     rows, _ = i18n.read_rows(CSV_PATH)
     by_id = {row.id: row for row in rows}
     assert by_id["app.title"].en == "HCRM — Shop Catalogue"
+
+
+def test_repair_hint_fragments_rebuild_the_sentence_in_both_languages():
+    """The two-key exception, pinned as COPY: joining each language's
+    fragments around the command must rebuild the original one-sentence
+    hint. This is the half the `<code>` pin cannot see — the markup could
+    keep the element while a translation drifts — and it keeps both rows
+    placeholder-free (the `<code>` element, not a {command} token, carries
+    the machine text)."""
+    rows, _ = i18n.read_rows(CSV_PATH)
+    by_id = {row.id: row for row in rows}
+    command = "scanner_daemon.py --register"
+    for lang, expected in (
+        ("en", "To re-pair: DELETE the terminal (staff or loopback), re-run "
+               f"{command}, then click the pill."),
+        ("da", "For at parre igen: SLET terminalen (personale eller loopback), kør igen "
+               f"{command}, og klik derefter på statusknappen."),
+    ):
+        for rid in ("scanner.repair_prefix", "scanner.repair_suffix"):
+            assert i18n.placeholders(by_id[rid].cell(lang)) == [], (
+                f"{rid} must stay placeholder-free — the command is <code>, "
+                "never a {command} token")
+        rebuilt = (by_id["scanner.repair_prefix"].cell(lang) + " " + command
+                   + by_id["scanner.repair_suffix"].cell(lang))
+        assert rebuilt == expected, f"{lang} fragments drifted: {rebuilt!r}"
 
 
 def test_loader_tolerates_bom_less_and_crlf_input(tmp_path):
@@ -128,10 +159,9 @@ def test_unreadable_file_is_rejected(tmp_path):
     assert problems and problems[0].startswith("i18n/strings.csv: cannot read: ")
 
 
-# test_no_ui_migration_has_started was DELETED in item 3 (acceptance note):
-# the language toggle legitimately binds t('lang.switch_to') in the template.
-# Its replacement — the ratchet that exactly ONE binding exists at this stage —
-# lives in tests/test_lang_toggle.py::test_only_the_toggle_binds_t_yet.
+# test_no_ui_migration_has_started was DELETED in item 3 (acceptance note). Its
+# one-stage replacement (an "exactly one binding" ratchet) was deleted by item 5's
+# slice A; the migration slices are exactly the edits it would have forbidden.
 
 
 # --- validator rules (one case per rule) ------------------------------------
@@ -173,7 +203,7 @@ def test_invalid_id(tmp_path):
     problems = _problems(tmp_path, "App.Title,A,B\n" + MONEY)
     assert problems == [
         "i18n/strings.csv:2: invalid id 'App.Title' "
-        "(lowercase, dot-separated, e.g. 'common.greeting')"]
+        "(lowercase, dot-separated, e.g. 'auth.greeting')"]
 
 
 def test_duplicate_id_names_the_first_line(tmp_path):
@@ -356,3 +386,62 @@ def test_canonical_bytes_reproduce_the_committed_file():
     rows, _ = i18n.read_rows(CSV_PATH)
     assert i18n.canonical_csv_bytes(rows) == open(CSV_PATH, "rb").read()
     assert len(i18n.sha256_of(i18n.canonical_csv_bytes(rows))) == 64
+
+
+def test_no_plural_suffix_idiom_anywhere_in_the_copy():
+    """The glossary forbids '(s)' suffixes: a count is a .one/.other pair.
+
+    Pinned over the whole CSV because the idiom is a copy rule, not a view
+    rule — slice B removed the receipt's last two ('item(s)' line count,
+    'scanned item(s)') and a new row must not smuggle it back.
+    """
+    rows, _ = i18n.read_rows(CSV_PATH)
+    offenders = [f"{row.id} ({lang})" for row in rows for lang in i18n.LANGUAGES
+                 if "(s)" in row.cell(lang)]
+    assert offenders == [], f"'(s)' idiom found in: {offenders}"
+
+
+def test_money_column_header_states_the_currency():
+    """Item-1 decision 4: a money COLUMN HEADER names the currency in both
+    languages; a form-field label uses the plain `common.price` row.
+
+    `common.price_dkk` is the header row; keeping it separate is what lets
+    slice E's form labels bind `common.price` ('Pris') without silently
+    changing the header's meaning.
+    """
+    rows, _ = i18n.read_rows(CSV_PATH)
+    by_id = {row.id: row for row in rows}
+    assert by_id["common.price_dkk"].en == "Price (DKK)"
+    assert by_id["common.price_dkk"].da == "Pris (DKK)"
+    assert by_id["common.price"].en == "Price"
+    assert by_id["common.price"].da == "Pris"
+
+
+def test_calendar_date_labels_are_csv_rows_and_compact_in_danish():
+    """Slice C: the calendar's weekday and month labels are CSV rows, not Intl
+    output. The Danish cells are the glossary shorts so the 7-column header
+    (and the month title) stay compact; the English month cells keep the long
+    names the UI shipped with, so the English render is unchanged."""
+    rows, _ = i18n.read_rows(CSV_PATH)
+    by_id = {row.id: row for row in rows}
+    ordered = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    assert [by_id[f"date.dow.{key}"].en for key in ordered] == [
+        "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    assert [by_id[f"date.dow.{key}"].da for key in ordered] == [
+        "ma", "ti", "on", "to", "fr", "lø", "sø"]
+    assert all(len(by_id[f"date.dow.{key}"].da) <= 2 for key in ordered), \
+        "the Danish weekday labels must fit the 7-column grid"
+    assert sorted(rid for rid in by_id if rid.startswith("date.month.")) == \
+        sorted(f"date.month.{n}" for n in range(1, 13))
+    for n in range(1, 13):
+        assert len(by_id[f"date.month.{n}"].da) <= 3, "Danish month labels stay short"
+    assert by_id["date.month.3"].en == "March"
+    assert by_id["date.month.3"].da == "mar"
+    # Prose month names: the sentence form ("Brugt i marts 2026"), never a
+    # grid short. English keeps the long names the UI shipped with.
+    assert [by_id[f"date.month_long.{n}"].en for n in range(1, 13)] == [
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December"]
+    assert [by_id[f"date.month_long.{n}"].da for n in range(1, 13)] == [
+        "januar", "februar", "marts", "april", "maj", "juni", "juli",
+        "august", "september", "oktober", "november", "december"]

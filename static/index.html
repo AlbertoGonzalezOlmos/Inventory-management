@@ -40,14 +40,14 @@
 
   <!-- ================= Header / navigation ================= -->
   <header class="topbar">
-    <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">HCRM <span>Shop</span></a>
+    <a class="brand" href="#/catalogue" @click="route = '#/catalogue'">HCRM <span>{{ t('app.brand_shop') }}</span></a>
 
     <nav v-if="user" class="nav">
-      <a href="#/catalogue" :class="{active: currentView === 'catalogue' || currentView === 'checkout'}">Catalogue</a>
-      <a v-if="isStaff" href="#/table" :class="{active: currentView === 'table'}">Table</a>
-      <a v-if="isStaff" href="#/admin" :class="{active: currentView === 'admin'}">Admin</a>
-      <a href="#/account" :class="{active: currentView === 'account'}">My profile</a>
-      <a href="#/purchases" :class="{active: currentView === 'purchases'}">Purchase history</a>
+      <a href="#/catalogue" :class="{active: currentView === 'catalogue' || currentView === 'checkout'}">{{ t('nav.catalogue') }}</a>
+      <a v-if="isStaff" href="#/table" :class="{active: currentView === 'table'}">{{ t('nav.table') }}</a>
+      <a v-if="isStaff" href="#/admin" :class="{active: currentView === 'admin'}">{{ t('nav.admin') }}</a>
+      <a href="#/account" :class="{active: currentView === 'account'}">{{ t('nav.profile') }}</a>
+      <a href="#/purchases" :class="{active: currentView === 'purchases'}">{{ t('nav.purchases') }}</a>
     </nav>
 
     <div class="userbox">
@@ -84,12 +84,8 @@
               @click="onPillClick"
               :aria-expanded="scannerFeed === 'unpaired' ? null : (pairOpen ? 'true' : 'false')"
               :aria-haspopup="scannerFeed === 'unpaired' ? null : 'dialog'"
-              :title="scannerFeed === 'live'
-                ? 'Scans arrive via the grab daemon (no window focus needed) — click to manage the pairing'
-                : scannerFeed === 'off'
-                  ? 'Paired, but the server is unreachable — retrying — click to manage the pairing'
-                  : 'Not paired — click to pair this kiosk from the pairing file the daemon wrote'">
-        {{ scannerFeed === 'live' ? 'scanner' : scannerFeed === 'off' ? 'scanner offline' : 'no scanner' }}
+              :title="scannerTitle">
+        {{ scannerLabel }}
       </button>
       <!-- The pairing popover, PAIRED-STATE ONLY (the unpaired pill is an
            action button — it pairs in one click, no form, no popover; the
@@ -100,27 +96,28 @@
            paths close it instead). -->
       <template v-if="pairOpen && scannerFeed !== 'unpaired'">
         <div class="popover-backdrop" @click="pairOpen = false"></div>
-        <div class="pair-popover" role="dialog" aria-label="Scanner pairing">
-          <p class="muted">Paired — scans from this terminal now arrive
-            here, even with this window unfocused<template v-if="scannerFeed === 'off'">
-            (server unreachable — retrying)</template>.</p>
-          <p class="muted">To re-pair: DELETE the terminal (staff or
-            loopback), re-run <code>scanner_daemon.py --register</code>,
-            then click the pill.</p>
+        <div class="pair-popover" role="dialog" :aria-label="t('scanner.pairing_label')">
+          <p class="muted">{{ pairSummary }}</p>
+          <!-- The re-pair hint is a deliberate TWO-KEY fragment pair: both
+               CSV rows are placeholder-free, so each language orders its own
+               text around the command while the command itself stays inside
+               <code> (monospace, never translated). -->
+          <p class="muted">{{ t('scanner.repair_prefix') }}
+            <code>scanner_daemon.py --register</code>{{ t('scanner.repair_suffix') }}</p>
           <div class="pair-actions">
             <button type="button" class="btn ghost"
                     v-if="!user || isStaff"
-                    @click="unpairTerminal">Unpair</button>
+                    @click="unpairTerminal">{{ t('scanner.unpair') }}</button>
           </div>
         </div>
       </template>
       <template v-if="user">
-        <span class="user-name">{{ user.name }} <small>({{ user.role }})</small></span>
-        <button class="btn ghost" @click="logout">Log out</button>
+        <span class="user-name">{{ user.name }} <small>({{ roleLabel }})</small></span>
+        <button class="btn ghost" @click="logout">{{ t('auth.logout') }}</button>
       </template>
       <template v-else>
-        <a href="#/login" class="btn ghost">Log in</a>
-        <a href="#/register" class="btn">Sign up</a>
+        <a href="#/login" class="btn ghost">{{ t('auth.login') }}</a>
+        <a href="#/register" class="btn">{{ t('auth.signup') }}</a>
       </template>
     </div>
   </header>
@@ -128,22 +125,22 @@
   <main>
     <!-- ================= Login ================= -->
     <section v-if="currentView === 'login'" class="auth-card">
-      <h1>Log in</h1>
-      <p class="muted">Members: browse and select items. Staff: manage the catalogue.</p>
+      <h1>{{ t('auth.login') }}</h1>
+      <p class="muted">{{ t('auth.login_subtitle') }}</p>
       <form @submit.prevent="doLogin">
-        <label>Email or username
+        <label>{{ t('auth.email_or_username') }}
           <!-- type="text" (not email): the dev admin credential is the bare
                username "admin" (W4.0), which type="email" would refuse to
                submit. autocomplete/inputmode keep password managers working. -->
           <input type="text" inputmode="email" autocomplete="username"
                  v-model="loginForm.email" required autofocus />
         </label>
-        <label>Password
+        <label>{{ t('auth.password') }}
           <input type="password" autocomplete="current-password"
                  v-model="loginForm.password" required />
         </label>
-        <p v-if="loginError" class="error">{{ loginError }}</p>
-        <button class="btn block" :disabled="busy">Log in</button>
+        <p v-if="loginError" class="error">{{ msg(loginError) }}</p>
+        <button class="btn block" :disabled="busy">{{ t('auth.login') }}</button>
       </form>
       <hr class="divider" />
       <!-- Auto-detect is the PRIMARY path (Task E): the global scan capture
@@ -152,40 +149,39 @@
            decision, login-screen cleanup): the capture bus is the one
            browser badge path. -->
       <p class="muted scan-anywhere">
-        Scan anywhere — your QR badge logs you in automatically.
+        {{ t('auth.scan_anywhere') }}
       </p>
       <!-- Attribution banner: anonymous scans staged while logged out -->
       <div class="staged-banner" v-if="stagedScans.length">
-        <strong>{{ stagedScans.length }} scanned item(s) waiting</strong> —
-        scan your QR badge or log in to add them to your list.
-        <button class="btn tiny ghost" @click="discardStagedScans">Discard</button>
+        <strong>{{ tp('auth.staged_waiting', stagedScans.length) }}</strong>
+        <button class="btn tiny ghost" @click="discardStagedScans">{{ t('auth.discard') }}</button>
       </div>
       <!-- Round 4, T6: kiosk pairing lives in the header pill (one click
            when unpaired, via the server-read pairing file; the popover
            when paired) — the login screen carries no pairing UI at all.
            The stored token is per-TERMINAL: it survives logins and logouts
            and is NOT cleared on logout. -->
-      <p class="muted">No account yet? <a href="#/register">Create a member account</a></p>
+      <p class="muted">{{ t('auth.no_account') }} <a href="#/register">{{ t('auth.create_account') }}</a></p>
     </section>
 
     <!-- ================= Register (member signup) ================= -->
     <section v-else-if="currentView === 'register'" class="auth-card">
-      <h1>Create your member account</h1>
+      <h1>{{ t('auth.register_title') }}</h1>
       <form @submit.prevent="doRegister">
-        <label>Full name
+        <label>{{ t('auth.full_name') }}
           <input type="text" autocomplete="name" v-model="registerForm.name" required />
         </label>
-        <label>Email
+        <label>{{ t('auth.email') }}
           <input type="email" autocomplete="email" v-model="registerForm.email" required />
         </label>
-        <label>Password (min. 8 characters)
+        <label>{{ t('auth.password_min') }}
           <input type="password" autocomplete="new-password"
                  v-model="registerForm.password" minlength="8" required />
         </label>
-        <p v-if="registerError" class="error">{{ registerError }}</p>
-        <button class="btn block" :disabled="busy">Sign up</button>
+        <p v-if="registerError" class="error">{{ msg(registerError) }}</p>
+        <button class="btn block" :disabled="busy">{{ t('auth.signup') }}</button>
       </form>
-      <p class="muted">Already a member? <a href="#/login">Log in</a></p>
+      <p class="muted">{{ t('auth.already_member') }} <a href="#/login">{{ t('auth.login') }}</a></p>
     </section>
 
     <!-- ============ Catalogue (browse + select) / Checkout review ============
@@ -201,25 +197,26 @@
             class="search"
             type="search"
             v-model="search"
-            placeholder="Search the catalogue…"
+            :placeholder="t('catalogue.search_placeholder')"
           />
           <button
             class="btn toggle"
             :class="{on: semantic}"
-            :title="'Semantic search uses AI embeddings of item descriptions'"
+            :title="t('catalogue.semantic_title')"
             @click="toggleSemantic"
-          >Search</button>
+          >{{ t('catalogue.search') }}</button>
           <select v-model="category">
-            <option value="">All categories</option>
+            <option value="">{{ t('catalogue.all_categories') }}</option>
             <option v-for="c in categories" :key="c" :value="c">{{ c }}</option>
           </select>
         </div>
         <p v-if="semantic && search.trim()" class="muted">
-          Semantic search: results ranked by meaning-similarity to “{{ search }}”.
+          {{ t('catalogue.semantic_note', { query: search }) }}
         </p>
 
         <p v-if="!loading && items.length === 0" class="empty">
-          No items found. <span v-if="isStaff">Add some in the Admin section.</span>
+          {{ t('catalogue.empty') }}
+          <span v-if="isStaff">{{ t('catalogue.empty_staff') }}</span>
         </p>
 
         <div class="item-grid">
@@ -229,7 +226,7 @@
             class="item-card"
             @click="addToPurchase(item)"
           >
-            <button class="details-btn" title="View details" @click.stop="openDetail(item)">ℹ</button>
+            <button class="details-btn" :title="t('catalogue.view_details')" @click.stop="openDetail(item)">ℹ</button>
             <div class="item-thumb">
               <img v-if="item.image_url" :src="item.image_url" :alt="item.name" loading="lazy" />
               <span v-else class="placeholder-icon">📦</span>
@@ -240,10 +237,10 @@
               <div class="item-footer">
                 <strong>{{ formatPrice(item.price_cents) }}</strong>
                 <span v-if="item.similarity !== undefined" class="sim-badge">
-                  {{ Math.round(item.similarity * 100) }}% relevance
+                  {{ t('catalogue.relevance', { pct: Math.round(item.similarity * 100) }) }}
                 </span>
                 <span class="stock" :class="{out: item.stock === 0}">
-                  {{ item.stock > 0 ? item.stock + ' in stock' : 'out of stock' }}
+                  {{ item.stock > 0 ? t('catalogue.in_stock', { n: item.stock }) : t('catalogue.stock_out') }}
                 </span>
               </div>
             </div>
@@ -252,7 +249,7 @@
 
         <!-- infinite-scroll sentinel -->
         <div id="sentinel" v-show="hasMore"></div>
-        <p v-if="loading" class="muted loading-note">Loading…</p>
+        <p v-if="loading" class="muted loading-note">{{ t('common.loading') }}</p>
       </div>
 
         <!-- The checkout review panel (round 3, item 4): the cart in edit
@@ -260,25 +257,24 @@
              existing committed mutation (plus setLineQty's absolute PATCH),
              so edits here are exactly as durable as in the sidebar. -->
       <aside class="selection-panel review-panel" v-if="currentView === 'checkout'">
-        <h2>Review your purchase</h2>
+        <h2>{{ t('checkout.review_title') }}</h2>
         <p v-if="purchase.length === 0" class="muted">
-          Your purchase list is empty — add items from the catalogue or by
-          scanning them.
+          {{ t('checkout.empty') }}
         </p>
         <ul class="selection-list">
           <li v-for="entry in purchase" :key="entry.item.id">
             <div class="sel-info">
               <span>{{ entry.item.name }}</span>
               <small :class="{ 'stock-warn': entry.qty > entry.item.stock }">
-                {{ formatPrice(entry.item.price_cents) }} each
-                <template v-if="entry.qty > entry.item.stock">— only {{ entry.item.stock }} in stock</template>
+                {{ t('cart.price_each', { price: formatPrice(entry.item.price_cents) }) }}
+                <template v-if="entry.qty > entry.item.stock">{{ t('cart.only_in_stock', { n: entry.item.stock }) }}</template>
               </small>
               <small>{{ formatPrice(entry.line_total_cents) }}</small>
             </div>
             <div class="sel-controls">
               <button class="btn tiny" @click="decPurchase(entry.item.id)" :disabled="entry.qty <= 1">−</button>
               <input class="qty-input" type="number" min="1" :value="entry.qty"
-                     title="Set the quantity (0 removes the line)"
+                     :title="t('cart.qty_title')"
                      @change="setLineQty(entry.item.id, $event)" />
               <button class="btn tiny" @click="incPurchase(entry.item.id)">+</button>
               <button class="btn tiny danger" @click="removeFromPurchase(entry.item.id)">✕</button>
@@ -286,31 +282,30 @@
           </li>
         </ul>
         <div class="selection-total" v-if="purchase.length">
-          <span>Total</span>
+          <span>{{ t('common.total') }}</span>
           <strong>{{ formatPrice(purchaseTotalCents) }}</strong>
         </div>
         <div class="selection-actions">
-          <button class="btn ghost block" @click="keepShopping">Keep shopping</button>
+          <button class="btn ghost block" @click="keepShopping">{{ t('checkout.keep_shopping') }}</button>
           <button class="btn block" :disabled="busy || purchase.length === 0"
-                  @click="donePurchase">Done — complete purchase</button>
+                  @click="donePurchase">{{ t('checkout.done') }}</button>
         </div>
-        <p class="muted scan-hint">You can still scan items to add them —
-          quantity changes here are saved as you make them.</p>
+        <p class="muted scan-hint">{{ t('checkout.scan_hint') }}</p>
       </aside>
 
       <!-- Purchase list sidebar (the server-side cart: durable per user) -->
       <aside class="selection-panel" v-else>
-        <h2>Purchase list</h2>
+        <h2>{{ t('cart.title') }}</h2>
         <p v-if="purchase.length === 0" class="muted">
-          Click items in the catalogue to add them to your purchase list.
+          {{ t('cart.empty') }}
         </p>
         <ul class="selection-list">
           <li v-for="entry in purchase" :key="entry.item.id">
             <div class="sel-info">
               <span>{{ entry.item.name }}</span>
               <small :class="{ 'stock-warn': entry.qty > entry.item.stock }">
-                {{ formatPrice(entry.item.price_cents) }} each
-                <template v-if="entry.qty > entry.item.stock">— only {{ entry.item.stock }} in stock</template>
+                {{ t('cart.price_each', { price: formatPrice(entry.item.price_cents) }) }}
+                <template v-if="entry.qty > entry.item.stock">{{ t('cart.only_in_stock', { n: entry.item.stock }) }}</template>
               </small>
               <small>{{ formatPrice(entry.line_total_cents) }}</small>
             </div>
@@ -323,11 +318,11 @@
           </li>
         </ul>
         <div class="selection-actions" v-if="purchase.length">
-          <button class="btn ghost block" @click="clearPurchase">Clear list</button>
-          <button class="btn block" :disabled="busy" @click="goToCheckout">Complete purchase</button>
+          <button class="btn ghost block" @click="clearPurchase">{{ t('cart.clear') }}</button>
+          <button class="btn block" :disabled="busy" @click="goToCheckout">{{ t('checkout.complete') }}</button>
         </div>
         <div class="selection-total" v-if="purchase.length">
-          <span>Total</span>
+          <span>{{ t('common.total') }}</span>
           <strong>{{ formatPrice(purchaseTotalCents) }}</strong>
         </div>
       </aside>
@@ -337,88 +332,81 @@
          Route unchanged (#/account — the must_change_password redirect
          depends on it); a flagged account lands on the Security tab. -->
     <section v-else-if="currentView === 'account'" class="auth-card profile-card">
-      <h1>My profile</h1>
-      <p class="muted">{{ user.name }} · role: {{ user.role }} · {{ user.email }}</p>
-      <p v-if="user.must_change_password" class="error">
-        You are using a default or admin-issued password — you must change it
-        before using the app.
-      </p>
+      <h1>{{ t('nav.profile') }}</h1>
+      <p class="muted">{{ t('account.identity', { name: user.name, role: roleLabel, email: user.email }) }}</p>
+      <p v-if="user.must_change_password" class="error">{{ t('account.must_change') }}</p>
 
       <div class="admin-tabs">
-        <button :class="{active: profileTab === 'profile'}" @click="selectProfileTab('profile')">Profile</button>
-        <button :class="{active: profileTab === 'security'}" @click="selectProfileTab('security')">Security</button>
-        <button :class="{active: profileTab === 'badge'}" @click="selectProfileTab('badge')">My QR badge</button>
-        <button :class="{active: profileTab === 'requests'}" @click="selectProfileTab('requests')">My scan requests</button>
+        <button :class="{active: profileTab === 'profile'}" @click="selectProfileTab('profile')">{{ t('account.tab_profile') }}</button>
+        <button :class="{active: profileTab === 'security'}" @click="selectProfileTab('security')">{{ t('account.tab_security') }}</button>
+        <button :class="{active: profileTab === 'badge'}" @click="selectProfileTab('badge')">{{ t('account.tab_badge') }}</button>
+        <button :class="{active: profileTab === 'requests'}" @click="selectProfileTab('requests')">{{ t('account.tab_requests') }}</button>
       </div>
 
       <!-- Profile: identity + contact -->
       <div v-if="profileTab === 'profile'">
-        <h2>Email</h2>
-        <p class="muted">Your email is your login identifier. Changing it signs
-          out your other sessions.</p>
+        <h2>{{ t('auth.email') }}</h2>
+        <p class="muted">{{ t('account.email_hint') }}</p>
         <form @submit.prevent="submitEmailChange">
-          <label>New email
+          <label>{{ t('account.new_email') }}
             <input type="email" v-model="emailForm.new_email" required />
           </label>
-          <label>Current password
+          <label>{{ t('auth.current_password') }}
             <input type="password" autocomplete="current-password"
                    v-model="emailForm.current_password" required />
           </label>
           <p v-if="emailError" class="error">{{ emailError }}</p>
-          <p v-if="emailOk" class="ok">Email updated — other sessions were signed out.</p>
-          <button class="btn block" :disabled="busy">Change email</button>
+          <p v-if="emailOk" class="ok">{{ t('account.email_updated') }}</p>
+          <button class="btn block" :disabled="busy">{{ t('account.change_email') }}</button>
         </form>
 
-        <h2 style="margin-top: 2rem">Phone</h2>
-        <p class="muted">Optional: an optional leading "+" and 6–15 digits.
-          Saving an empty field clears it.</p>
+        <h2 style="margin-top: 2rem">{{ t('account.phone') }}</h2>
+        <p class="muted">{{ t('account.phone_hint') }}</p>
         <form @submit.prevent="submitPhoneChange">
-          <label>Phone
+          <label>{{ t('account.phone') }}
             <input type="tel" v-model="phoneForm.phone"
                    placeholder="+34 600 123 456" />
           </label>
           <p v-if="phoneError" class="error">{{ phoneError }}</p>
-          <button class="btn block" :disabled="busy">Save phone</button>
+          <button class="btn block" :disabled="busy">{{ t('account.save_phone') }}</button>
         </form>
       </div>
 
       <!-- Security: the existing change-password form -->
       <div v-else-if="profileTab === 'security'">
-        <h2>Change password</h2>
+        <h2>{{ t('auth.change_password') }}</h2>
         <form @submit.prevent="changePassword">
-          <label>Current password
+          <label>{{ t('auth.current_password') }}
             <input type="password" autocomplete="current-password"
                    v-model="pwForm.current_password" required />
           </label>
-          <label>New password (min. 8 characters)
+          <label>{{ t('auth.new_password_min') }}
             <input type="password" autocomplete="new-password"
                    v-model="pwForm.new_password" minlength="8" required />
           </label>
           <p v-if="pwError" class="error">{{ pwError }}</p>
-          <p v-if="pwOk" class="ok">Password updated. Other sessions were signed out.</p>
-          <button class="btn block" :disabled="busy">Change password</button>
+          <p v-if="pwOk" class="ok">{{ t('account.password_updated') }}</p>
+          <button class="btn block" :disabled="busy">{{ t('auth.change_password') }}</button>
         </form>
       </div>
 
       <!-- My QR badge -->
       <div v-else-if="profileTab === 'badge'">
-        <h2>QR badge login</h2>
+        <h2>{{ t('account.badge_login_heading') }}</h2>
         <p class="muted">
-          A QR badge logs you in without email and password — anyone holding the
-          printed code can log in as you, so treat it like a password.
-          <template v-if="user.has_qr_badge">A badge is currently <strong>active</strong> for this account.</template>
-          <template v-else>No badge is active for this account.</template>
+          {{ t('account.badge_intro') }}
+          {{ user.has_qr_badge ? t('account.badge_active') : t('account.badge_none') }}
         </p>
         <div class="badge-actions">
           <button v-if="user.has_qr_badge" class="btn" :disabled="busy" @click="showMyBadge">
-            Show my QR
+            {{ t('account.show_qr') }}
           </button>
           <button class="btn" :disabled="busy" @click="generateMyBadge">
-            {{ user.has_qr_badge ? "Regenerate badge (revokes the old one)" : "Generate QR badge" }}
+            {{ user.has_qr_badge ? t('account.regenerate_badge') : t('account.generate_badge') }}
           </button>
-          <button v-if="badgeSvg" class="btn ghost no-print" @click="printAccountBadge">Print</button>
+          <button v-if="badgeSvg" class="btn ghost no-print" @click="printAccountBadge">{{ t('common.print') }}</button>
           <button v-if="user.has_qr_badge" class="btn ghost danger no-print" @click="revokeMyBadge">
-            Revoke badge
+            {{ t('account.revoke_badge') }}
           </button>
         </div>
         <div v-if="badgeSvg" class="qr-badge" v-html="badgeSvg"></div>
@@ -426,13 +414,13 @@
 
       <!-- My scan requests: existing block, moved -->
       <div v-else-if="profileTab === 'requests'">
-        <h2>My scan requests</h2>
+        <h2>{{ t('account.tab_requests') }}</h2>
         <p class="muted" v-if="myRequests.length === 0">
-          Unknown items you report at the counter appear here, with their status.
+          {{ t('account.requests_empty') }}
         </p>
         <table class="table" v-else>
           <thead>
-            <tr><th>Requested</th><th>Code</th><th>Proposed item</th><th>Price</th><th>Status</th></tr>
+            <tr><th>{{ t('table.col.requested') }}</th><th>{{ t('table.col.code') }}</th><th>{{ t('table.col.proposed_item') }}</th><th>{{ t('common.price_dkk') }}</th><th>{{ t('field.status') }}</th></tr>
           </thead>
           <tbody>
             <tr v-for="req in myRequests" :key="req.id">
@@ -440,7 +428,7 @@
               <td><code>{{ req.code }}</code></td>
               <td>{{ req.name }}</td>
               <td>{{ formatPrice(req.price_cents) }}</td>
-              <td><span class="status-chip" :class="req.status">{{ req.status }}</span></td>
+              <td><span class="status-chip" :class="req.status">{{ statusLabel(req.status) }}</span></td>
             </tr>
           </tbody>
         </table>
@@ -450,7 +438,7 @@
     <!-- ================= Purchase history (top-level tab: list left, spend
          calendar right — the two-column layout collapses under 900 px) ================= -->
     <section v-else-if="currentView === 'purchases'" class="auth-card profile-card">
-      <h1>Purchase history</h1>
+      <h1>{{ t('nav.purchases') }}</h1>
       <div class="history-layout">
         <div class="history-list">
           <!-- A flagged account cannot buy anything yet (every purchase
@@ -458,30 +446,38 @@
                "complete a purchase" instruction would be a dead end. -->
           <p class="muted" v-if="myOrders.length === 0">
             <template v-if="user && user.must_change_password">
-              Change your password (Account → Security) to unlock your purchase history.
+              {{ t('purchases.locked') }}
             </template>
             <template v-else>
-              Nothing purchased yet — complete a purchase from your list in the catalogue.
+              {{ t('purchases.empty') }}
             </template>
           </p>
           <div v-for="order in myOrders" :key="order.id" class="order-card">
             <div class="order-head" @click="toggleOrder(order.id)">
               <span><strong>#{{ order.id }}</strong> · {{ formatDate(order.created_at) }}
-                · {{ order.lines.length }} item(s)</span>
+                · {{ tp('common.item_count', order.lines.length) }}</span>
               <span>
-                <span v-if="order.id === lastCheckout" class="status-chip resolved">new</span>
+                <span v-if="order.id === lastCheckout" class="status-chip resolved">{{ t('purchases.new') }}</span>
                 <strong>{{ formatPrice(order.total_cents) }}</strong>
               </span>
             </div>
             <table class="table" v-if="expandedOrders.includes(order.id)">
-              <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>{{ t('common.item') }}</th>
+                  <th>{{ t('common.qty') }}</th>
+                  <th>{{ t('common.price') }}</th>
+                  <th>{{ t('common.total') }}</th>
+                </tr>
+              </thead>
               <tbody>
                 <tr v-for="line in order.lines" :key="line.item_id">
-                  <td>{{ line.name }}<br /><small class="muted">SKU {{ line.sku }}</small></td>
+                  <td>{{ line.name }}<br /><small class="muted">{{ t('common.sku', { sku: line.sku }) }}</small></td>
                   <td>
                     <template v-if="line.clamped">
-                      <span class="status-chip open" :title="'requested ' + line.qty + ', only ' + line.applied_qty + ' in stock'">
-                        {{ line.applied_qty }} of {{ line.qty }}
+                      <span class="status-chip open"
+                            :title="t('purchases.clamped_title', { requested: line.qty, applied: line.applied_qty })">
+                        {{ t('checkout.clamped', { applied: line.applied_qty, requested: line.qty }) }}
                       </span>
                     </template>
                     <template v-else>{{ line.qty }}</template>
@@ -493,7 +489,7 @@
             </table>
           </div>
           <button v-if="myOrders.length >= ordersLimit && ordersLimit < 100" class="btn ghost block"
-                  @click="loadMoreOrders">Load more</button>
+                  @click="loadMoreOrders">{{ t('purchases.load_more') }}</button>
         </div>
 
         <!-- The spend calendar (round 3, item 5): one coloured dot per
@@ -504,10 +500,10 @@
         <aside class="calendar-card">
           <div class="cal-head">
             <button class="btn tiny" :disabled="calLoading || !calYear"
-                    @click="shiftCalendarMonth(-1)" title="Previous month">‹</button>
-            <strong>{{ calendarMonthLabel || "Calendar" }}</strong>
+                    @click="shiftCalendarMonth(-1)" :title="t('calendar.previous')">‹</button>
+            <strong>{{ calendarMonthLabel || t('calendar.title') }}</strong>
             <button class="btn tiny" :disabled="calLoading || !calYear"
-                    @click="shiftCalendarMonth(1)" title="Next month">›</button>
+                    @click="shiftCalendarMonth(1)" :title="t('calendar.next')">›</button>
           </div>
           <div class="cal-grid cal-weekdays">
             <span v-for="w in calendarWeekdays" :key="w">{{ w }}</span>
@@ -519,7 +515,7 @@
                 <span class="cal-num">{{ cell.day }}</span>
                 <span v-if="calendarDay(cell.key)" class="cal-dot"
                       :style="{ background: dayColor(calendarDay(cell.key).cents) }"
-                      :title="calendarDay(cell.key).count + ' purchase(s) · ' + formatPrice(calendarDay(cell.key).cents)"></span>
+                      :title="calendarDayTitle(cell.key)"></span>
               </template>
             </div>
           </div>
@@ -533,19 +529,17 @@
     <!-- ================= Table view (items + export + analysis) ================= -->
     <section v-else-if="currentView === 'table'" class="data-view">
       <div class="data-toolbar">
-        <h1>Items in the database</h1>
+        <h1>{{ t('table.title') }}</h1>
         <div class="data-actions">
-          <button class="btn ghost" @click="loadDataPage">↻ Reload</button>
-          <button class="btn ghost" @click="clearDataSelection">Clear selection</button>
-          <button class="btn" @click="exportCSV">⬇ CSV</button>
-          <button class="btn" @click="exportPDF">⬇ PDF</button>
+          <button class="btn ghost" @click="loadDataPage">↻ {{ t('table.reload') }}</button>
+          <button class="btn ghost" @click="clearDataSelection">{{ t('table.clear_selection') }}</button>
+          <button class="btn" @click="exportCSV">⬇ {{ t('table.export_csv') }}</button>
+          <button class="btn" @click="exportPDF">⬇ {{ t('table.export_pdf') }}</button>
         </div>
       </div>
 
       <p class="muted hint">
-        Click a row or a column header to select it · Shift-click for a range ·
-        Ctrl/Cmd-click to add/remove · analysis and exports use the current selection
-        (or everything shown if nothing is selected).
+        {{ t('table.selection_hint') }}
       </p>
 
       <div class="table-wrap card">
@@ -561,7 +555,7 @@
                 @click.shift.prevent="selectColumnRange(col.key)"
                 @click.ctrl.prevent="toggleColumn(col.key)"
                 @click.meta.prevent="toggleColumn(col.key)"
-                title="Click to select column · Shift-click for a range · Ctrl/Cmd-click to add/remove"
+                :title="t('table.column_title')"
               >
                 <span v-if="selectedCols.includes(col.key)" class="tick">✓</span>
                 {{ col.label }}
@@ -589,40 +583,36 @@
             </tr>
           </tbody>
         </table>
-        <p v-if="dataLoading" class="muted loading-note">Loading…</p>
-        <p v-if="!dataLoading && dataRows.length === 0" class="empty">No items.</p>
+        <p v-if="dataLoading" class="muted loading-note">{{ t('common.loading') }}</p>
+        <p v-if="!dataLoading && dataRows.length === 0" class="empty">{{ t('table.empty') }}</p>
       </div>
 
       <div class="data-pagination">
-        <button class="btn ghost" :disabled="dataPage === 0" @click="dataPage--; loadDataPage()">← Previous</button>
-        <span class="muted">Page {{ dataPage + 1 }}</span>
-        <button class="btn ghost" :disabled="dataRows.length < dataLimit" @click="dataPage++; loadDataPage()">Next →</button>
+        <button class="btn ghost" :disabled="dataPage === 0" @click="dataPage--; loadDataPage()">← {{ t('table.previous') }}</button>
+        <span class="muted">{{ t('table.page', { n: dataPage + 1 }) }}</span>
+        <button class="btn ghost" :disabled="dataRows.length < dataLimit" @click="dataPage++; loadDataPage()">{{ t('table.next') }} →</button>
       </div>
 
       <!-- Analysis panel -->
       <div class="analysis card">
         <h2>
-          Analysis
-          <small v-if="selectedRowIds.length" class="muted">
-            ({{ selectedRowIds.length }} selected row{{ selectedRowIds.length > 1 ? 's' : '' }}
-            × {{ exportCols.length }} column{{ exportCols.length > 1 ? 's' : '' }})
-          </small>
-          <small v-else class="muted">(all {{ dataRows.length }} rows shown)</small>
+          {{ t('analysis.title') }}
+          <small class="muted">{{ analysisScopeLabel }}</small>
         </h2>
 
         <div class="stat-grid">
-          <div class="stat"><span>Items</span><strong>{{ analysis.count }}</strong></div>
-          <div class="stat"><span>Inventory value</span><strong>{{ formatPrice(analysis.inventoryValueCents) }}</strong></div>
-          <div class="stat"><span>Avg price</span><strong>{{ formatPrice(analysis.priceMean) }}</strong></div>
-          <div class="stat"><span>Median price</span><strong>{{ formatPrice(analysis.priceMedian) }}</strong></div>
-          <div class="stat"><span>Min / Max price</span><strong>{{ formatPrice(analysis.priceMin) }} / {{ formatPrice(analysis.priceMax) }}</strong></div>
-          <div class="stat"><span>Price σ</span><strong>{{ formatPrice(analysis.priceStd) }}</strong></div>
-          <div class="stat"><span>Total stock</span><strong>{{ analysis.stockSum }}</strong></div>
-          <div class="stat"><span>Avg stock</span><strong>{{ analysis.stockMean.toFixed(1) }}</strong></div>
-          <div class="stat"><span>Min / Max stock</span><strong>{{ analysis.stockMin }} / {{ analysis.stockMax }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.items') }}</span><strong>{{ analysis.count }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.inventory_value') }}</span><strong>{{ formatPrice(analysis.inventoryValueCents) }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.avg_price') }}</span><strong>{{ formatPrice(analysis.priceMean) }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.median_price') }}</span><strong>{{ formatPrice(analysis.priceMedian) }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.min_max_price') }}</span><strong>{{ formatPrice(analysis.priceMin) }} / {{ formatPrice(analysis.priceMax) }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.price_std') }}</span><strong>{{ formatPrice(analysis.priceStd) }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.total_stock') }}</span><strong>{{ analysis.stockSum }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.avg_stock') }}</span><strong>{{ analysis.stockMean.toFixed(1) }}</strong></div>
+          <div class="stat"><span>{{ t('analysis.min_max_stock') }}</span><strong>{{ analysis.stockMin }} / {{ analysis.stockMax }}</strong></div>
         </div>
 
-        <h3>By category</h3>
+        <h3>{{ t('analysis.by_category') }}</h3>
         <div class="cat-bars">
           <div v-for="c in analysis.categories" :key="c.name" class="cat-row">
             <span class="cat-name">{{ c.name }}</span>
@@ -638,29 +628,28 @@
     <!-- ================= Admin (staff: item input + members) ================= -->
     <section v-else-if="currentView === 'admin'" class="admin">
       <div class="admin-tabs">
-        <button :class="{active: adminTab === 'items'}" @click="adminTab = 'items'">Catalogue input</button>
-        <button :class="{active: adminTab === 'members'}" @click="adminTab = 'members'">Members</button>
-        <button :class="{active: adminTab === 'requests'}" @click="adminTab = 'requests'; loadScanRequests()">Scan requests</button>
+        <button :class="{active: adminTab === 'items'}" @click="adminTab = 'items'">{{ t('admin.tab_items') }}</button>
+        <button :class="{active: adminTab === 'members'}" @click="adminTab = 'members'">{{ t('admin.tab_members') }}</button>
+        <button :class="{active: adminTab === 'requests'}" @click="adminTab = 'requests'; loadScanRequests()">{{ t('admin.tab_requests') }}</button>
       </div>
 
       <!-- Scan requests: the member "unknown item" queue (staff resolution) -->
       <div v-if="adminTab === 'requests'" class="card">
-        <h2>Scan requests</h2>
+        <h2>{{ t('admin.tab_requests') }}</h2>
         <p class="muted">
-          Unknown items reported by members at the counter. Create the catalogue
-          entry (prefilled from their proposal) to resolve, or dismiss as junk.
+          {{ t('admin.requests_intro') }}
         </p>
-        <label>Status
+        <label>{{ t('field.status') }}
           <select v-model="scanReqFilter" @change="loadScanRequests">
-            <option value="open">Open</option>
-            <option value="resolved">Resolved</option>
-            <option value="dismissed">Dismissed</option>
-            <option value="all">All</option>
+            <option value="open">{{ t('status.open') }}</option>
+            <option value="resolved">{{ t('status.resolved') }}</option>
+            <option value="dismissed">{{ t('status.dismissed') }}</option>
+            <option value="all">{{ t('admin.filter_all') }}</option>
           </select>
         </label>
         <table class="table" v-if="scanRequests.length">
           <thead>
-            <tr><th>Requested</th><th>Requester</th><th>Code</th><th>Proposed item</th><th>Price</th><th>Status</th><th></th></tr>
+            <tr><th>{{ t('table.col.requested') }}</th><th>{{ t('table.col.requester') }}</th><th>{{ t('table.col.code') }}</th><th>{{ t('table.col.proposed_item') }}</th><th>{{ t('common.price') }}</th><th>{{ t('field.status') }}</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="req in scanRequests" :key="req.id">
@@ -669,62 +658,62 @@
               <td><code>{{ req.code }}</code><br /><small class="muted">{{ req.kind }}{{ req.gtin14 ? ' · ' + req.gtin14 : '' }}</small></td>
               <td>{{ req.name }}</td>
               <td>{{ formatPrice(req.price_cents) }}</td>
-              <td><span class="status-chip" :class="req.status">{{ req.status }}</span></td>
+              <td><span class="status-chip" :class="req.status">{{ statusLabel(req.status) }}</span></td>
               <td v-if="req.status === 'open'">
-                <button class="btn tiny" @click="openRequestIntake(req)">Create &amp; resolve</button>
-                <button class="btn tiny danger" @click="dismissRequest(req)">Dismiss</button>
+                <button class="btn tiny" @click="openRequestIntake(req)">{{ t('admin.request_create') }}</button>
+                <button class="btn tiny danger" @click="dismissRequest(req)">{{ t('admin.request_dismiss') }}</button>
               </td>
               <td v-else></td>
             </tr>
           </tbody>
         </table>
-        <p v-else class="muted">No requests with this status.</p>
+        <p v-else class="muted">{{ t('admin.requests_empty') }}</p>
       </div>
 
       <!-- Items management -->
       <div v-if="adminTab === 'items'" class="admin-split">
         <form class="card" @submit.prevent="submitItem">
-          <h2>{{ itemEditingId ? 'Edit item #' + itemEditingId : 'Input new item' }}</h2>
-          <label>SKU
+          <h2>{{ itemEditingId ? t('item.edit_title', { id: itemEditingId }) : t('item.new_title') }}</h2>
+          <label>{{ t('field.sku') }}
             <input v-model="itemForm.sku" required :disabled="!!itemEditingId" />
           </label>
-          <label>Name
+          <label>{{ t('field.name') }}
             <input v-model="itemForm.name" required />
           </label>
-          <label>Category
+          <label>{{ t('field.category') }}
             <input v-model="itemForm.category" list="category-list" placeholder="general" />
             <datalist id="category-list">
               <option v-for="c in categories" :key="c" :value="c" />
             </datalist>
           </label>
-          <label>Description
+          <label>{{ t('field.description') }}
             <textarea v-model="itemForm.description" rows="3"
-              placeholder="Please, enter a brief description of the product"></textarea>
+              :placeholder="t('item.description_placeholder')"></textarea>
           </label>
           <div class="row">
-            <label>Price (DKK)
+            <label>{{ t('common.price_dkk') }}
               <input type="number" v-model.number="itemForm.price" step="0.01" min="0" required />
             </label>
-            <label>Stock
+            <label>{{ t('field.stock') }}
               <input type="number" v-model.number="itemForm.stock" min="0" required />
             </label>
           </div>
-          <label>Image URL (optional)
-            <input v-model="itemForm.image_url" placeholder="https://…" />
+          <label>{{ t('item.image_url') }}
+            <input v-model="itemForm.image_url" :placeholder="t('field.image_url_placeholder')" />
           </label>
           <p v-if="itemError" class="error">{{ itemError }}</p>
           <div class="row">
-            <button class="btn" :disabled="busy">{{ itemEditingId ? 'Save changes' : 'Add to catalogue' }}</button>
-            <button v-if="itemEditingId" type="button" class="btn ghost" @click="resetItemForm">Cancel</button>
+            <button class="btn" :disabled="busy">{{ itemEditingId ? t('item.save') : t('item.add') }}</button>
+            <button v-if="itemEditingId" type="button" class="btn ghost" @click="resetItemForm">{{ t('common.cancel') }}</button>
           </div>
           <p class="muted"></p>
         </form>
 
         <div class="card">
-          <h2>Catalogue ({{ adminItems.length }})</h2>
+          <h2>{{ t('admin.catalogue_count', { n: adminItems.length }) }}</h2>
           <table class="table">
             <thead>
-              <tr><th>SKU</th><th>Name</th><th>Category</th><th>Price</th><th>Stock</th><th>AI</th><th></th></tr>
+              <tr><th>{{ t('field.sku') }}</th><th>{{ t('field.name') }}</th><th>{{ t('field.category') }}</th><th>{{ t('common.price') }}</th><th>{{ t('field.stock') }}</th><th>{{ t('table.col.ai') }}</th><th></th></tr>
             </thead>
             <tbody>
               <tr v-for="it in adminItems" :key="it.id">
@@ -735,8 +724,8 @@
                 <td>{{ it.stock }}</td>
                 <td>{{ it.has_embedding ? '✓' : '—' }}</td>
                 <td class="actions">
-                  <button class="btn tiny" @click="editItem(it)">Edit</button>
-                  <button class="btn tiny danger" @click="deleteItem(it)">Delete</button>
+                  <button class="btn tiny" @click="editItem(it)">{{ t('common.edit') }}</button>
+                  <button class="btn tiny danger" @click="deleteItem(it)">{{ t('common.delete') }}</button>
                 </td>
               </tr>
             </tbody>
@@ -747,67 +736,67 @@
       <!-- Members management -->
       <div v-else class="admin-split">
         <form class="card" @submit.prevent="createMember">
-          <h2>Create member account</h2>
-          <label>Name
+          <h2>{{ t('admin.member_create_title') }}</h2>
+          <label>{{ t('field.name') }}
             <input v-model="memberForm.name" required />
           </label>
-          <label>Email
+          <label>{{ t('auth.email') }}
             <input type="email" v-model="memberForm.email" required />
           </label>
-          <label>Temporary password (min. 8 chars)
+          <label>{{ t('account.temp_password') }}
             <input type="password" autocomplete="new-password"
                    v-model="memberForm.password" minlength="8" required />
           </label>
-          <label>Role
+          <label>{{ t('field.role') }}
             <select v-model="memberForm.role">
-              <option value="member">Member (buyer)</option>
-              <option value="staff">Staff (can input items)</option>
-              <option v-if="user && user.role === 'admin'" value="admin">Admin</option>
+              <option value="member">{{ t('admin.role_member') }}</option>
+              <option value="staff">{{ t('admin.role_staff') }}</option>
+              <option v-if="user && user.role === 'admin'" value="admin">{{ t('auth.role.admin_option') }}</option>
             </select>
           </label>
           <p v-if="memberError" class="error">{{ memberError }}</p>
-          <button class="btn" :disabled="busy">Create account</button>
+          <button class="btn" :disabled="busy">{{ t('admin.member_create') }}</button>
         </form>
 
         <div class="card">
-          <h2>Members ({{ members.length }})</h2>
+          <h2>{{ t('admin.members_count', { n: members.length }) }}</h2>
           <table class="table">
             <thead>
-              <tr><th>Name</th><th>Email</th><th>Role</th><th>Badge</th><th>Joined</th><th></th></tr>
+              <tr><th>{{ t('field.name') }}</th><th>{{ t('auth.email') }}</th><th>{{ t('field.role') }}</th><th>{{ t('table.col.badge') }}</th><th>{{ t('table.col.joined') }}</th><th></th></tr>
             </thead>
             <tbody>
               <tr v-for="m in members" :key="m.id">
                 <td>{{ m.name }}</td>
                 <td>{{ m.email }}</td>
                 <td>{{ m.role }}</td>
-                <td>{{ m.has_qr_badge ? "✓ active" : "—" }}</td>
+                <td>{{ m.has_qr_badge ? t('table.badge_active') : "—" }}</td>
                 <td>{{ formatDate(m.created_at) }}</td>
                 <td class="actions">
                   <button
                     v-if="user && (user.role === 'admin' || m.role !== 'admin')"
                     class="btn tiny"
                     @click="showMemberBadge(m)"
-                  >QR badge</button>
+                  >{{ t('admin.badge_show') }}</button>
                   <button
                     v-if="user && (user.role === 'admin' || m.role !== 'admin') && m.has_qr_badge"
                     class="btn tiny ghost"
                     @click="viewMemberBadge(m)"
-                  >View</button>
+                  >{{ t('common.view') }}</button>
                   <button
                     v-if="user && (user.role === 'admin' || m.role !== 'admin') && m.has_qr_badge"
                     class="btn tiny danger"
                     @click="revokeMemberBadge(m)"
-                  >Revoke</button>
+                  >{{ t('common.revoke') }}</button>
                   <button
                     v-if="user && user.role === 'admin' && m.id !== user.id"
                     class="btn tiny"
                     @click="openPwReset(m)"
-                  >Reset PW</button>
+                  >{{ t('admin.reset_password') }}</button>
                   <button
                     v-if="user && user.role === 'admin' && m.id !== user.id"
                     class="btn tiny danger"
                     @click="deleteMember(m)"
-                  >Delete</button>
+                  >{{ t('common.delete') }}</button>
                 </td>
               </tr>
             </tbody>
@@ -826,10 +815,10 @@
         <span v-else class="placeholder-icon">📦</span>
       </div>
       <h2>{{ detailItem.name }}</h2>
-      <p class="muted">{{ detailItem.category }} · SKU {{ detailItem.sku }}</p>
-      <p>{{ detailItem.description || 'No description.' }}</p>
+      <p class="muted">{{ t('catalogue.detail_meta', { category: detailItem.category, sku: detailItem.sku }) }}</p>
+      <p>{{ detailItem.description || t('catalogue.no_description') }}</p>
       <div v-if="similar.length" class="similar">
-        <h3>Similar items</h3>
+        <h3>{{ t('catalogue.similar') }}</h3>
         <ul>
           <li v-for="s in similar" :key="s.id" @click="openDetail(s)">
             {{ s.name }}
@@ -844,7 +833,7 @@
           :disabled="detailItem.stock === 0"
           @click="addToPurchase(detailItem)"
         >
-          {{ detailItem.stock === 0 ? 'Out of stock' : 'Add to purchase list' }}
+          {{ detailItem.stock === 0 ? t('catalogue.out_of_stock') : t('cart.add_to_purchase') }}
         </button>
       </div>
     </div>
@@ -854,15 +843,14 @@
   <div class="modal-backdrop badge-backdrop" v-if="memberBadge" @click.self="memberBadge = null">
     <div class="modal badge-card">
       <button class="modal-close no-print" @click="memberBadge = null">✕</button>
-      <h2>QR badge — {{ memberBadge.name }}</h2>
+      <h2>{{ t('account.badge_modal_title', { name: memberBadge.name }) }}</h2>
       <p class="muted">
-        {{ memberBadge.email }} · any previous badge for this account was just revoked.
-        Whoever holds this code can log in as the member — hand it over privately.
+        {{ t('account.badge_modal_notice', { email: memberBadge.email }) }}
       </p>
       <div class="qr-badge" v-html="memberBadge.svg"></div>
       <div class="modal-footer no-print">
-        <button class="btn ghost" @click="memberBadge = null">Close</button>
-        <button class="btn" @click="() => window.print()">Print</button>
+        <button class="btn ghost" @click="memberBadge = null">{{ t('common.close') }}</button>
+        <button class="btn" @click="() => window.print()">{{ t('common.print') }}</button>
       </div>
     </div>
   </div>
@@ -871,17 +859,17 @@
   <div class="modal-backdrop" v-if="pwResetMember" @click.self="closePwReset">
     <div class="modal">
       <button class="modal-close" @click="closePwReset">✕</button>
-      <h2>Reset password — {{ pwResetMember.name }}</h2>
+      <h2>{{ t('account.reset_title', { name: pwResetMember.name }) }}</h2>
       <p class="muted">
-        {{ pwResetMember.email }} · their sessions will be signed out.
+        {{ t('account.reset_notice', { email: pwResetMember.email }) }}
       </p>
       <form @submit.prevent="submitPwReset">
-        <label>Temporary password (min. 8 characters)
+        <label>{{ t('account.temp_password') }}
           <input type="password" autocomplete="new-password"
                  v-model="pwResetValue" minlength="8" required />
         </label>
-        <p v-if="pwResetError" class="error">{{ pwResetError }}</p>
-        <button class="btn block" :disabled="!pwResetValue">Set password</button>
+        <p v-if="pwResetError" class="error">{{ msg(pwResetError) }}</p>
+        <button class="btn block" :disabled="!pwResetValue">{{ t('account.set_password') }}</button>
       </form>
     </div>
   </div>
@@ -891,13 +879,13 @@
        deliberate act (button, expiry, or a badge decision). -->
   <div class="modal-backdrop logoff-overlay" v-if="logoff">
     <div class="modal logoff-card">
-      <h2>Log off {{ logoff.name }}?</h2>
-      <p class="muted">You scanned your own badge.</p>
+      <h2>{{ t('account.logoff_title', { name: logoff.name }) }}</h2>
+      <p class="muted">{{ t('account.logoff_self') }}</p>
       <div class="countdown">{{ logoff.remaining }}</div>
-      <p class="muted">Logging off automatically when the countdown reaches zero.</p>
+      <p class="muted">{{ t('account.logoff_auto') }}</p>
       <div class="modal-footer">
-        <button class="btn ghost block" @click="cancelLogoff">Stay logged in</button>
-        <button class="btn danger block" @click="finishLogoff">Log off now</button>
+        <button class="btn ghost block" @click="cancelLogoff">{{ t('account.logoff_stay') }}</button>
+        <button class="btn danger block" @click="finishLogoff">{{ t('account.logoff_now') }}</button>
       </div>
     </div>
   </div>
@@ -906,7 +894,7 @@
   <div class="modal-backdrop" v-if="scanIntake" @click.self="closeIntake">
     <div class="modal">
       <button class="modal-close" @click="closeIntake">✕</button>
-      <h2>Unknown item</h2>
+      <h2>{{ t('intake.title') }}</h2>
       <p>
         <code>{{ scanIntake.code }}</code>
         <span class="muted" v-if="intakeAnalysisLine()"> · {{ intakeAnalysisLine() }}</span>
@@ -924,32 +912,32 @@
             @click="addSuggestedItem(item)"
           >
             <strong>{{ item.name }}</strong>
-            <small>{{ formatPrice(item.price_cents) }} · SKU {{ item.sku }}</small>
+            <small>{{ formatPrice(item.price_cents) }} · {{ t('common.sku', { sku: item.sku }) }}</small>
           </button>
         </div>
       </template>
 
       <form @submit.prevent="submitIntake">
-        <label>Item name
+        <label>{{ t('intake.item_name') }}
           <input v-model="scanIntake.name" @input="intakeSuggest" required
-                 placeholder="What is this item?" />
+                 :placeholder="t('intake.name_placeholder')" />
         </label>
-        <label>Price (DKK)
+        <label>{{ t('common.price_dkk') }}
           <input v-model="scanIntake.price" type="number" min="0" step="0.01"
                  placeholder="0.00" />
         </label>
-        <label v-if="isStaff">SKU
+        <label v-if="isStaff">{{ t('field.sku') }}
           <input v-model="scanIntake.sku" required />
         </label>
         <label v-if="scanIntake.resolveRequestId" class="checkbox-label">
           <input type="checkbox" v-model="scanIntake.addToCart" />
-          Also add the item to {{ scanIntake.requesterName }}'s purchase list
+          {{ t('intake.also_cart', { name: scanIntake.requesterName }) }}
         </label>
         <p v-if="!isStaff" class="muted">
-          Staff will review the request and add the item to the catalogue.
+          {{ t('intake.staff_note') }}
         </p>
         <button class="btn block" :disabled="scanIntake.busy">
-          {{ isStaff ? 'Add to catalogue & purchase list' : 'Send to staff' }}
+          {{ isStaff ? t('intake.submit_staff') : t('intake.submit_member') }}
         </button>
       </form>
     </div>
@@ -970,11 +958,11 @@
       <div class="qr-badge" v-html="badgePrint.svg"></div>
       <p class="badge-payload"><code>{{ badgePrint.payload }}</code></p>
       <p class="badge-warn">
-        {{ badgePrint.warning || "Anyone holding this code can log in — keep it private." }}
+        {{ badgePrint.warning || t('account.badge_warn_fallback') }}
       </p>
       <div class="badge-actions modal-footer">
-        <button class="btn block no-print" @click="() => window.print()">Print</button>
-        <button class="btn ghost block no-print" @click="badgePrint = null">Done</button>
+        <button class="btn block no-print" @click="() => window.print()">{{ t('common.print') }}</button>
+        <button class="btn ghost block no-print" @click="badgePrint = null">{{ t('common.done') }}</button>
       </div>
     </div>
   </div>
@@ -986,20 +974,27 @@
   <div class="modal-backdrop" v-if="lastReceipt" @click.self="lastReceipt = null">
     <div class="modal">
       <button class="modal-close" @click="lastReceipt = null">✕</button>
-      <h2>Purchase complete</h2>
+      <h2>{{ t('checkout.receipt_title') }}</h2>
       <p class="muted">
-        Order #{{ lastReceipt.purchase.id }} ·
-        {{ lastReceipt.purchase.lines.length }} item(s) ·
+        {{ t('checkout.order_number', { order: lastReceipt.purchase.id }) }} ·
+        {{ tp('common.item_count', lastReceipt.purchase.lines.length) }} ·
         <strong>{{ formatPrice(lastReceipt.purchase.total_cents) }}</strong>
       </p>
       <table class="table">
-        <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+        <thead>
+          <tr>
+            <th>{{ t('common.item') }}</th>
+            <th>{{ t('common.qty') }}</th>
+            <th>{{ t('common.price_dkk') }}</th>
+            <th>{{ t('common.total') }}</th>
+          </tr>
+        </thead>
         <tbody>
           <tr v-for="line in lastReceipt.purchase.lines" :key="line.item_id">
             <td>{{ line.name }}</td>
             <td>
               <template v-if="line.clamped">
-                <span class="status-chip open">{{ line.applied_qty }} of {{ line.qty }}</span>
+                <span class="status-chip open">{{ t('checkout.clamped', { applied: line.applied_qty, requested: line.qty }) }}</span>
               </template>
               <template v-else>{{ line.qty }}</template>
             </td>
@@ -1009,11 +1004,10 @@
         </tbody>
       </table>
       <p v-if="lastReceipt.skipped && lastReceipt.skipped.length" class="muted">
-        {{ lastReceipt.skipped.length }} scanned item(s) no longer exist and were skipped.
+        {{ tp('checkout.skipped', lastReceipt.skipped.length) }}
       </p>
-      <p class="muted">Your purchase list was cleared. The receipt also appears
-        in Purchase history.</p>
-      <button class="btn block" @click="lastReceipt = null">Done</button>
+      <p class="muted">{{ t('checkout.receipt_cleared') }}</p>
+      <button class="btn block" @click="lastReceipt = null">{{ t('common.done') }}</button>
     </div>
   </div>
 

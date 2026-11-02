@@ -13,6 +13,11 @@ const LANG_KEY = HcrmI18n.LANG_KEY;          // item 3: the UI language — a
 // runtime OWNS the key (detectLang reads it): one definition, no drift.
 const PAGE_SIZE = 24;
 
+// Module-scope translation for the few non-Vue call sites (api()'s 401 paths):
+// the device language, resolved per call. Vue code uses this.t instead.
+const tGlobal = (id, vars) => HcrmI18n.translate(
+    id, vars, HcrmI18n.detectLang(localStorage, location.search));
+
 // Global HID scan capture (round 3, Task B): the decision logic — shape
 // gates, timing constants and the HOLD/ARMED/WARM state machine — lives in
 // static/scancapture.js (HcrmScanCapture, loaded BEFORE this file; pure,
@@ -58,16 +63,21 @@ async function api(path, { method = "GET", body, raw = false, token } = {}) {
     localStorage.removeItem(USER_KEY);
     window.dispatchEvent(new Event("hcrm-session-expired"));
     if (location.hash !== "#/login") location.hash = "#/login";
-    throw Object.assign(new Error("Session expired — please log in again."), { status: 401 });
+    throw Object.assign(new Error(tGlobal("auth.session_expired")), { status: 401 });
   }
   let data = null;
   if (res.status !== 204) {
     try { data = await res.json(); } catch (_) { data = null; }
   }
   if (res.status === 401) {
-    let detail = "Invalid email or password";
-    if (data && typeof data.detail === "string") detail = data.detail;
-    throw Object.assign(new Error(detail), { status: 401, detail: data && data.detail });
+    const fromServer = !!(data && typeof data.detail === "string");
+    // Our own fallback carries a code so the caller can store a {key} descriptor
+    // (an open login error re-renders on a language flip); a server detail is
+    // item 6's copy and stays verbatim.
+    throw Object.assign(
+      new Error(fromServer ? data.detail : tGlobal("auth.invalid_credentials")),
+      { status: 401, detail: data && data.detail,
+        ...(fromServer ? {} : { code: "auth.invalid_credentials" }) });
   }
   if (!res.ok) {
     let detail = `Request failed (${res.status})`;
@@ -90,17 +100,20 @@ const emptyItemForm = () => ({
   price: 0, stock: 0, image_url: "",
 });
 
-/** Columns of the data explorer table. */
+/** Columns of the data explorer table (slice E): each row names the CSV row that
+ *  labels it, and the allColumns computed resolves that per language — so the
+ *  header, the picker, the CSV head and the PDF head cannot drift apart, and a
+ *  language flip relabels an open table. */
 const DATA_COLUMNS = [
-  { key: "id", label: "ID" },
-  { key: "sku", label: "SKU" },
-  { key: "name", label: "Name" },
-  { key: "category", label: "Category" },
-  { key: "price_cents", label: "Price (DKK)" },
-  { key: "stock", label: "Stock" },
-  { key: "description", label: "Description" },
-  { key: "has_embedding", label: "Embedded" },
-  { key: "created_at", label: "Created" },
+  { key: "id", labelKey: "table.col.id" },
+  { key: "sku", labelKey: "field.sku" },
+  { key: "name", labelKey: "field.name" },
+  { key: "category", labelKey: "field.category" },
+  { key: "price_cents", labelKey: "common.price_dkk" },
+  { key: "stock", labelKey: "field.stock" },
+  { key: "description", labelKey: "field.description" },
+  { key: "has_embedding", labelKey: "table.col.embedded" },
+  { key: "created_at", labelKey: "table.col.created" },
 ];
 
 // Language bootstrap (item 3): resolve ONCE (query > stored > default), apply
@@ -175,8 +188,8 @@ Vue.createApp({
                             // focused pill would drop focus to <body> and
                             // grey a status indicator)
 
-      // data explorer
-      allColumns: DATA_COLUMNS,
+      // data explorer (allColumns is a COMPUTED since slice E: the labels are
+      // CSV rows, resolved per language)
       dataRows: [],
       dataPage: 0,
       dataLimit: 100,
@@ -270,6 +283,28 @@ Vue.createApp({
     greetingText() {
       return this.msg(this.greeting);
     },
+    // Slice A: the userbox role badge and the scanner pill's label/title. Each
+    // branch calls t() with a LITERAL id so the CSV rows stay referenced.
+    roleLabel() {
+      const role = this.user ? this.user.role : "";
+      if (role === "staff") return this.t("auth.role.staff");
+      if (role === "admin") return this.t("auth.role.admin");
+      return this.t("auth.role.member");
+    },
+    scannerLabel() {
+      if (this.scannerFeed === "live") return this.t("scanner.label.live");
+      if (this.scannerFeed === "off") return this.t("scanner.label.off");
+      return this.t("scanner.label.unpaired");
+    },
+    scannerTitle() {
+      if (this.scannerFeed === "live") return this.t("scanner.title.live");
+      if (this.scannerFeed === "off") return this.t("scanner.title.off");
+      return this.t("scanner.title.unpaired");
+    },
+    pairSummary() {
+      if (this.scannerFeed === "off") return this.t("scanner.paired_offline");
+      return this.t("scanner.paired");
+    },
     isStaff() {
       return !!this.user && (this.user.role === "staff" || this.user.role === "admin");
     },
@@ -317,10 +352,11 @@ Vue.createApp({
       return cells;
     },
     calendarWeekdays() {
-      // 2024-01-01 was a Monday: UTC-stable short labels, Monday-first.
-      return Array.from({ length: 7 }, (_, i) =>
-        new Date(Date.UTC(2024, 0, 1 + i))
-          .toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }));
+      // Mon-first keys -> CSV rows (`date.dow.*`, slice C): the labels must not
+      // come from Intl, whose Danish shorts ("man.", "tirs.") overflow the
+      // 7-column grid. Computed, so a language flip re-renders the row.
+      return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        .map((key) => this.t("date.dow." + key));
     },
     calendarMinMax() {
       // min/max over the month's PER-DAY totals (one dot = one value).
@@ -335,25 +371,68 @@ Vue.createApp({
         && this.calMonth === now.getUTCMonth() + 1;
     },
     calendarMonthLabel() {
+      // The calendar HEADER keeps the compact labels (`date.month.*`): the card
+      // is narrow and "mar 2026" is a header, not a sentence.
       if (!this.calYear) return "";
-      return new Date(Date.UTC(this.calYear, this.calMonth - 1, 1))
-        .toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+      return this.t("calendar.month_year", {
+        month: this.t("date.month." + this.calMonth),
+        year: this.calYear,
+      });
+    },
+    calendarMonthLongLabel() {
+      // PROSE uses the long names (`date.month_long.*`): "Brugt i marts 2026"
+      // is idiomatic, "Brugt i mar 2026" is not (slice-C review).
+      if (!this.calYear) return "";
+      return this.t("calendar.month_year", {
+        month: this.t("date.month_long." + this.calMonth),
+        year: this.calYear,
+      });
     },
     calendarTotalLabel() {
-      return this.calIsCurrent ? "Spent this month" : "Spent in " + this.calendarMonthLabel;
+      return this.calIsCurrent
+        ? this.t("calendar.spent_this_month")
+        : this.t("calendar.spent_in", { month: this.calendarMonthLongLabel });
+    },
+    calendarDayTitle(key) {
+      // A day dot's tooltip: the count picks the .one/.other row, the money is
+      // a placeholder (never string concatenation).
+      const day = this.calendarDay(key);
+      if (!day) return "";
+      return this.tp("calendar.day_tooltip", day.count,
+        { price: this.formatPrice(day.cents) });
     },
     // The intake modal's suggestion groups (labelled pick-lists).
     intakeGroups() {
       if (!this.scanIntake) return {};
       const s = this.scanIntake.suggestions || {};
       return {
-        by_prefix: { label: "Same barcode family", items: s.by_prefix || [] },
-        by_keyword: { label: "Similar code or name", items: s.by_keyword || [] },
-        by_semantic: { label: "Similar meaning", items: s.by_semantic || [] },
+        by_prefix: { label: this.t("catalogue.suggest_prefix"), items: s.by_prefix || [] },
+        by_keyword: { label: this.t("catalogue.suggest_keyword"), items: s.by_keyword || [] },
+        by_semantic: { label: this.t("catalogue.suggest_semantic"), items: s.by_semantic || [] },
       };
     },
 
-    /* ---------- data explorer ---------- */
+    /* ---------- data explorer (slice E: labels + analysis scope) ---------- */
+    allColumns() {
+      // The explorer's columns with their label resolved in the UI language.
+      // Computed (not data) so a flip relabels the header, and both exports
+      // read the SAME label the table shows at export time.
+      return DATA_COLUMNS.map((c) => ({ key: c.key, label: this.t(c.labelKey) }));
+    },
+    analysisScopeLabel() {
+      // The panel's scope line has TWO counts (rows × columns), so each is its
+      // own plural pair and the sentence takes the phrases as placeholders.
+      // Computed, so a flip re-renders it (tp reads this.lang).
+      if (!this.selectedRowIds.length) {
+        return this.t("analysis.all_shown", {
+          rows: this.tp("common.rows", this.dataRows.length),
+        });
+      }
+      return this.t("analysis.selected", {
+        rows: this.tp("table.selected_rows", this.selectedRowIds.length),
+        cols: this.tp("common.cols", this.exportCols.length),
+      });
+    },
     exportRows() {
       return this.selectedRowIds.length
         ? this.dataRows.filter((r) => this.selectedRowIds.includes(r.id))
@@ -489,7 +568,30 @@ Vue.createApp({
       this.lang = this.nextLang;
     },
     msg(value) {
-      return HcrmI18n.descriptorText(value, (id, vars) => this.t(id, vars));
+      // Slice B: a PLURAL descriptor carries its count separately
+      // ({key, plural, vars?}) — {key, vars} cannot express which .one/.other
+      // row to pick, and the toast must still re-render with the flag (tp
+      // reads this.lang at paint time, exactly like t()).
+      // Slice E: a var may itself be a count descriptor ({key, plural}), so a
+      // sentence with TWO counts ("Exported 3 rows × 2 columns") is plural-correct
+      // on both counts AND still re-renders on a flip — a phrase rendered at
+      // call time would freeze the old language in an open toast.
+      if (value && typeof value === "object" && value.plural !== undefined) {
+        return this.tp(value.key, value.plural, this._counts(value.vars));
+      }
+      return HcrmI18n.descriptorText(value, (id, vars) => this.t(id, this._counts(vars)));
+    },
+    _counts(vars) {
+      // Resolve the nested count descriptors of a descriptor's var bag.
+      if (!vars) return null;
+      const out = {};
+      for (const name of Object.keys(vars)) {
+        const v = vars[name];
+        out[name] = v && typeof v === "object" && v.plural !== undefined
+          ? this.tp(v.key, v.plural, v.vars || null)
+          : v;
+      }
+      return out;
     },
     formatPrice(cents) {
       // DKK via the shared runtime, which loads before this file: fixed
@@ -498,7 +600,16 @@ Vue.createApp({
       return HcrmI18n.money(cents, HcrmI18n.moneyCode());
     },
     formatDate(iso) {
-      return new Date(iso).toLocaleDateString();
+      // Numeric dates follow the UI language (da-DK / en-GB): the day order is
+      // part of the language, and `formatLang` is the one source for it. The
+      // previous no-argument call inherited the BROWSER locale, so a Danish
+      // UI on an English kiosk printed English dates.
+      return new Date(iso).toLocaleDateString(this.formatLang());
+    },
+    statusLabel(status) {
+      // Slice E: a status CHIP shows a visible label for a machine value; the
+      // :class binding keeps the raw value, so the CSS states never translate.
+      return this.t("status." + status);
     },
     showToast(msg) {
       this.toast = msg;
@@ -525,7 +636,8 @@ Vue.createApp({
         const data = await api("/auth/login", { method: "POST", body: this.loginForm });
         await this.afterLogin(data);
       } catch (e) {
-        this.loginError = e.message;
+        this.loginError = e.code === "auth.invalid_credentials"
+          ? { key: "auth.invalid_credentials" } : e.message;
       } finally {
         this.busy = false;
       }
@@ -547,7 +659,7 @@ Vue.createApp({
         // password is changed (the cart included — skip loading it).
         location.hash = "#/account";
         this.route = "#/account";
-        this.showToast("Please change your password before continuing");
+        this.showToast({ key: "auth.change_password_required" });
         return;
       }
       await this.loadCart();
@@ -573,7 +685,8 @@ Vue.createApp({
         });
         await this.afterLogin(data);
       } catch (e) {
-        this.loginError = e.message;
+        this.loginError = e.code === "auth.invalid_credentials"
+          ? { key: "auth.invalid_credentials" } : e.message;
       } finally {
         this.busy = false;
       }
@@ -592,12 +705,11 @@ Vue.createApp({
         // the creation-moment urgency to print it.
         if (data.qr_badge) {
           this.badgePrint = {
-            title: "Your QR login badge",
-            subtitle: "Welcome, " + data.user.name + "!",
+            title: this.t("account.badge_login_title"),
+            subtitle: this.t("account.badge_welcome", { name: data.user.name }),
             svg: data.qr_badge.svg,
             payload: data.qr_badge.payload,
-            warning: "Anyone holding this code can log in as you — keep it " +
-                     "private. Print it now while you have it.",
+            warning: this.t("account.badge_warn_register"),
           };
         }
         // No "Welcome" toast here: the greeting banner from saveSession
@@ -622,7 +734,7 @@ Vue.createApp({
       // and _closeOverlays on adjacent lines — clearing there would kill it
       // on the one path that most needs it); logout and session-expiry clear
       // it explicitly, and the next saveSession overwrites it.
-      this.greeting = "Hi " + user.name;
+      this.greeting = { key: "auth.greeting", vars: { name: user.name } };
       clearTimeout(this._greetingTimer);
       this._greetingTimer = setTimeout(() => (this.greeting = ""), 4000);
     },
@@ -694,7 +806,7 @@ Vue.createApp({
       location.hash = "#/login";
       this.route = "#/login";
       if (hadItems) {
-        this.showToast("Your list was saved — it will be here when you log back in");
+        this.showToast({ key: "auth.list_saved" });
       }
       return hadItems;
     },
@@ -712,7 +824,7 @@ Vue.createApp({
           this.user.must_change_password = false;
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
         }
-        this.showToast("Password updated — other sessions were signed out");
+        this.showToast({ key: "account.password_updated_toast" });
       } catch (e) {
         this.pwError = e.message;
       } finally {
@@ -733,7 +845,7 @@ Vue.createApp({
           this.user.has_qr_badge = true;
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
         }
-        this.showToast("QR badge generated — print it and keep it safe");
+        this.showToast({ key: "account.badge_generated" });
       } catch (e) {
         this.showToast(e.message);
       } finally {
@@ -748,16 +860,16 @@ Vue.createApp({
       // account page directly would print the whole page around the card.
       if (!this.badgeSvg) return;
       this.badgePrint = {
-        title: "Your QR login badge",
-        subtitle: "Rotated just now — the previous badge stopped working",
+        title: this.t("account.badge_login_title"),
+        subtitle: this.t("account.badge_rotated"),
         svg: this.badgeSvg,
         payload: this.badgePayload || "",
-        warning: "Anyone holding this code can log in as you — keep it private.",
+        warning: this.t("account.badge_warn"),
       };
     },
 
     async revokeMyBadge() {
-      if (!confirm("Revoke your QR badge? It will stop working immediately.")) return;
+      if (!confirm(this.t("account.revoke_confirm"))) return;
       try {
         await api("/auth/qr-badge", { method: "DELETE" });
         this.badgeSvg = "";
@@ -766,7 +878,7 @@ Vue.createApp({
           this.user.has_qr_badge = false;
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
         }
-        this.showToast("QR badge revoked");
+        this.showToast({ key: "account.badge_revoked" });
       } catch (e) {
         this.showToast(e.message);
       }
@@ -900,7 +1012,7 @@ Vue.createApp({
       // that path already toasted "Imported N items", and a second
       // "restored" toast would clobber it.
       if (this.cart && this.cart.lines.length && !this._cartImportedLegacy) {
-        this.showToast(`Your purchase list was restored (${this.cart.total_qty} item(s))`);
+        this.showToast({ key: "cart.restored", plural: this.cart.total_qty });
       }
       this._cartImportedLegacy = false;
     },
@@ -922,7 +1034,7 @@ Vue.createApp({
         if (lines.length) {
           try {
             this.cart = await api("/cart", { method: "PUT", body: { lines } });
-            this.showToast(`Imported ${lines.length} item(s) from your old purchase list`);
+            this.showToast({ key: "cart.imported", plural: lines.length });
             return true;
           } catch (e) {
             if (e.status === 404 || e.status === 422) {
@@ -934,7 +1046,7 @@ Vue.createApp({
                   this.cart = await api("/cart/items", { method: "POST", body: line });
                 } catch (_) { /* item gone from the catalogue */ }
               }
-              this.showToast("Imported your old purchase list (some items are gone)");
+              this.showToast({ key: "cart.imported_partial" });
               return true;
             } // transient errors: the import is one-time by design
           }
@@ -945,7 +1057,7 @@ Vue.createApp({
 
     _stockWarn(line) {
       if (line && line.qty > line.item.stock) {
-        this.showToast("Only " + line.item.stock + " in stock");
+        this.showToast({ key: "cart.only_stock", vars: { n: line.item.stock } });
       }
     },
 
@@ -956,7 +1068,7 @@ Vue.createApp({
         });
         const line = this.cart.lines.find(l => l.item.id === item.id);
         this._stockWarn(line);
-        this.showToast(item.name + " added to your purchase list");
+        this.showToast({ key: "cart.added", vars: { name: item.name } });
         this.closeDetail();
       });
     },
@@ -1014,7 +1126,7 @@ Vue.createApp({
         localStorage.setItem(USER_KEY, JSON.stringify(user));
         this.emailForm = { new_email: "", current_password: "" };
         this.emailOk = true;
-        this.showToast("Email updated — you were signed out on other devices");
+        this.showToast({ key: "account.email_updated_toast" });
       } catch (e) {
         this.emailError = e.message;   // 400 wrong-password/no-op, 409 taken, 422 shape
       } finally {
@@ -1031,7 +1143,8 @@ Vue.createApp({
         });
         this.user = user;
         localStorage.setItem(USER_KEY, JSON.stringify(user));
-        this.showToast(user.phone ? "Phone saved" : "Phone cleared");
+        if (user.phone) this.showToast({ key: "account.phone_saved" });
+        else this.showToast({ key: "account.phone_cleared" });
       } catch (e) {
         this.phoneError = e.message;   // 422: the normaliser's shape message
       } finally {
@@ -1055,8 +1168,8 @@ Vue.createApp({
         // Self: the flagged-account gate (change the password first).
         // Staff: the manage rule (staff never view an admin's badge).
         this.showToast(isSelf
-          ? "Change your password before using the scanner"
-          : "Cannot view this member's badge");
+          ? { key: "auth.change_password_scanner" }
+          : { key: "account.badge_not_allowed" });
         return false;
       }
       if (r.status === 200 && r.data) {
@@ -1065,37 +1178,34 @@ Vue.createApp({
           svg: r.data.svg,
           payload: r.data.payload,
           warning: r.data.migrated
-            ? "Your PREVIOUS printed badge stopped working when you viewed " +
-              "this one — print the new card now and replace it."
-            : "Anyone holding this code can log in as you — keep it private.",
+            ? this.t("account.badge_warn_migrated")
+            : this.t("account.badge_warn"),
         };
         return true;
       }
       const s = r.data && r.data.detail && r.data.detail.status;
       if (r.status === 404 || s === "none") {
         this.showToast(isSelf
-          ? "You have no badge yet — generate one below"
-          : "This member has no badge yet — they can generate one from their profile");
+          ? { key: "account.badge_none_self" }
+          : { key: "account.badge_none_member" });
       } else if (s === "no_key") {
-        this.showToast("Badge viewing is unavailable (no key) — logins are " +
-                       "unaffected; ask an admin to restore the badge key");
+        this.showToast({ key: "account.badge_no_key" });
       } else if (s === "key_mismatch") {
-        this.showToast("The badge key changed — regenerate your badge to " +
-                       "re-enable viewing (logins are unaffected)");
+        this.showToast({ key: "account.badge_key_mismatch" });
       } else {
-        this.showToast("Could not view the badge");
+        this.showToast({ key: "account.badge_view_failed" });
       }
       return false;
     },
 
     async showMyBadge() {
       const r = await api("/auth/qr-badge", { raw: true });
-      this._handleBadgeView(r, "Your QR badge", this.user ? this.user.name : "");
+      this._handleBadgeView(r, this.t("account.badge_self_title"), this.user ? this.user.name : "");
     },
 
     async viewMemberBadge(member) {
       const r = await api("/members/" + member.id + "/qr-badge", { raw: true });
-      this._handleBadgeView(r, "QR badge — " + member.name, member.email, false);
+      this._handleBadgeView(r, this.t("account.badge_modal_title", { name: member.name }), member.email, false);
     },
 
     async loadMyOrders() {
@@ -1207,7 +1317,7 @@ Vue.createApp({
       return this._cartOp(async () => {
         const n = parseInt(raw, 10);
         if (!Number.isFinite(n) || !Number.isInteger(Number(raw)) || n < 0) {
-          this.showToast("Enter a whole number of units (0 removes the line)");
+          this.showToast({ key: "cart.qty_invalid" });
           await this.loadCart();
         } else {
           try {
@@ -1230,7 +1340,7 @@ Vue.createApp({
 
     async donePurchase() {
       if (this.busy) return;
-      if (!this.purchase.length) { this.showToast("Your purchase list is empty"); return; }
+      if (!this.purchase.length) { this.showToast({ key: "cart.empty_toast" }); return; }
       this.busy = true;   // also drives the button's :disabled binding —
       try {               // without it a double-click fires a second POST
         // Serialized with every other cart mutation (the _cartOp chain):
@@ -1250,8 +1360,8 @@ Vue.createApp({
             this.route = "#/purchases";
             location.hash = "#/purchases";
             this.expandedOrders = [pid];                 // pre-expand the receipt
-            this.showToast("Purchase complete — " +
-              this.formatPrice(r.data.purchase.total_cents));
+            this.showToast({ key: "checkout.purchase_complete",
+              vars: { total: this.formatPrice(r.data.purchase.total_cents) } });
             // The receipt modal is EXCEPTION-ONLY (clamp-not-veto must stay
             // reportable, but a clean checkout gets no blocking dialog):
             // skipped orphans and clamped lines are the cases the history
@@ -1261,8 +1371,8 @@ Vue.createApp({
             if (skipped.length || clamped) this.lastReceipt = r.data;
             return;
           }
-          if (r.status === 400) { this.showToast("Cart is empty"); return; }
-          this.showToast("Checkout failed (" + r.status + ")");
+          if (r.status === 400) { this.showToast({ key: "checkout.cart_empty" }); return; }
+          this.showToast({ key: "checkout.failed", vars: { status: r.status } });
         });
       } finally {
         this.busy = false;
@@ -1600,11 +1710,13 @@ Vue.createApp({
         method: "POST", body: { token: code }, raw: true,
       });
       if (status === 403) {
-        this.showToast("Change your password before using the scanner");
+        this.showToast({ key: "auth.change_password_scanner" });
         return;
       }
       if (status === 401) { this.handleSessionExpired(); return; }
-      if (status !== 200 || !data) { this.showToast("Badge check failed"); return; }
+      if (status !== 200 || !data) {
+        this.showToast({ key: "auth.badge_check_failed" }); return;
+      }
       if (data.same_user) {
         await this.armLogoff();
       } else {
@@ -1617,7 +1729,7 @@ Vue.createApp({
       // are dropped — finish the current dialog first. Badges always
       // process: a second person at the counter is never ignored.
       if (this._modalOpen()) {
-        this.showToast("Finish the current dialog first");
+        this.showToast({ key: "scan.busy_dialog" });
         return;
       }
       if (!this.user) {
@@ -1630,17 +1742,17 @@ Vue.createApp({
       if (status === 401) { this.handleSessionExpired(); return; }
       if (status === 200 && data) {
         this.cart = data.cart;
-        this.showToast(data.item.name + " added to your purchase list");
+        this.showToast({ key: "cart.added", vars: { name: data.item.name } });
         this._stockWarn(this.cart.lines.find(l => l.item.id === data.item.id));
         return;
       }
       const detail = data && data.detail;
       if (status === 422 && detail && detail.status === "misread") {
-        this.showToast(detail.message || "Misread — re-scan");
+        this.showToast(detail.message || this.t("scan.misread"));
         return;
       }
       if (status === 400 && detail && detail.status === "badge") {
-        this.showToast("Badges log in, they are not catalogue items");
+        this.showToast({ key: "auth.badges_not_items" });
         return;
       }
       if (status === 404 && detail && detail.status === "unknown") {
@@ -1648,7 +1760,7 @@ Vue.createApp({
         this.openNextIntake();
         return;
       }
-      this.showToast((detail && detail.message) || `Scan failed (${status})`);
+      this.showToast((detail && detail.message) || this.t("scan.failed", { status }));
     },
 
     handleSessionExpired() {
@@ -1671,7 +1783,7 @@ Vue.createApp({
       this._cartImportedLegacy = false;
       location.hash = "#/login";
       this.route = "#/login";
-      this.showToast("Session expired — please log in again.");
+      this.showToast({ key: "auth.session_expired" });
     },
 
     /* ---------- scanner feed (round 4, T6): the daemon-forwarded queue ----
@@ -1795,22 +1907,18 @@ Vue.createApp({
           // The pill flipping to live/off IS the success feedback; say it
           // once as a toast.
           this.pairOpen = false;
-          this.showToast("Scanner paired — scans from this terminal now " +
-                         "arrive here, even with this window unfocused");
+          this.showToast({ key: "scanner.paired_toast" });
           this._feedDispatch({ type: "paired", token: data.token });
         } else {
           // The server's messages ARE the operator instructions; fall
           // back per status when the body carried none.
           const detail = data && data.detail;
           const fallbacks = {
-            403: "One-click pairing is loopback-only — use a browser on " +
-                 "the server host, or set HCRM_SCANNER_PAIR_ANY=1",
-            404: "No pairing file on the server — run " +
-                 "scanner_daemon.py --register on the kiosk host, then " +
-                 "click the pill again",
+            403: this.t("scanner.pair_loopback_only"),
+            404: this.t("scanner.pair_no_file"),
           };
           this.showToast((detail && detail.message) ||
-                         fallbacks[status] || ("Pairing failed (" + status + ")"));
+                         fallbacks[status] || this.t("scanner.pair_failed", { status }));
         }
       } catch (e) {
         this.showToast(e.message);
@@ -1826,8 +1934,7 @@ Vue.createApp({
       // (one click once the daemon has re-registered) — the recovery
       // loop is Unpair → DELETE + --register → click the pill.
       this.pairOpen = false;
-      this.showToast("Unpaired — re-run scanner_daemon.py --register, " +
-                     "then click the pill to pair again");
+      this.showToast({ key: "scanner.unpaired_toast" });
     },
 
     /* ---------- kiosk logoff countdown (Task 4's server deadline) ---------- */
@@ -1838,7 +1945,7 @@ Vue.createApp({
       });
       if (status === 401) { this.handleSessionExpired(); return; }
       if (status !== 200 || !data) {
-        this.showToast("Could not arm the logoff countdown");
+        this.showToast({ key: "account.logoff_arm_failed" });
         return;
       }
       // The server deadline is the truth (Task 4 enforces it lazily); the
@@ -1867,7 +1974,7 @@ Vue.createApp({
       this.clearLogoff();
       const announcedSave = await this.logout();   // best-effort: the server
       if (!announcedSave) {                        // deadline already killed
-        this.showToast("Logged off");              // the token if throttled
+        this.showToast({ key: "account.logged_off" });              // the token if throttled
       }
     },
 
@@ -1875,7 +1982,7 @@ Vue.createApp({
       this.clearLogoff();
       const { status } = await api("/auth/logoff-cancel", { method: "POST", raw: true });
       if (status === 401) { this.handleSessionExpired(); return; }
-      this.showToast("Logoff cancelled");
+      this.showToast({ key: "account.logoff_cancelled" });
     },
 
     clearLogoff() {
@@ -1896,7 +2003,7 @@ Vue.createApp({
           method: "POST", body: { token: code },
         });
       } catch (e) {
-        this.showToast("Switch failed: " + e.message);
+        this.showToast({ key: "auth.switch_failed", vars: { message: e.message } });
         return;
       }
       if (this.logoff) {                            // 3. a pending countdown
@@ -1916,7 +2023,8 @@ Vue.createApp({
         this.cart = { lines: [], total_qty: 0, total_cents: 0 };
         location.hash = "#/account";
         this.route = "#/account";
-        this.showToast(`Switched to ${auth.user.name} — change the password to continue`);
+        this.showToast({ key: "auth.switched_must_change",
+                         vars: { name: auth.user.name } });
         return;
       }
       await this.loadCart();                        // 6. the incoming user's list
@@ -1930,7 +2038,8 @@ Vue.createApp({
       // (not a 3 s toast) so the save is legible. Deliberately PERSISTENT
       // (click-dismissible via dismissGreeting): no auto-dismiss timer —
       // the reassurance must survive until the next user starts scanning.
-      this.greeting = `Switched to ${auth.user.name} — ${oldName}'s list was saved and will be back when ${oldName} signs in`;
+      this.greeting = { key: "auth.switched_saved",
+                        vars: { name: auth.user.name, old: oldName } };
       clearTimeout(this._greetingTimer);
       await this.replayStagedScans();
     },
@@ -1943,7 +2052,7 @@ Vue.createApp({
         this.stagedScans = this.stagedScans.slice(-STAGING_CAP);
       }
       this.persistStagedScans();
-      this.showToast("Scan saved — log in or scan your badge to assign it");
+      this.showToast({ key: "scan.staged_saved" });
     },
 
     persistStagedScans() {
@@ -1967,14 +2076,14 @@ Vue.createApp({
         if (status === 401) { this.handleSessionExpired(); return; }
         if (status === 200 && data) {
           this.cart = data.cart;
-          this.showToast(data.item.name + " added (assigned scan)");
+          this.showToast({ key: "scan.added_assigned", vars: { name: data.item.name } });
         } else if (status === 422) {
-          this.showToast("A staged scan was a misread — dropped");
+          this.showToast({ key: "scan.staged_misread" });
         } else if (status === 404 && data && data.detail && data.detail.status === "unknown") {
           this.intakeQueue.push(data.detail);   // unknown: take it through intake
           continue;
         } else {
-          this.showToast("A staged scan could not be added");
+          this.showToast({ key: "scan.staged_failed" });
         }
       }
       this.stagedScans = [];
@@ -2016,7 +2125,7 @@ Vue.createApp({
       if (a.format) bits.push(a.format);
       if (a.region) bits.push(a.region);
       if (a.usage) bits.push(a.usage);
-      if (a.globally_unique === false) bits.push("restricted circulation");
+      if (a.globally_unique === false) bits.push(this.t("intake.restricted"));
       return bits.join(" · ");
     },
 
@@ -2044,7 +2153,7 @@ Vue.createApp({
         this.cart = await api("/cart/items", {
           method: "POST", body: { item_id: item.id, qty: 1 },
         });
-        this.showToast(item.name + " added to your purchase list");
+        this.showToast({ key: "cart.added", vars: { name: item.name } });
         this.closeIntake();
       } catch (e) {
         this.showToast(e.message);
@@ -2054,7 +2163,7 @@ Vue.createApp({
     async submitIntake() {
       const intake = this.scanIntake;
       if (!intake || intake.busy) return;
-      if (!intake.name.trim()) { this.showToast("Enter the item name first"); return; }
+      if (!intake.name.trim()) { this.showToast({ key: "intake.name_required" }); return; }
       intake.busy = true;
       try {
         if (this.isStaff) await this.submitIntakeStaff(intake);
@@ -2082,7 +2191,7 @@ Vue.createApp({
         const existing = await api("/items?barcode=" + encodeURIComponent(gtin14));
         if (existing.length) {
           await this._intakeAddToCart(existing[0].id);
-          this.showToast(`Already filed as ${existing[0].sku} — added instead`);
+          this.showToast({ key: "intake.already_filed", vars: { sku: existing[0].sku } });
           await this._resolveIfRequested(intake, existing[0].id);
           this.closeIntake();
           return;
@@ -2109,7 +2218,7 @@ Vue.createApp({
           const existing = await api("/items?barcode=" + encodeURIComponent(gtin14));
           if (existing.length) {
             await this._intakeAddToCart(existing[0].id);
-            this.showToast(`Already filed as ${existing[0].sku} — added instead`);
+            this.showToast({ key: "intake.already_filed", vars: { sku: existing[0].sku } });
             await this._resolveIfRequested(intake, existing[0].id);
             this.closeIntake();
             return;
@@ -2118,7 +2227,7 @@ Vue.createApp({
         throw e;
       }
       await this._intakeAddToCart(item.id);
-      this.showToast(item.name + " added to the catalogue and your purchase list");
+      this.showToast({ key: "intake.added", vars: { name: item.name } });
       await this._resolveIfRequested(intake, item.id);
       this.closeIntake();
       if (this.currentView === "admin" || this.currentView === "table") {
@@ -2138,7 +2247,7 @@ Vue.createApp({
             method: "POST",
             body: { item_id: itemId, add_to_cart: intake.addToCart },
           });
-          this.showToast("Scan request resolved");
+          this.showToast({ key: "intake.resolved" });
         } else {
           const open = await api("/scan-requests?status=open");
           const match = open.find(r => r.code === intake.code);
@@ -2147,12 +2256,12 @@ Vue.createApp({
               method: "POST",
               body: { item_id: itemId, add_to_cart: true },
             });
-            this.showToast(`Also resolved ${match.requester.name}'s request for this code`);
+            this.showToast({ key: "intake.resolved_also", vars: { name: match.requester.name } });
           }
         }
         this.loadScanRequests();
       } catch (e) {
-        this.showToast("Created, but resolving the request failed: " + e.message);
+        this.showToast({ key: "intake.resolve_failed", vars: { message: e.message } });
       }
     },
 
@@ -2168,17 +2277,17 @@ Vue.createApp({
             price_cents: price,
           },
         });
-        this.showToast("Reported to staff — scan it again once it's in the catalogue");
+        this.showToast({ key: "intake.reported" });
         this.closeIntake();
       } catch (e) {
         if (e.status === 409 && e.detail && e.detail.status === "already" && e.detail.item) {
           await this._intakeAddToCart(e.detail.item.id);
-          this.showToast(`Already filed as ${e.detail.item.sku} — added instead`);
+          this.showToast({ key: "intake.already_filed", vars: { sku: e.detail.item.sku } });
           this.closeIntake();
           return;
         }
         if (e.status === 409 && e.detail && e.detail.status === "duplicate") {
-          this.showToast("You already reported this code — staff know");
+          this.showToast({ key: "intake.duplicate" });
           this.closeIntake();
           return;
         }
@@ -2299,7 +2408,7 @@ Vue.createApp({
     },
 
     exportCSV() {
-      if (!this.exportRows.length) return this.showToast("Nothing to export");
+      if (!this.exportRows.length) return this.showToast({ key: "export.empty" });
       const cols = this.exportCols;
       const header = cols.map((c) => this.csvEscape(c.label)).join(",");
       const lines = this.exportRows.map(
@@ -2309,14 +2418,19 @@ Vue.createApp({
       this.downloadBlob(
         "\ufeff" + [header, ...lines].join("\n"), "items-export.csv", "text/csv;charset=utf-8"
       );
-      this.showToast(
-        `Exported ${this.exportRows.length} row(s) × ${cols.length} column(s) as CSV`
-      );
+      this.showToast({
+        key: "export.done",
+        vars: {
+          rows: { key: "common.rows", plural: this.exportRows.length },
+          cols: { key: "common.cols", plural: cols.length },
+          format: "CSV",
+        },
+      });
     },
 
     exportPDF() {
-      if (!this.exportRows.length) return this.showToast("Nothing to export");
-      if (!window.jspdf) return this.showToast("PDF library not loaded");
+      if (!this.exportRows.length) return this.showToast({ key: "export.empty" });
+      if (!window.jspdf) return this.showToast({ key: "export.pdf_unavailable" });
       const cols = this.exportCols;
       // The body cells below are formatted ("1.234,50 DKK"), so the sheet
       // names the currency once, above the table — but only when a price
@@ -2324,13 +2438,16 @@ Vue.createApp({
       const hasPrice = cols.some((c) => c.key === "price_cents");
       const doc = new window.jspdf.jsPDF({ orientation: "landscape" });
       doc.setFontSize(14);
-      doc.text("HCRM — Items export", 14, 15);
+      doc.text(this.t("export.pdf_title"), 14, 15);
       doc.setFontSize(9);
-      doc.text(
-        `${this.exportRows.length} row(s) × ${cols.length} column(s) — ` +
-        new Date().toLocaleString(), 14, 22
-      );
-      if (hasPrice) { doc.setFontSize(9); doc.text("Prices in DKK", 14, 28); }
+      // The date follows the UI language, like every other date (formatLang is
+      // the one source; a no-arg toLocaleString would inherit the browser's).
+      doc.text(this.t("export.summary", {
+        rows: this.tp("common.rows", this.exportRows.length),
+        cols: this.tp("common.cols", cols.length),
+        date: new Date().toLocaleString(this.formatLang()),
+      }), 14, 22);
+      if (hasPrice) { doc.setFontSize(9); doc.text(this.t("export.pdf_prices"), 14, 28); }
       doc.autoTable({
         startY: hasPrice ? 33 : 27,
         head: [cols.map((c) => c.label)],
@@ -2339,9 +2456,14 @@ Vue.createApp({
         headStyles: { fillColor: [37, 99, 235] },
       });
       doc.save("items-export.pdf");
-      this.showToast(
-        `Exported ${this.exportRows.length} row(s) × ${cols.length} column(s) as PDF`
-      );
+      this.showToast({
+        key: "export.done",
+        vars: {
+          rows: { key: "common.rows", plural: this.exportRows.length },
+          cols: { key: "common.cols", plural: cols.length },
+          format: "PDF",
+        },
+      });
     },
 
     /* ---------- admin: items ---------- */
@@ -2389,7 +2511,7 @@ Vue.createApp({
       this.intakeQueue = [];
       this.scanIntake = {
         code: req.code,
-        message: `Scan request from ${req.requester.name}`,
+        message: this.t("intake.request_from", { name: req.requester.name }),
         analysis: { kind: req.kind, gtin14: req.gtin14, format: req.kind === "gtin" ? "GTIN" : "" },
         catalogable: !!req.gtin14,
         suggestions: { by_prefix: [], by_keyword: [], by_semantic: [] },
@@ -2404,10 +2526,11 @@ Vue.createApp({
     },
 
     async dismissRequest(req) {
-      if (!confirm(`Dismiss the scan request from ${req.requester.name} for "${req.name}"?`)) return;
+      if (!confirm(this.t("admin.request_dismiss_confirm",
+        { name: req.requester.name, item: req.name }))) return;
       try {
         await api(`/scan-requests/${req.id}/dismiss`, { method: "POST" });
-        this.showToast("Scan request dismissed");
+        this.showToast({ key: "admin.request_dismissed" });
         this.loadScanRequests();
       } catch (e) {
         this.showToast(e.message);
@@ -2440,10 +2563,10 @@ Vue.createApp({
       try {
         if (this.itemEditingId) {
           await api("/items/" + this.itemEditingId, { method: "PATCH", body: payload });
-          this.showToast("Item updated");
+          this.showToast({ key: "item.updated" });
         } else {
           await api("/items", { method: "POST", body: payload });
-          this.showToast("Item added to the catalogue");
+          this.showToast({ key: "item.added" });
         }
         this.resetItemForm();
         this.loadAdminData();
@@ -2474,10 +2597,10 @@ Vue.createApp({
     },
 
     async deleteItem(item) {
-      if (!confirm(`Delete "${item.name}" from the catalogue?`)) return;
+      if (!confirm(this.t("admin.item_delete_confirm", { name: item.name }))) return;
       try {
         await api("/items/" + item.id, { method: "DELETE" });
-        this.showToast("Item deleted");
+        this.showToast({ key: "admin.item_deleted" });
         this.loadAdminData();
         if (this.currentView === "table") this.loadDataPage();
       } catch (e) {
@@ -2491,18 +2614,17 @@ Vue.createApp({
       this.busy = true;
       try {
         const data = await api("/members", { method: "POST", body: this.memberForm });
-        this.showToast("Account created for " + this.memberForm.name);
+        this.showToast({ key: "admin.member_created", vars: { name: this.memberForm.name } });
         // Task 2: the 201 carries the member's first badge — show it so the
         // counter can print the card immediately (re-viewable after Task A;
         // keep the urgency, drop the old unrecoverability claim).
         if (data.qr_badge) {
           this.badgePrint = {
-            title: "QR badge — " + this.memberForm.name,
-            subtitle: "Print the membership card now",
+            title: this.t("account.badge_modal_title", { name: this.memberForm.name }),
+            subtitle: this.t("admin.badge_print_now"),
             svg: data.qr_badge.svg,
             payload: data.qr_badge.payload,
-            warning: "Anyone holding this code can log in as the member — " +
-                     "hand it over privately. Print it now while you have it.",
+            warning: this.t("admin.badge_warn_member"),
           };
         }
         this.memberForm = { name: "", email: "", password: "", role: "member" };
@@ -2515,10 +2637,10 @@ Vue.createApp({
     },
 
     async deleteMember(member) {
-      if (!confirm(`Delete the account of ${member.name}?`)) return;
+      if (!confirm(this.t("admin.member_delete_confirm", { name: member.name }))) return;
       try {
         await api("/members/" + member.id, { method: "DELETE" });
-        this.showToast("Account deleted");
+        this.showToast({ key: "admin.member_deleted" });
         this.loadAdminData();
       } catch (e) {
         this.showToast(e.message);
@@ -2539,10 +2661,10 @@ Vue.createApp({
     },
 
     async revokeMemberBadge(member) {
-      if (!confirm(`Revoke the QR badge of ${member.name}?`)) return;
+      if (!confirm(this.t("admin.badge_revoke_confirm", { name: member.name }))) return;
       try {
         await api("/members/" + member.id + "/qr-badge", { method: "DELETE" });
-        this.showToast("QR badge revoked for " + member.name);
+        this.showToast({ key: "admin.badge_revoked_for", vars: { name: member.name } });
         if (this.memberBadge && this.memberBadge.id === member.id) this.memberBadge = null;
         this.loadAdminData();
       } catch (e) {
@@ -2566,7 +2688,7 @@ Vue.createApp({
       const member = this.pwResetMember;
       if (!member) return;
       if (this.pwResetValue.length < 8) {
-        this.pwResetError = "Password must be at least 8 characters";
+        this.pwResetError = this.t("account.password_too_short");
         return;
       }
       this.pwResetError = "";
@@ -2575,7 +2697,7 @@ Vue.createApp({
           method: "PATCH", body: { password: this.pwResetValue },
         });
         this.showToast(
-          "Password reset for " + member.name + " (their sessions were signed out)"
+          { key: "account.password_reset", vars: { name: member.name } }
         );
         this.closePwReset();
       } catch (e) {
