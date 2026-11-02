@@ -71,6 +71,40 @@
           <rect x="27" y="0" width="6" height="30" fill="#C8102E"/>
           <rect x="0" y="12" width="60" height="6" fill="#C8102E"/></svg>
       </button>
+      <!-- Font size (design refresh C2): two native buttons right beside the
+           language flag, scaling the ROOT font — the stylesheet is rem-based,
+           so the whole UI follows one value. The glyphs are inline SVG
+           strokes, NOT a literal "A+"/"A-" text node (that would be
+           untranslatable hardcoded copy); the accessible names and the
+           current-percentage title are CSV rows. The ends are :disabled, so a
+           press at 85 %/135 % is visibly impossible rather than silently
+           ignored, and the wrapper is .no-print (a receipt shows no UI
+           chrome). Both data payload bindings are machine values. -->
+      <div class="font-scale no-print" data-font-scale-control
+           :data-font-scale="fontScalePercent">
+        <button type="button" class="font-step" data-font-step="down"
+                :disabled="!canShrinkFont"
+                :aria-label="t('ui.font_smaller')" :title="fontScaleHint"
+                @click="smallerFont">
+          <svg viewBox="0 0 20 16" fill="none" stroke="currentColor"
+               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false">
+            <path d="M2 13.5 6 2.5 10 13.5 M3.6 10 h4.8" />
+            <path d="M13.5 8 h5" />
+          </svg>
+        </button>
+        <button type="button" class="font-step" data-font-step="up"
+                :disabled="!canGrowFont"
+                :aria-label="t('ui.font_larger')" :title="fontScaleHint"
+                @click="largerFont">
+          <svg viewBox="0 0 20 16" fill="none" stroke="currentColor"
+               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false">
+            <path d="M2 13.5 6 2.5 10 13.5 M3.6 10 h4.8" />
+            <path d="M13.5 8 h5 M16 5.5 v5" />
+          </svg>
+        </button>
+      </div>
       <!-- Round 4: which scan path is live. "live" = the grab daemon is
            paired and the queue poll succeeds; "off" = paired but the
            server is unreachable (polling continues); "unpaired" = the
@@ -1034,6 +1068,11 @@
      scan bus — pinned in tests/test_frontend_contract.py). -->
 <script src="/scancapture.js"></script>
 <script src="/scanfeed.js"></script>
+<!-- interaction.js MUST load before app.js: the boot read (readScale) and the
+     fontScale watcher (applyScale/writeScale) reference the HcrmInteraction
+     global, and a reversed order is an undefined reference in data(). Script
+     order pinned in tests/test_font_scale.py. -->
+<script src="/interaction.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

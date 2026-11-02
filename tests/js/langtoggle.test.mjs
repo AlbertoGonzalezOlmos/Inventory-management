@@ -366,10 +366,16 @@ test("the SHIPPED boot block: applies, writes once, strips, keeps hash (and neve
   // the SEQUENCE app.js actually runs: apply -> persist (guarded, once) ->
   // strip (guarded), before mount, with the hash and sibling params intact.
   const start = appSrc.indexOf("const boot = HcrmI18n.bootPlan(");
-  const end = appSrc.indexOf("Vue.createApp({");
+  // The slice ends at the NEXT boot block (design refresh C2's font scale):
+  // this test proves the LANGUAGE sequence only. The font boot has its own
+  // pins — fontscale.test.mjs for the behaviour and tests/test_font_scale.py
+  // for the order (applyLang < font boot < Vue.createApp).
+  const end = appSrc.indexOf("const bootFontScale =");
   assert.ok(start !== -1 && end > start, "the boot block markers moved");
   const bootSrc = appSrc.slice(start, end);
   assert.ok(!bootSrc.includes("Vue.createApp"), "the slice must end before mount");
+  assert.ok(!bootSrc.includes("HcrmInteraction"),
+    "the language boot slice must not reach into the font bootstrap");
 
   function runBoot({ search = "", stored = null, pathname = "/", hash = "", deny = false } = {}) {
     const writes = [], replaces = [], applied = [];

@@ -158,6 +158,17 @@ if (boot.strip) {
   } catch (e) { /* history unavailable: boot already applied the language */ }
 }
 
+// Font-size bootstrap (design refresh C2): the stored device scale, applied to
+// the ROOT element BEFORE mount, exactly like applyLang. A post-mount write
+// would paint 100 % first and then jump — the kiosk's user must never see the
+// wrong size, not even for a frame. readScale NEVER writes: a first visit
+// stores nothing until a button is pressed, and a storage-blocked device boots
+// at 100 % instead of failing. The helper owns the key and the 0.85–1.35
+// clamp; data() reads the captured value, so the buttons and the rendered size
+// cannot disagree.
+const bootFontScale = HcrmInteraction.readScale(localStorage);
+HcrmInteraction.applyScale(bootFontScale);
+
 Vue.createApp({
   data() {
     return {
@@ -166,6 +177,10 @@ Vue.createApp({
       // the boot plan (query > stored > default) — never re-detected after
       // the ?lang strip. Reactive, so t()-bound copy follows every toggle.
       lang: boot.lang,
+      // Design refresh C2: this DEVICE's root-font scale (0.85–1.35, default
+      // 1 — 100 %). Captured at boot by the helper that applied it; the
+      // watcher below is the only post-boot writer.
+      fontScale: bootFontScale,
       route: location.hash || "#/catalogue",
       busy: false,
 
@@ -330,6 +345,25 @@ Vue.createApp({
     pairSummary() {
       if (this.scannerFeed === "off") return this.t("scanner.paired_offline");
       return this.t("scanner.paired");
+    },
+    /* ---------- design refresh C2: the font-size stepper ---------- */
+    // The end stops, read from the helper's constants so the disabled state
+    // and the clamp can never disagree. A disabled button is also the visible
+    // explanation of why a press at 85 %/135 % does nothing.
+    canShrinkFont() {
+      return this.fontScale > HcrmInteraction.FONT_SCALE_MIN;
+    },
+    canGrowFont() {
+      return this.fontScale < HcrmInteraction.FONT_SCALE_MAX;
+    },
+    fontScalePercent() {
+      return Math.round(this.fontScale * 100);
+    },
+    // Both buttons' title: the CURRENT percentage, in a CSV row so the percent
+    // sign's placement follows the language ("100%" vs "100 %"). Computed,
+    // so an open tooltip and a language flip stay in step.
+    fontScaleHint() {
+      return this.t("ui.font_scale_hint", { percent: this.fontScalePercent });
     },
     isStaff() {
       return !!this.user && (this.user.role === "staff" || this.user.role === "admin");
@@ -520,6 +554,17 @@ Vue.createApp({
       try { localStorage.setItem(LANG_KEY, next); } catch (e) { /* kiosk */ }
       HcrmI18n.applyLang(next);
     },
+    // The font-size stepper (C2): the SINGLE post-boot writer, mirroring the
+    // lang watcher. APPLY first, persist second — a storage-blocked kiosk
+    // must still scale for this session (writeScale catches and reports
+    // false; the value simply is not remembered). Registered as a watcher, so
+    // only a button press (or a test) can reach it: a first visit writes
+    // nothing, and logout never clears the key (a device preference, like
+    // hcrm_lang and the terminal token).
+    fontScale(next) {
+      HcrmInteraction.applyScale(next);
+      HcrmInteraction.writeScale(localStorage, next);
+    },
     search() {
       this.debouncedReload();
     },
@@ -592,6 +637,17 @@ Vue.createApp({
     /* i18n (item 3): the toggle and the transient-descriptor renderer. */
     toggleLang() {
       this.lang = this.nextLang;
+    },
+    /* Design refresh C2: the font-size stepper. The helper owns the grid and
+     * the clamp, so a click can never land outside 0.85–1.35. The watcher does
+     * the apply/persist; assigning an unchanged value is a no-op there (Vue
+     * only fires on change), so a synthetic click on an end button neither
+     * rewrites storage nor touches the root style. */
+    smallerFont() {
+      this.fontScale = HcrmInteraction.stepScale(this.fontScale, -1);
+    },
+    largerFont() {
+      this.fontScale = HcrmInteraction.stepScale(this.fontScale, 1);
     },
     msg(value) {
       // Slice B: a PLURAL descriptor carries its count separately

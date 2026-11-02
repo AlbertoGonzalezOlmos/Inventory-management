@@ -413,3 +413,6 @@ table.selected_rows.one,{n} selected row,{n} markeret række
 table.selected_rows.other,{n} selected rows,{n} markerede rækker
 table.selection_hint,Click a row or a column header to select it · Shift-click for a range · Ctrl/Cmd-click to add/remove · analysis and exports use the current selection (or everything shown if nothing is selected).,"Klik på en række eller en kolonneoverskrift for at markere den · Skift-klik for et interval · Ctrl/Cmd-klik for at tilføje eller fjerne · analysen og eksporten bruger den aktuelle markering (eller alt det, der vises, hvis intet er markeret)."
 table.title,Items in the database,Varer i databasen
+ui.font_larger,Make the text larger,Gør teksten større
+ui.font_scale_hint,Text size: {percent}%,Tekststørrelse: {percent} %
+ui.font_smaller,Make the text smaller,Gør teksten mindre

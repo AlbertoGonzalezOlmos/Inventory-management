@@ -378,6 +378,18 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
         failures.append(f"[{label}] the login view must render exactly the two "
                         "credential inputs (the badge-code fallback must not "
                         "come back — scan anywhere is the one badge path)")
+    # Design refresh C2: the font-size stepper is part of the header cluster on
+    # EVERY app view. This gate cannot click (dump-dom only), so it pins what a
+    # broken helper/computed WOULD blank: the two native buttons and a numeric
+    # percentage on the state binding (a failed boot read leaves data-font-scale
+    # empty; a missing method leaves the cluster absent).
+    steps = count(r'data-font-step="', dom)
+    if count(r"data-font-scale-control", dom) != 1 or steps != 2:
+        failures.append(f"[{label}] the font-size stepper is not the two-button "
+                        f"cluster (found {steps} button(s))")
+    if count(r'data-font-scale="(?:85|90|100|110|120|130|135)"', dom) < 1:
+        failures.append(f"[{label}] data-font-scale is not a valid percentage — "
+                        "the boot read or the fontScale computed failed")
     # The language toggle (item 3), for every app target: `expected_lang` is the
     # DEFAULT direction or the ?lang= opposite one — both polarities run.
     failures.extend(check_lang_direction(dom, expected_lang))

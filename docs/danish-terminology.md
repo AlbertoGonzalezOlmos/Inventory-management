@@ -62,6 +62,9 @@ header states the currency).
 | Account → Security | Konto → Sikkerhed |
 | Security (tab) | Sikkerhed |
 | role | rolle |
+| text size | tekststørrelse |
+| make the text larger | Gør teksten større |
+| make the text smaller | Gør teksten mindre |
 
 ## People and roles
 

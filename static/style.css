@@ -116,6 +116,36 @@ body {
   box-shadow: 0 0 0 1px rgba(16, 24, 40, .12);
 }
 
+/* Font-size stepper (design refresh C2): the flag's sibling in the userbox.
+ * Same 28px height as .lang-toggle so the cluster keeps one baseline, a 2px
+ * internal gap so the pair reads as one control, and flex: 0 0 auto so the
+ * 900px reflow can never squeeze either button. The root font — not these
+ * buttons — is what scales: the stylesheet is rem-based, so .font-step grows
+ * with the UI too. */
+.font-scale { display: inline-flex; gap: 2px; flex: 0 0 auto; }
+.font-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.font-step:first-child { border-radius: 6px 0 0 6px; }
+.font-step:last-child { border-radius: 0 6px 6px 0; }
+.font-step:hover:not(:disabled) { background: var(--bg); }
+.font-step:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.font-step:disabled { opacity: .45; cursor: not-allowed; }
+.font-step svg { display: block; width: 20px; height: 16px; }
+
 /* ---------- buttons, forms ---------- */
 .btn {
   display: inline-block;
