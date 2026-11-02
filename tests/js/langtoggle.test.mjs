@@ -159,6 +159,72 @@ test("a TWO-count toast descriptor pluralises each count and re-renders on a fli
 });
 
 
+test("apiError: the response headers become code, vars, field and copy", (t) => {
+  // Slice E's descriptor path ends at the server boundary: item 6's headers are
+  // what make a coded error a {key, vars} descriptor. The SHIPPED apiError is
+  // executed (brace-extracted), with only `location` stubbed for node.
+  const savedLocation = globalThis.location;
+  const savedStorage = globalThis.localStorage;
+  globalThis.location = { search: "" };   // node has neither global
+  globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  t.after(() => {
+    if (savedLocation === undefined) delete globalThis.location;
+    else globalThis.location = savedLocation;
+    if (savedStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = savedStorage;
+  });
+  const apiError = new Function(
+    "HcrmI18n",
+    `"use strict"; ${extractMethod("function apiError(res, data, fallbackCode) {")}; return apiError;`,
+  )(HcrmI18n);
+  const res = (headers, status = 409) => ({
+    status, headers: { get: (name) => (name in headers ? headers[name] : null) },
+  });
+
+  const coded = apiError(
+    res({ "X-Error-Code": "barcode_taken", "X-Error-Vars": "sku=SKU%2DA" }),
+    { detail: "Barcode already assigned to item SKU-A" },
+  );
+  assert.equal(coded.status, 409);
+  assert.equal(coded.code, "barcode_taken");
+  assert.deepEqual(coded.vars, { sku: "SKU-A" }, "the vars header is URL-decoded");
+  assert.equal(coded.detail, "Barcode already assigned to item SKU-A",
+    "the body detail stays verbatim (the flows branch on it)");
+  assert.equal(coded.message,
+    MESSAGES.en["error.barcode_taken"].replace("{sku}", "SKU-A"));
+
+  const validated = apiError(res({ "X-Error-Code": "validation_field" }, 422),
+    { detail: [{ loc: ["body", "price_cents"], msg: "Input should be >= 0" }] });
+  assert.equal(validated.field, "price_cents", "loc[-1] is the field");
+  assert.equal(validated.message, MESSAGES.en["error.validation_field"]
+    .replace("{field}", MESSAGES.en["common.price"]));
+
+  const fallback = apiError(res({}), null, "invalid_credentials");
+  assert.equal(fallback.code, "invalid_credentials", "our own 401 row is the fallback");
+  assert.equal(fallback.message, MESSAGES.en["error.invalid_credentials"]);
+});
+
+test("errDescriptor: a coded error becomes a re-renderable {key, vars}", () => {
+  // The slots that render through msg() hold this — which is how an open
+  // server error follows the flag (a plain string could not).
+  const m = appObject("errDescriptor(err) {");
+  const state = { ...m, lang: "da" };
+  assert.deepEqual(state.errDescriptor({ code: "item_not_found", message: "Item not found" }),
+    { key: "error.item_not_found", vars: null });
+  assert.deepEqual(state.errDescriptor(
+    { code: "barcode_taken", vars: { sku: "SKU-A" }, message: "x" }),
+    { key: "error.barcode_taken", vars: { sku: "SKU-A" } });
+  assert.deepEqual(state.errDescriptor({ code: "validation_field", field: "qty" }),
+    { key: "error.validation_field", vars: { field: MESSAGES.da["common.qty"] } });
+  // Uncodable errors keep their text (a browser string, or a message with no row).
+  assert.equal(state.errDescriptor({ message: "Failed to fetch" }), "Failed to fetch");
+  assert.equal(state.errDescriptor(null), "");
+  state.lang = "en";
+  assert.deepEqual(state.errDescriptor({ code: "item_not_found", message: "x" }),
+    { key: "error.item_not_found", vars: null }, "the code, not the language, decides");
+});
+
+
 test("applyLang sets <html lang> and the title from the bundle, both directions", () => {
   for (const lang of ["en", "da"]) {
     const doc = { documentElement: {}, title: "" };

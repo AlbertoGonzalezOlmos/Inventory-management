@@ -145,10 +145,15 @@ COMMENT_LINE = re.compile(r"^\s*#")
 #: Slice C adds the first computed families: the calendar picks weekday/month labels by
 #: index at render time (`"date.dow." + key`, `"date.month." + n`), so no literal id
 #: exists for pass 2 to see. Plural pairs are covered separately by the suffix rule.
+#: Item 6 adds `error.`: the wire names the code (`X-Error-Code`), never a CSV row, and
+#: static/i18n.js resolves it as `"error." + code` — the registry (app/error_codes.py)
+#: is what guarantees every shipped code has a row, not this file.
 DYNAMIC_FAMILIES: dict[str, tuple[int, str]] = {
     "date.dow.": (149, "static/app.js calendarWeekdays(): t('date.dow.' + key)"),
     "date.month.": (150, "static/app.js calendarMonthLabel(): t('date.month.' + n)"),
     "date.month_long.": (151, "static/app.js calendarMonthLongLabel(): t('date.month_long.' + n)"),
+    "error.": (159, "static/i18n.js errorText()/errDescriptor(): t('error.' + code), "
+                         "code = the X-Error-Code header (app/error_codes.py)"),
 }
 
 

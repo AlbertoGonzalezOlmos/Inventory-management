@@ -1,10 +1,11 @@
 """Shared FastAPI dependencies: current user and role guards."""
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import Session
 
 from app.database import get_session
+from app.error_codes import api_error
 from app.models import AuthToken, User, utcnow
 from app.security import token_hash
 
@@ -24,19 +25,13 @@ def get_current_user(
     session: Session = Depends(get_session),
 ) -> User:
     if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-        )
+        raise api_error("not_authenticated")
 
     # Tokens are stored as SHA-256 hashes; look up by hash of the presented one.
     auth_token = session.get(AuthToken, token_hash(credentials.credentials))
     now = utcnow()
     if auth_token is None or auth_token.expires_at < now:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token invalid or expired",
-        )
+        raise api_error("token_invalid")
 
     # Lazy logoff expiry (Task 4): a pending countdown whose deadline has
     # passed kills the token even if the browser that armed it never comes
@@ -54,40 +49,25 @@ def get_current_user(
             # The 401 must not depend on the cleanup write succeeding: the
             # deadline comparison is authoritative even if the delete fails.
             session.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token invalid or expired",  # uniform: no mechanism leak
-        )
+        raise api_error("token_invalid")  # uniform: no mechanism leak
 
     user = session.get(User, auth_token.user_id)
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="User no longer exists"
-        )
+        raise api_error("user_gone")
     # Force the password change before anything else: applies to the seeded
     # default admin and to admin-issued password resets.
     if user.must_change_password and request.url.path not in MUST_CHANGE_EXEMPT_PATHS:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Password change required: change your password "
-            "(Account → Change password) before using the app",
-        )
+        raise api_error("password_change_required")
     return user
 
 
 def require_staff(user: User = Depends(get_current_user)) -> User:
     if user.role not in ("staff", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Staff privileges required",
-        )
+        raise api_error("staff_required")
     return user
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:
     if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin privileges required",
-        )
+        raise api_error("admin_required")
     return user

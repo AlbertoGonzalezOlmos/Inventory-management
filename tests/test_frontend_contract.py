@@ -570,7 +570,11 @@ def test_cart_and_checkout_toasts_are_csv_bound():
     """Every cart/checkout toast is a {key, vars} descriptor (an open toast
     re-renders with the flag) or a tp() plural. Method-body scoped: the scan
     and intake flows still carry the same English sentence until slice D, so a
-    whole-file grep would over-claim."""
+    whole-file grep would over-claim.
+
+    The server's 400 empty-cart verdict renders through item 6's coded
+    descriptor (`error.cart_empty`), so the client-side row it used to name is
+    gone — one row per sentence."""
     expected = {
         "_stockWarn(line) {": ['key: "cart.only_stock"'],
         "addToPurchase(item) {": ['key: "cart.added", vars: { name: item.name }'],
@@ -580,7 +584,7 @@ def test_cart_and_checkout_toasts_are_csv_bound():
                                           'key: "cart.imported_partial"'],
         "async donePurchase() {": ['key: "cart.empty_toast"',
                                    'key: "checkout.purchase_complete"',
-                                   'key: "checkout.cart_empty"',
+                                   'this.errDescriptor(',
                                    'key: "checkout.failed", vars: { status: r.status }'],
     }
     for header, keys in expected.items():
@@ -872,7 +876,10 @@ def test_slice_e_toasts_confirms_and_exports_are_csv_bound():
     js = _read("app.js")
     for needle in (
         'key: "scanner.paired_toast"', 'key: "scanner.unpaired_toast"',
-        't("scanner.pair_loopback_only")', 't("scanner.pair_no_file")',
+        # Item 6 moved the two operator instructions to the registry
+        # (error.pair_loopback_only / error.no_pairing_file): the pairing
+        # branch renders the coded row, keeping this row only as the uncoded
+        # fallback.
         't("scanner.pair_failed", { status })',
         'key: "export.empty"', 'key: "export.pdf_unavailable"',
         'key: "admin.request_dismissed"', 'key: "admin.item_deleted"',

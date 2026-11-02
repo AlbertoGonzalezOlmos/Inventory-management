@@ -13,6 +13,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
@@ -20,6 +22,7 @@ from sqlmodel import Session, select
 from app import models  # noqa: F401  (registers tables)
 from app.database import create_all, engine, vector_extension_available
 from app.embeddings import model_status, warm_up
+from app.error_codes import ERRORS, HEADER_CODE, spec, validation_code
 from app.routers import auth, cart, items, media, members, orders, scan_requests, scanner
 from app.seed import backfill_embeddings, seed_example_items
 from app.security import (
@@ -423,18 +426,35 @@ async def security_headers(request: Request, call_next):
     return apply_security_headers(response, request.url.path)
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_with_code(request: Request, exc: RequestValidationError):
+    """FastAPI's own 422 (body/query validation): identical body, plus a code.
+
+    The body comes from FastAPI's OWN handler, so the shape (``detail`` is the
+    list of ``{loc, msg, type}``) cannot drift here; only the header is added.
+    The browser renders the field label from ``detail[0].loc`` and its
+    ``error.validation_field`` row — pydantic's English ``msg`` is never the
+    user-facing copy.
+    """
+    response = await request_validation_exception_handler(request, exc)
+    response.headers[HEADER_CODE] = spec(validation_code(exc.errors())).code
+    return apply_security_headers(response, request.url.path)
+
+
 @app.exception_handler(Exception)
 async def unhandled_error(request: Request, exc: Exception):
-    """A 500 must be as hardened as a 200.
+    """A 500 must be as hardened as a 200 (and carry its code like one).
 
     Starlette sends this response and then re-raises, so uvicorn still logs the
     traceback. (Headers cannot be added once a response has started streaming;
     that case is out of reach by construction.)
     """
-    return apply_security_headers(
-        JSONResponse(status_code=500, content={"detail": "Internal server error"}),
-        request.url.path,
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": ERRORS["internal_error"].message},
+        headers={HEADER_CODE: spec("internal_error").code},
     )
+    return apply_security_headers(response, request.url.path)
 
 
 @app.get("/api/healthz", tags=["meta"])

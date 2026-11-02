@@ -2,13 +2,14 @@
 
 import sqlite3
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, or_, select
 
 from app.database import VECTOR_OPTIONS, engine, get_session
 from app.deps import get_current_user, require_staff
+from app.error_codes import api_error
 from app.embeddings import embed_text, embed_text_blob, item_embedding_text, vec_to_blob
 from app.barcodes import normalize_input_gtin, rank_prefix_siblings
 from app.models import CartItem, Item, User, utcnow
@@ -105,10 +106,7 @@ def list_items(
     if barcode:
         gtin = normalize_input_gtin(barcode)
         if gtin is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"not a valid GTIN (bad check digit or length): {barcode!r}",
-            )
+            raise api_error("invalid_gtin", barcode=repr(barcode))
         statement = statement.where(Item.barcode == gtin)
     if q:
         statement = keyword_filter(statement, q)
@@ -146,16 +144,10 @@ def vector_search(
     BLOB embeddings stored in the items table.
     """
     if limit is None and offset > 0:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="offset requires a limit (omit limit to rank every item)",
-        )
+        raise api_error("offset_requires_limit")
     query_vec = embed_text(q)
     if query_vec is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vector search unavailable (embedding model not loaded)",
-        )
+        raise api_error("vector_model_unavailable")
     # Embed once and reuse the vector for the scan (embedding is expensive).
     query_blob = vec_to_blob(query_vec)
 
@@ -163,10 +155,7 @@ def vector_search(
     rows = _vector_search_rows(session, query_blob, category=category,
                                limit=limit, offset=offset)
     if rows is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vector search unavailable (sqlite-vector extension not loaded)",
-        )
+        raise api_error("vector_extension_unavailable")
     if not rows:
         return []
 
@@ -313,10 +302,7 @@ def suggest(
     if barcode:
         gtin14 = normalize_input_gtin(barcode)
         if gtin14 is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"not a valid GTIN (bad check digit or length): {barcode!r}",
-            )
+            raise api_error("invalid_gtin", barcode=repr(barcode))
     return suggest_items(session, gtin14=gtin14, q=q, limit=limit)
 
 
@@ -328,7 +314,7 @@ def get_item(
 ):
     item = session.get(Item, item_id)
     if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+        raise api_error("item_not_found")
     return ItemOut.model_validate(item)
 
 
@@ -341,7 +327,7 @@ def create_item(
     """Input a new item into the catalogue (staff/admin only)."""
     duplicate = session.exec(select(Item).where(Item.sku == payload.sku)).first()
     if duplicate:
-        raise HTTPException(status.HTTP_409_CONFLICT, "SKU already exists")
+        raise api_error("sku_taken")
     if payload.barcode:
         # Same-product guard: the GTIN is the global product identity, so a
         # second entry under the same barcode is always a mistake (the scan
@@ -350,10 +336,7 @@ def create_item(
             select(Item).where(Item.barcode == payload.barcode)
         ).first()
         if duplicate:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                f"Barcode already assigned to item {duplicate.sku}",
-            )
+            raise api_error("barcode_taken", sku=duplicate.sku)
 
     item = Item(**payload.model_dump())
     blob = embed_text_blob(item_embedding_text(item.name, item.description))
@@ -361,11 +344,7 @@ def create_item(
         # Same policy as PATCH: an item that cannot be embedded would be
         # invisible to semantic search until the next restart's backfill —
         # reject instead of silently creating an un-searchable item.
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "Embedding model unavailable; cannot create items right now "
-            "(they would be invisible to semantic search). Try again shortly.",
-        )
+        raise api_error("embedding_unavailable_create")
     item.embedding = blob
     session.add(item)
     try:
@@ -373,10 +352,7 @@ def create_item(
     except IntegrityError:
         # Concurrent insert raced past the checks above (SKU or barcode).
         session.rollback()
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "SKU or barcode already exists (concurrent create)",
-        )
+        raise api_error("item_conflict_create")
     session.refresh(item)
     return ItemOut.model_validate(item)
 
@@ -390,7 +366,7 @@ def update_item(
 ):
     item = session.get(Item, item_id)
     if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+        raise api_error("item_not_found")
 
     changes = payload.model_dump(exclude_unset=True)
     if changes.get("barcode"):
@@ -400,10 +376,7 @@ def update_item(
             )
         ).first()
         if duplicate:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                f"Barcode already assigned to item {duplicate.sku}",
-            )
+            raise api_error("barcode_taken", sku=duplicate.sku)
     for field, value in changes.items():
         setattr(item, field, value)
 
@@ -416,11 +389,7 @@ def update_item(
             # Never null out the existing embedding on a transient model
             # outage (data loss). Reject the change instead; since we raise
             # before commit, no part of this PATCH is persisted.
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "Embedding model unavailable; cannot change item name or "
-                "description right now. No changes were saved.",
-            )
+            raise api_error("embedding_unavailable_update")
         item.embedding = blob
 
     item.updated_at = utcnow()
@@ -433,10 +402,7 @@ def update_item(
         # barcode is not yet visible). The unique index is the only
         # race-free authority; mirror create_item and answer 409, never 500.
         session.rollback()
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "Barcode already assigned to another item (concurrent update)",
-        )
+        raise api_error("barcode_taken_concurrent")
     session.refresh(item)
     return ItemOut.model_validate(item)
 
@@ -496,10 +462,8 @@ def adjust_stock(
             # That is a retry-later condition, not a server fault, so answer
             # 503 rather than a 500 "database is locked" traceback.
             if "locked" in str(exc).lower():
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "database is locked by another writer; retry the adjustment",
-                    headers={"Retry-After": "1"},
+                raise api_error(
+                    "stock_db_locked", headers={"Retry-After": "1"}
                 ) from exc
             raise
         try:
@@ -507,7 +471,7 @@ def adjust_stock(
                 "SELECT sku, stock FROM items WHERE id = ?", (item_id,)
             ).fetchone()
             if row is None:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+                raise api_error("item_not_found")
             sku, old_stock = row
             new_stock = max(0, old_stock + payload.delta)
             cur.execute(
@@ -538,7 +502,7 @@ def delete_item(
 ):
     item = session.get(Item, item_id)
     if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+        raise api_error("item_not_found")
     # Cart cleanup in the same transaction (FKs are declarative only,
     # app/database.py D4): deleting the item must not leave cart rows that
     # point at it — GET /api/cart would silently drop them via the join, but

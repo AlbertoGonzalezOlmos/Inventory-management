@@ -50,6 +50,9 @@ function makeState(api) {
     search: "", semantic: false, category: "",
     _itemsGen: 0, toasts: [],
     showToast(msg) { this.toasts.push(msg); },
+    // item 6's copy helper renders through the i18n runtime (pinned in
+    // tests/js/i18n.test.mjs); this harness only needs the pass-through.
+    errDescriptor(err) { return err && err.message ? err.message : ""; },
   };
   const loadMore = new Function(
     "api", "PAGE_SIZE", `"use strict"; return ({ ${loadMoreSrc} }).loadMore;`)(api, PAGE_SIZE);

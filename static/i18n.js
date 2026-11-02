@@ -7,7 +7,10 @@
  *    language, ASCII space, no Intl (which emits an NBSP before the code and drifts
  *    with the browser's ICU build).
  * 2. The message runtime from item 2 — lookup, plurals, language detection,
- *    `<html lang>`/title application, the date locale and an error-text skeleton.
+ *    `<html lang>`/title application, the date locale and (since item 6) the
+ *    server-error chain: an `X-Error-Code` header → its `error.<code>` row, with
+ *    the header's vars, falling back to the structured `status` family, FastAPI's
+ *    422 (field label), the raw message and finally `error.request_failed`.
  *
  * The copy itself is NOT in this file: `static/i18n.messages.js` (generated from
  * i18n/strings.csv by scripts/build_i18n.py) publishes `window.HCRM_MESSAGES` and is
@@ -215,33 +218,91 @@
     return normaliseLang(lang) === "da" ? "da-DK" : "en-GB";
   }
 
+  /** The visible label for a pydantic field name — a 422's ``loc[-1]``.
+   *  A map, not a computed id: the wire field name is a MACHINE value and
+   *  these rows are the only labels a validation sentence needs. An unmapped
+   *  name renders verbatim (it is a machine identifier, never blank). */
+  const FIELD_LABELS = {
+    name: "field.name", sku: "field.sku", category: "field.category",
+    description: "field.description", stock: "field.stock", role: "field.role",
+    status: "field.status", barcode: "field.barcode", delta: "field.delta",
+    image_url: "field.image_url", new_password: "field.new_password",
+    price_cents: "common.price", qty: "common.qty", item_id: "common.item",
+    code: "table.col.code", email: "auth.email", password: "auth.password",
+    current_password: "auth.current_password", new_email: "account.new_email",
+    phone: "account.phone",
+  };
+
+  function fieldLabel(name, lang) {
+    const id = FIELD_LABELS[name];
+    return id && hasMessage(id, lang) ? translate(id, null, lang) : String(name == null ? "" : name);
+  }
+
+  /** A leftover {token}: the row was used with a var the caller did not have. */
+  const TOKEN_LEFT = /\{[a-z][a-z0-9_]*\}/;
+
   /**
-   * errorText(err, lang?) -> string. Skeleton for item 6; only rows that exist are
-   * used, so today it always lands on the raw message. Quiet: probes go through
-   * hasMessage, never translate, so an error path cannot emit missing-key noise.
+   * errorText(err, lang?) -> string. The server's error, in the UI language.
+   *
+   * Chain (item 6):
+   *   1. the response's `X-Error-Code` header -> the `error.<code>` row, with
+   *      the `X-Error-Vars` values (so a parameterised sentence renders whole);
+   *   2. a structured detail's `status` discriminator -> `error.status.<status>`
+   *      (the header stripped by a proxy, or an older server);
+   *   3. FastAPI's own 422 -> `error.validation_field` with the field's label,
+   *      else `error.validation`;
+   *   4. nothing matched: the raw message (an UNCODED error — a browser string
+   *      or a server text no row covers), and finally
+   *   5. `error.request_failed` — never blank.
+   * A row whose placeholders the caller cannot fill is abandoned for step 4
+   * rather than shipped with a visible `{token}`; the server always publishes
+   * the vars for a parameterised code, so this is a safety net, not a path.
+   * Quiet: probes go through hasMessage, never translate, so an error path
+   * cannot emit missing-key noise.
    */
   function errorText(err, lang) {
-    const detail = err && err.detail;
+    if (err == null) return translate("error.request_failed", { status: "?" }, lang);
+    const detail = err.detail;
     const detailObj = detail && typeof detail === "object" && !Array.isArray(detail) ? detail : null;
-    const code = (err && err.code) || (detailObj && detailObj.code) || null;
-    if (typeof code === "string" && hasMessage("error." + code, lang)) {
-      return translate("error." + code, (err && err.vars) || (detailObj && detailObj.vars) || null, lang);
+    const vars = (err.vars) || (detailObj && detailObj.vars) || null;
+
+    // 1. the coded response
+    const code = (typeof err.code === "string" && err.code) ||
+                 (detailObj && typeof detailObj.code === "string" && detailObj.code) || null;
+    if (code && hasMessage("error." + code, lang)) {
+      const values = Object.assign({}, vars);
+      if (code === "validation_field") values.field = fieldLabel(err.field, lang);
+      const text = translate("error." + code, values, lang);
+      if (!TOKEN_LEFT.test(text)) return text;
     }
+
+    // 2. a structured envelope's status discriminator
     const status = detailObj && detailObj.status;
     if (typeof status === "string" && hasMessage("error.status." + status, lang)) {
-      return translate("error.status." + status, detailObj.vars || null, lang);
+      return translate("error.status." + status, vars, lang);
     }
-    if (err && err.status === 422 && hasMessage("error.validation", lang)) {
-      return translate("error.validation", null, lang);
+
+    // 3. FastAPI's own 422 (no header: the field label is the best copy)
+    if (err.status === 422) {
+      if (err.field && hasMessage("error.validation_field", lang)) {
+        return translate("error.validation_field",
+                         { field: fieldLabel(err.field, lang) }, lang);
+      }
+      if (hasMessage("error.validation", lang)) {
+        return translate("error.validation", null, lang);
+      }
     }
-    // The backend's structured details carry their English text in `message`
-    // (cart/scanner), so that is part of the raw fallback chain too.
-    const raw = (err && err.message) ||
+
+    // 4. uncoded: the raw text (a browser string, or a server message with no row)
+    const raw = (err.message) ||
       (detailObj && detailObj.message) ||
       (typeof detail === "string" ? detail : "") ||
       (typeof err === "string" ? err : "");
     if (raw) return String(raw);
-    return translate("error.request_failed", null, lang);
+
+    // 5. never blank
+    return translate("error.request_failed",
+                     { status: err.status || "?" }, lang);
   }
 
   /** How many lookups returned the missing marker (item 3 binds this reactively). */
@@ -252,7 +313,7 @@
   const HcrmI18n = {
     MONEY_CODE, LANG_KEY, SUPPORTED_LANGS, DEFAULT_LANG, FALLBACK_LANG,
     money, moneyCode, messagesFor, hasMessage, translate, plural,
-    detectLang, applyLang, dateLocale, errorText, missingCount,
+    detectLang, applyLang, dateLocale, errorText, missingCount, fieldLabel,
     otherLang, queryLang, stripLangQuery, bootPlan, descriptorText,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = HcrmI18n;

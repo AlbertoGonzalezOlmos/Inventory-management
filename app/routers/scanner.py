@@ -68,6 +68,7 @@ from sqlmodel import Session, select
 
 from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
+from app.error_codes import ERRORS, coded_detail
 from app.models import ScanEvent, Terminal, utcnow
 from app.schemas import (
     ScanEventOut,
@@ -241,25 +242,23 @@ def register_terminal(
     recovery path for a lost secret is DELETE (staff or loopback) + register.
     """
     if not (_is_loopback(request) or _register_open()):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            detail={"status": "loopback_only",
-                    "message": "Terminal registration is loopback-only by "
-                               "default (HCRM_SCANNER_REGISTER_ANY=1 to open "
-                               "for a LAN deployment)"},
+        raise coded_detail(
+            "register_loopback_only",
+            {"status": "loopback_only",
+             "message": ERRORS["register_loopback_only"].message},
         )
     existing = session.exec(
         select(Terminal).where(Terminal.terminal_id == payload.terminal_id)
     ).first()
     if existing is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"status": "already_registered",
-                    "message": f"Terminal {payload.terminal_id!r} is already "
-                               "registered — recovery is DELETE "
-                               "/api/scanner/terminals/"
-                               f"{payload.terminal_id} (staff or loopback), "
-                               "then re-register"},
+        raise coded_detail(
+            "terminal_already_registered",
+            {"status": "already_registered",
+             "message": ERRORS["terminal_already_registered"].message.format(
+                 terminal=repr(payload.terminal_id),
+                 terminal_url=payload.terminal_id)},
+            terminal=repr(payload.terminal_id),
+            terminal_url=payload.terminal_id,
         )
     secret_owner = session.exec(
         select(Terminal).where(Terminal.secret_hash == token_hash(payload.secret))
@@ -270,12 +269,12 @@ def register_terminal(
         # every scan of both kiosks into the FIRST terminal's queue,
         # silently. Fail loudly instead; register is loopback-gated, so
         # naming the owner is no leak.
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"status": "secret_in_use",
-                    "message": "That secret is already registered to "
-                               f"terminal {secret_owner.terminal_id!r} — "
-                               "generate a fresh secret per terminal"},
+        raise coded_detail(
+            "secret_in_use",
+            {"status": "secret_in_use",
+             "message": ERRORS["secret_in_use"].message.format(
+                 owner=repr(secret_owner.terminal_id))},
+            owner=repr(secret_owner.terminal_id),
         )
     code = _mint_pairing_code()
     now = utcnow()
@@ -309,10 +308,9 @@ def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
     code_hash = token_hash(code)
     if (terminal is None or terminal.pairing_code_hash is None
             or not hmac.compare_digest(code_hash, terminal.pairing_code_hash)):
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            detail={"status": "bad_pairing",
-                    "message": "Unknown terminal or wrong pairing code"},
+        raise coded_detail(
+            "bad_pairing",
+            {"status": "bad_pairing", "message": ERRORS["bad_pairing"].message},
         )
     raw = secrets.token_urlsafe(32)
     result = session.exec(
@@ -324,12 +322,10 @@ def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
     if result.rowcount != 1:
         # Someone else paired this terminal between our read and the
         # UPDATE — the single-use rule, decided atomically.
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"status": "already_paired",
-                    "message": "This terminal is already paired — DELETE it "
-                               "(staff or loopback) and re-register to "
-                               "re-pair"},
+        raise coded_detail(
+            "already_paired",
+            {"status": "already_paired",
+             "message": ERRORS["already_paired"].message},
         )
     session.commit()
     return raw
@@ -387,30 +383,26 @@ def pair_terminal_auto(request: Request,
     No response or log line ever carries the pairing code.
     """
     if not (_is_loopback(request) or _pair_open()):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            detail={"status": "loopback_only",
-                    "message": "One-click pairing is loopback-only by "
-                               "default (HCRM_SCANNER_PAIR_ANY=1 to open "
-                               "for a LAN deployment)"},
+        raise coded_detail(
+            "pair_loopback_only",
+            {"status": "loopback_only",
+             "message": ERRORS["pair_loopback_only"].message},
         )
     content_type = request.headers.get("content-type", "")
     if not content_type.split(";", 1)[0].strip().lower() == "application/json":
-        raise HTTPException(
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail={"status": "json_required",
-                    "message": "Content-Type: application/json is required"},
+        raise coded_detail(
+            "json_required",
+            {"status": "json_required", "message": ERRORS["json_required"].message},
         )
 
     path = _pairing_file()
     try:
         raw_file = path.read_bytes()
     except FileNotFoundError:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            detail={"status": "no_pairing_file",
-                    "message": "No pairing file on this host — run "
-                               "scanner_daemon.py --register first"},
+        raise coded_detail(
+            "no_pairing_file",
+            {"status": "no_pairing_file",
+             "message": ERRORS["no_pairing_file"].message},
         )
     except OSError as exc:
         # EACCES etc.: the classic cause is a root-run daemon writing a
@@ -419,13 +411,12 @@ def pair_terminal_auto(request: Request,
         logger.warning("pairing file %s unreadable: %s — the daemon and "
                        "the server must run as the same user (systemd "
                        "User=), or set HCRM_SCANNER_PAIRING_FILE", path, exc)
-        raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"status": "pairing_file_unreadable",
-                    "message": f"The pairing file {path} exists but cannot "
-                               "be read — the daemon and the server must "
-                               "run as the same user (systemd User=), or "
-                               "set HCRM_SCANNER_PAIRING_FILE"},
+        raise coded_detail(
+            "pairing_file_unreadable",
+            {"status": "pairing_file_unreadable",
+             "message": ERRORS["pairing_file_unreadable"].message.format(
+                 path=path)},
+            path=path,
         )
 
     try:
@@ -446,11 +437,10 @@ def pair_terminal_auto(request: Request,
             or len(offer["pairing_code"]) != 8):
         logger.warning("pairing file %s is malformed — regenerate it with "
                        "scanner_daemon.py --register", path)
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"status": "bad_pairing_file",
-                    "message": "The pairing file is malformed — regenerate "
-                               "it with scanner_daemon.py --register"},
+        raise coded_detail(
+            "bad_pairing_file",
+            {"status": "bad_pairing_file",
+             "message": ERRORS["bad_pairing_file"].message},
         )
 
     terminal_id = offer["terminal_id"].strip()
@@ -575,20 +565,21 @@ def delete_terminal(
     if not _is_loopback(request):
         user = get_current_user(request, credentials, session)  # 401s if anonymous
         if user.role not in ("staff", "admin"):
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                detail={"status": "staff_required",
-                        "message": "Deleting a terminal requires staff "
-                                   "privileges (or a loopback caller)"},
+            raise coded_detail(
+                "terminal_staff_required",
+                {"status": "staff_required",
+                 "message": ERRORS["terminal_staff_required"].message},
             )
     terminal = session.exec(
         select(Terminal).where(Terminal.terminal_id == terminal_id)
     ).first()
     if terminal is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            detail={"status": "not_found",
-                    "message": f"No terminal {terminal_id!r}"},
+        raise coded_detail(
+            "terminal_not_found",
+            {"status": "not_found",
+             "message": ERRORS["terminal_not_found"].message.format(
+                 terminal=repr(terminal_id))},
+            terminal=repr(terminal_id),
         )
     session.exec(delete(ScanEvent).where(ScanEvent.terminal_id == terminal_id))
     session.delete(terminal)

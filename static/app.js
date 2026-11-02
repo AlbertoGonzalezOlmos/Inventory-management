@@ -24,17 +24,52 @@ const tGlobal = (id, vars) => HcrmI18n.translate(
 // node-tested in tests/js/). This file keeps only the staging cap.
 const STAGING_CAP = 50;
 
+/** Build the thrown Error for a non-2xx JSON response (item 6).
+ *
+ * `X-Error-Code` is the server's stable copy key and `X-Error-Vars` the values
+ * its row needs (URL-encoded, so a Danish value cannot break the header); both
+ * are additive — `detail` stays attached VERBATIM because the scan and intake
+ * flows branch on its `status` discriminator. `field` is FastAPI's first named
+ * 422 location. `message` is the copy in the language at throw time; a slot
+ * that holds errDescriptor() re-renders instead when the flag is clicked.
+ */
+function apiError(res, data, fallbackCode) {
+  const code = res.headers.get("X-Error-Code") || fallbackCode || null;
+  const rawVars = res.headers.get("X-Error-Vars") || "";
+  const vars = rawVars ? Object.fromEntries(new URLSearchParams(rawVars)) : null;
+  let field = null;
+  if (data && Array.isArray(data.detail)) {
+    for (const d of data.detail) {
+      if (d && Array.isArray(d.loc) && d.loc.length > 1
+          && typeof d.loc[d.loc.length - 1] === "string") {
+        field = d.loc[d.loc.length - 1];
+        break;
+      }
+    }
+  }
+  const err = Object.assign(new Error(""), {
+    status: res.status,
+    detail: data ? data.detail : undefined,
+    code,
+    vars,
+    field,
+  });
+  err.message = HcrmI18n.errorText(err,
+    HcrmI18n.detectLang(localStorage, location.search));
+  return err;
+}
+
 /** Minimal fetch wrapper with token + error handling.
  *
  * Options: {method, body, raw, token}.
- * - raw: true → resolves {status, data} and NEVER throws and NEVER runs the
- *   global 401 cleanup — the caller owns error handling entirely (used by
- *   the scan flow's status branching and the switch flow's best-effort
- *   foreign-token calls; a raw 401 is the caller's to act on).
+ * - raw: true → resolves {status, data, code, vars} and NEVER throws and NEVER
+ *   runs the global 401 cleanup — the caller owns error handling entirely
+ *   (used by the scan flow's status branching and the switch flow's
+ *   best-effort foreign-token calls; a raw 401 is the caller's to act on).
  * - token: override the bearer (e.g. revoking the OLD session after a
  *   switch; foreign tokens never trigger the global 401 redirect either).
- * The default (throwing) path attaches err.status and err.detail (the
- * parsed JSON body) so structured 404/409 details reach the flows.
+ * The default (throwing) path attaches status/detail/code/vars/field so
+ * structured details AND the coded copy reach the flows.
  */
 async function api(path, { method = "GET", body, raw = false, token } = {}) {
   const foreign = token !== undefined;
@@ -53,7 +88,12 @@ async function api(path, { method = "GET", body, raw = false, token } = {}) {
     if (res.status !== 204) {
       try { data = await res.json(); } catch (_) { data = null; }
     }
-    return { status: res.status, data };
+    const rawVars = res.headers.get("X-Error-Vars") || "";
+    return {
+      status: res.status, data,
+      code: res.headers.get("X-Error-Code") || null,
+      vars: rawVars ? Object.fromEntries(new URLSearchParams(rawVars)) : null,
+    };
   }
 
   if (res.status === 401 && !foreign && !path.startsWith("/auth/login") && !path.startsWith("/auth/qr-login")) {
@@ -70,26 +110,12 @@ async function api(path, { method = "GET", body, raw = false, token } = {}) {
     try { data = await res.json(); } catch (_) { data = null; }
   }
   if (res.status === 401) {
-    const fromServer = !!(data && typeof data.detail === "string");
-    // Our own fallback carries a code so the caller can store a {key} descriptor
-    // (an open login error re-renders on a language flip); a server detail is
-    // item 6's copy and stays verbatim.
-    throw Object.assign(
-      new Error(fromServer ? data.detail : tGlobal("auth.invalid_credentials")),
-      { status: 401, detail: data && data.detail,
-        ...(fromServer ? {} : { code: "auth.invalid_credentials" }) });
+    // A login/badge failure: the server's code (or our own row) carries the
+    // copy, so the caller can hold a {key} descriptor and a flip re-renders it.
+    throw apiError(res, data, "invalid_credentials");
   }
   if (!res.ok) {
-    let detail = `Request failed (${res.status})`;
-    if (data && typeof data.detail === "string") {
-      detail = data.detail;
-    } else if (data && Array.isArray(data.detail) && data.detail[0] && data.detail[0].msg) {
-      // FastAPI validation errors: detail is a list of {loc, msg, ...}.
-      const d = data.detail[0];
-      const field = Array.isArray(d.loc) && d.loc.length > 1 ? d.loc[d.loc.length - 1] : null;
-      detail = field ? `${field}: ${d.msg}` : d.msg;
-    }
-    throw Object.assign(new Error(detail), { status: res.status, detail: data ? data.detail : undefined });
+    throw apiError(res, data);
   }
   if (res.status === 204) return null;
   return data;
@@ -581,6 +607,22 @@ Vue.createApp({
       }
       return HcrmI18n.descriptorText(value, (id, vars) => this.t(id, this._counts(vars)));
     },
+    errDescriptor(err) {
+      // item 6: a CODED error becomes a {key, vars} descriptor, so an open
+      // message re-renders when the language flips (msg() -> t()); an uncoded
+      // one keeps its text verbatim (a browser string, or a server message no
+      // row covers). Never returns a blank: errorText's last step is a row.
+      if (!err) return "";
+      const code = err.code;
+      if (code && HcrmI18n.hasMessage("error." + code, this.lang)) {
+        if (code === "validation_field") {
+          return { key: "error.validation_field",
+                   vars: { field: HcrmI18n.fieldLabel(err.field, this.lang) } };
+        }
+        return { key: "error." + code, vars: err.vars || null };
+      }
+      return err.message || HcrmI18n.errorText(err, this.lang);
+    },
     _counts(vars) {
       // Resolve the nested count descriptors of a descriptor's var bag.
       if (!vars) return null;
@@ -636,8 +678,7 @@ Vue.createApp({
         const data = await api("/auth/login", { method: "POST", body: this.loginForm });
         await this.afterLogin(data);
       } catch (e) {
-        this.loginError = e.code === "auth.invalid_credentials"
-          ? { key: "auth.invalid_credentials" } : e.message;
+        this.loginError = this.errDescriptor(e);
       } finally {
         this.busy = false;
       }
@@ -685,8 +726,7 @@ Vue.createApp({
         });
         await this.afterLogin(data);
       } catch (e) {
-        this.loginError = e.code === "auth.invalid_credentials"
-          ? { key: "auth.invalid_credentials" } : e.message;
+        this.loginError = this.errDescriptor(e);
       } finally {
         this.busy = false;
       }
@@ -715,7 +755,7 @@ Vue.createApp({
         // No "Welcome" toast here: the greeting banner from saveSession
         // (via afterLogin) carries it — a second toast would overwrite it.
       } catch (e) {
-        this.registerError = e.message;
+        this.registerError = this.errDescriptor(e);
       } finally {
         this.busy = false;
       }
@@ -826,7 +866,7 @@ Vue.createApp({
         }
         this.showToast({ key: "account.password_updated_toast" });
       } catch (e) {
-        this.pwError = e.message;
+        this.pwError = this.errDescriptor(e);
       } finally {
         this.busy = false;
       }
@@ -847,7 +887,7 @@ Vue.createApp({
         }
         this.showToast({ key: "account.badge_generated" });
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       } finally {
         this.busy = false;
       }
@@ -880,7 +920,7 @@ Vue.createApp({
         }
         this.showToast({ key: "account.badge_revoked" });
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -944,7 +984,7 @@ Vue.createApp({
             }
           } catch (e) {
             if (gen !== this._itemsGen) continue;  // stale error: refetch fresh
-            this.showToast(e.message);
+            this.showToast(this.errDescriptor(e));
             this.hasMore = false;
             break;
           }
@@ -1128,7 +1168,7 @@ Vue.createApp({
         this.emailOk = true;
         this.showToast({ key: "account.email_updated_toast" });
       } catch (e) {
-        this.emailError = e.message;   // 400 wrong-password/no-op, 409 taken, 422 shape
+        this.emailError = this.errDescriptor(e);   // 400 wrong-password/no-op, 409 taken, 422 shape
       } finally {
         this.busy = false;
       }
@@ -1146,7 +1186,7 @@ Vue.createApp({
         if (user.phone) this.showToast({ key: "account.phone_saved" });
         else this.showToast({ key: "account.phone_cleared" });
       } catch (e) {
-        this.phoneError = e.message;   // 422: the normaliser's shape message
+        this.phoneError = this.errDescriptor(e);   // 422: the normaliser's shape message
       } finally {
         this.busy = false;
       }
@@ -1326,7 +1366,7 @@ Vue.createApp({
             });
             if (n > 0) this._stockWarn(this.cart.lines.find(l => l.item.id === id));
           } catch (e) {
-            this.showToast(e.message);   // 422 (qty > 10000), 404 (line gone)
+            this.showToast(this.errDescriptor(e));   // 422 (qty > 10000), 404 (line gone)
             await this.loadCart();
           }
         }
@@ -1371,7 +1411,14 @@ Vue.createApp({
             if (skipped.length || clamped) this.lastReceipt = r.data;
             return;
           }
-          if (r.status === 400) { this.showToast({ key: "checkout.cart_empty" }); return; }
+          if (r.status === 400) {
+            // The server's 400 IS the empty-cart verdict: its code carries the
+            // row (error.cart_empty), so the copy has one home (item 6).
+            this.showToast(this.errDescriptor(
+              { status: r.status, detail: r.data && r.data.detail,
+                code: r.code, vars: r.vars }));
+            return;
+          }
           this.showToast({ key: "checkout.failed", vars: { status: r.status } });
         });
       } finally {
@@ -1680,7 +1727,7 @@ Vue.createApp({
             if (kind === "badge") await this.handleBadgeScan(code);
             else await this.handleBarcodeScan(code);
           } catch (e) {
-            this.showToast(e.message);
+            this.showToast(this.errDescriptor(e));
           }
         }
       } finally {
@@ -1748,7 +1795,9 @@ Vue.createApp({
       }
       const detail = data && data.detail;
       if (status === 422 && detail && detail.status === "misread") {
-        this.showToast(detail.message || this.t("scan.misread"));
+        // Coded (item 6): the row is the copy; an uncoded server keeps its text.
+        this.showToast(code ? this.errDescriptor({ status, detail, code, vars })
+                            : (detail.message || this.t("scan.misread")));
         return;
       }
       if (status === 400 && detail && detail.status === "badge") {
@@ -1760,7 +1809,9 @@ Vue.createApp({
         this.openNextIntake();
         return;
       }
-      this.showToast((detail && detail.message) || this.t("scan.failed", { status }));
+      this.showToast(code ? this.errDescriptor({ status, detail, code, vars })
+                          : ((detail && detail.message) ||
+                             this.t("scan.failed", { status })));
     },
 
     handleSessionExpired() {
@@ -1899,7 +1950,7 @@ Vue.createApp({
       if (this.pairBusy) return;   // the badgeLogin double-fire precedent
       this.pairBusy = true;
       try {
-        const { status, data } = await api("/scanner/pair/auto", {
+        const { status, data, code, vars } = await api("/scanner/pair/auto", {
           method: "POST", body: {}, raw: true,
         });
         if (status === 200 && data && data.token) {
@@ -1910,18 +1961,16 @@ Vue.createApp({
           this.showToast({ key: "scanner.paired_toast" });
           this._feedDispatch({ type: "paired", token: data.token });
         } else {
-          // The server's messages ARE the operator instructions; fall
-          // back per status when the body carried none.
+          // Every pairing failure is coded (item 6), and the registry's row IS
+          // the operator instruction — in the UI language. An uncoded response
+          // (older server) keeps its own message, then our generic row.
           const detail = data && data.detail;
-          const fallbacks = {
-            403: this.t("scanner.pair_loopback_only"),
-            404: this.t("scanner.pair_no_file"),
-          };
-          this.showToast((detail && detail.message) ||
-                         fallbacks[status] || this.t("scanner.pair_failed", { status }));
+          this.showToast(code
+            ? this.errDescriptor({ status, detail, code, vars })
+            : ((detail && detail.message) || this.t("scanner.pair_failed", { status })));
         }
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       } finally {
         this.pairBusy = false;
       }
@@ -2069,7 +2118,7 @@ Vue.createApp({
     async replayStagedScans() {
       if (!this.stagedScans.length || !this.user || this.user.must_change_password) return;
       for (const staged of this.stagedScans) {
-        const { status, data } = await api("/cart/scan", {
+        const { status, data, code, vars } = await api("/cart/scan", {
           method: "POST", body: { code: staged.code, symbology: staged.symbology, qty: 1 },
           raw: true,
         });
@@ -2156,7 +2205,7 @@ Vue.createApp({
         this.showToast({ key: "cart.added", vars: { name: item.name } });
         this.closeIntake();
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -2169,7 +2218,7 @@ Vue.createApp({
         if (this.isStaff) await this.submitIntakeStaff(intake);
         else await this.submitIntakeMember(intake);
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       } finally {
         if (this.scanIntake) this.scanIntake.busy = false;
       }
@@ -2304,7 +2353,7 @@ Vue.createApp({
         });
         this.dataRows = await api("/items?" + params.toString());
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       } finally {
         this.dataLoading = false;
       }
@@ -2487,7 +2536,7 @@ Vue.createApp({
         this.loadCategories();
         this.loadScanRequests();
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -2499,7 +2548,7 @@ Vue.createApp({
         const params = new URLSearchParams({ status: this.scanReqFilter });
         this.scanRequests = await api("/scan-requests?" + params.toString());
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -2533,7 +2582,7 @@ Vue.createApp({
         this.showToast({ key: "admin.request_dismissed" });
         this.loadScanRequests();
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -2571,7 +2620,7 @@ Vue.createApp({
         this.resetItemForm();
         this.loadAdminData();
       } catch (e) {
-        this.itemError = e.message;
+        this.itemError = this.errDescriptor(e);
       } finally {
         this.busy = false;
       }
@@ -2604,7 +2653,7 @@ Vue.createApp({
         this.loadAdminData();
         if (this.currentView === "table") this.loadDataPage();
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -2630,7 +2679,7 @@ Vue.createApp({
         this.memberForm = { name: "", email: "", password: "", role: "member" };
         this.loadAdminData();
       } catch (e) {
-        this.memberError = e.message;
+        this.memberError = this.errDescriptor(e);
       } finally {
         this.busy = false;
       }
@@ -2643,7 +2692,7 @@ Vue.createApp({
         this.showToast({ key: "admin.member_deleted" });
         this.loadAdminData();
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -2656,7 +2705,7 @@ Vue.createApp({
         };
         this.loadAdminData();
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -2668,7 +2717,7 @@ Vue.createApp({
         if (this.memberBadge && this.memberBadge.id === member.id) this.memberBadge = null;
         this.loadAdminData();
       } catch (e) {
-        this.showToast(e.message);
+        this.showToast(this.errDescriptor(e));
       }
     },
 
@@ -2701,7 +2750,7 @@ Vue.createApp({
         );
         this.closePwReset();
       } catch (e) {
-        this.pwResetError = e.message;
+        this.pwResetError = this.errDescriptor(e);
       }
     },
   },
