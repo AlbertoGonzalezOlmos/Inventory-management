@@ -67,6 +67,7 @@ import argparse
 import errno
 import fcntl
 import json
+import math
 import os
 import secrets
 import signal
@@ -860,6 +861,47 @@ def register_terminal(post, base_url: str, terminal_id: str, secret: str) -> str
     return body["pairing_code"]
 
 
+REGISTER_RETRY_DELAY = 2.0
+
+
+def register_with_retry(post, base_url, terminal_id, secret, *,
+                        wait=0.0, delay=REGISTER_RETRY_DELAY,
+                        clock=time.monotonic, sleep=time.sleep, log=_log):
+    """register_terminal with a bounded, transient-only retry budget.
+
+    The deadline is monotonic and includes the time a failing POST spent, so
+    ``wait`` is wall-clock seconds, not an attempt count. Only transient
+    failures (status 0 / >=500 / 429) are retried; a permanent status (or a
+    non-integer one, which legacy callers pass) raises immediately, and so
+    does exhaustion — main()'s loud exit-1 contract is unchanged. The budget
+    is spent in ``delay`` steps so the log line can say what is left.
+    """
+    deadline = clock() + float(wait)
+    attempt = 1
+    while True:
+        try:
+            return register_terminal(post, base_url, terminal_id, secret)
+        except PostError as exc:
+            # isinstance FIRST: a non-integer status (legacy callers pass
+            # strings) would make PostError.transient's ``status >= 500``
+            # raise TypeError instead of classifying as permanent.
+            transient = isinstance(exc.status, int) and exc.transient
+            remaining = deadline - clock()
+            if not transient or remaining <= 0:
+                # "budget exhausted" is only claimed when one existed: the
+                # default single-attempt path (wait=0) stays exactly as
+                # loud as today, without naming a budget it never had.
+                if transient and wait > 0:
+                    log(f"--register-wait budget of {wait:g}s exhausted "
+                        f"after {attempt} attempt(s)")
+                raise
+            pause = min(delay, remaining)
+            log(f"registration not possible yet ({exc}) — retrying in "
+                f"{pause:g}s ({remaining:g}s of budget left)")
+            sleep(pause)
+            attempt += 1
+
+
 class _Stopped(Exception):
     """Raised by the SIGTERM handler: unwinds the with-blocks (fd closes →
     the grab auto-releases) for a clean exit 0."""
@@ -873,13 +915,25 @@ def _forward_events_url(base_url: str) -> str:
     return base_url.rstrip("/") + "/api/scanner/events"
 
 
+def _nonnegative_seconds(text: str) -> float:
+    """argparse type for --register-wait: a finite, non-negative float."""
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("must be finite and >= 0")
+    return value
+
+
 def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
          closer=None, scan_reader=None, lock_path=None,
-         sysfs_root=None) -> int:
+         sysfs_root=None, clock=None) -> int:
     """The daemon entrypoint (round 4, T5).
 
     Modes:
       scanner_daemon --config PATH [--register] [--forward URL]
+        [--register-wait SECONDS] [--register-only]
         Register (first run, or ``--register``): POST the terminal, persist
         the 0600 config, and write the one-click pairing offer file (0600,
         atomic) that the server's POST /api/scanner/pair/auto reads — the
@@ -932,9 +986,17 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                              "POST /api/scanner/pair fallback for split-"
                              "host deployments; off by default so the "
                              "code never touches a journal or scrollback")
+    parser.add_argument("--register-wait", metavar="SECONDS",
+                        type=_nonnegative_seconds, default=0.0,
+                        help="retry TRANSIENT registration failures for up to "
+                             "SECONDS (0 = one attempt: today's behaviour)")
+    parser.add_argument("--register-only", action="store_true",
+                        help="register, write the config + the one-click offer "
+                             "file, then exit 0 without grabbing a device")
     args = parser.parse_args(argv)
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep
+    tick = clock if clock is not None else time.monotonic
     grab_kwargs = {"node": args.node, "opener": opener, "ioctl": ioctl,
                    "closer": closer, "scan_reader": scan_reader or read_scans,
                    "sleep": nap}
@@ -975,8 +1037,15 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
             else:
                 terminal_id, secret = config["terminal_id"], config["secret"]
             if args.register or config is None:
-                code = register_terminal(post_fn, args.forward,
-                                         terminal_id, secret)
+                try:
+                    code = register_with_retry(
+                        post_fn, args.forward, terminal_id, secret,
+                        wait=args.register_wait, sleep=nap,
+                        clock=tick, log=_log)
+                except (_Stopped, KeyboardInterrupt):
+                    # Stopped while waiting out the retry budget: a clean
+                    # exit (fd/grab untouched — registration precedes both).
+                    return 0
                 save_config(args.config, terminal_id, secret)
                 # Write-then-announce, and FATAL on failure: with the code
                 # no longer printed by default, the offer file is its only
@@ -999,6 +1068,10 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                     msg += f" (pairing code: {code})"
                 print(msg, flush=True)
                 _log(f"registered terminal {terminal_id}")
+
+            if args.register_only:
+                _log("registration complete (--register-only) — not grabbing")
+                return 0
 
             spool = Spool(args.spool or (str(args.config) + ".spool"),
                           log=_log)

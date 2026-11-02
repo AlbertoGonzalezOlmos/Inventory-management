@@ -153,8 +153,13 @@ search, a vendored Vue 3 SPA (no Node build step) served by FastAPI.
 ## 2. Running it
 
 ```bash
-./scripts/run.sh                    # uv sync + uvicorn on 127.0.0.1:8000
+./scripts/run.sh                    # uv sync + uvicorn + scanner daemon (127.0.0.1:8000)
 ```
+
+- A `run.sh` started with `nohup … &` (or backgrounded from a
+  non-interactive script) inherits POSIX SIGINT-ignore, so Ctrl-C cannot
+  reach it there — stop it with `kill -TERM` (foreground Ctrl-C is covered
+  by its INT trap).
 
 - First boot seeds: default admin `admin@shop.local` / `changeme`
   (**flagged `must_change_password` → blocked from the API until changed**) and
@@ -218,7 +223,7 @@ Inventory-management/
 ├── tests/             # pytest suite (~160 tests, ~25 s, no network/model;
 │                      #   scanner tests run offline w/o hardware)
 ├── scripts/
-│   ├── run.sh         # startup
+│   ├── run.sh         # startup: uvicorn + scanner daemon (trap-supervised)
 │   ├── ui_check.py    # headless-Chrome browser gate (see §7)
 │   ├── smoke_test.py  # end-to-end API test vs a live server (KNOWN FLAWS, §7)
 │   ├── load_test.py   # concurrent login/read availability check (KNOWN FLAWS, §7)

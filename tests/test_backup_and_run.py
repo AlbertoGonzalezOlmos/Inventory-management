@@ -11,11 +11,15 @@ the copy; `HCRM_SCRATCH=1` must keep experiments off the live directory.
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import time
+
+import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Resolved once, up front: some tests replace PATH with a shim directory, after
@@ -107,12 +111,23 @@ def test_backup_db_refuses_when_there_is_no_database():
         assert "nothing to back up" in proc.stderr
 
 
-def _uv_shim(dirpath: str, log: str) -> str:
-    """A fake `uv` that records the HCRM_DATA_DIR it was invoked with."""
+def _uv_shim(dirpath: str, log: str, uvicorn_exit: int | None = None) -> str:
+    """A fake `uv` that records the HCRM_DATA_DIR it was invoked with.
+
+    ``uvicorn_exit`` makes shimmed *uvicorn* invocations exit with that code
+    (everything else still exits 0), so a test can pin run.sh's exit-code
+    propagation without a real server. Shimmed uvicorns also sleep briefly
+    first: run.sh backgrounds the scanner daemon after uvicorn and shuts it
+    down once uvicorn exits, so without the grace period the daemon's log
+    line races that TERM (and loses ~half the time) — no assertion on the
+    daemon's argv would be deterministic.
+    """
     shim = os.path.join(dirpath, "uv")
+    uv_exit = f"exit {uvicorn_exit}" if uvicorn_exit is not None else ":"
     with open(shim, "w", encoding="utf-8") as fh:
         fh.write("#!/usr/bin/env bash\n"
                  f'echo "DATA_DIR=$HCRM_DATA_DIR ARGS=$*" >> "{log}"\n'
+                 f'case "$*" in *uvicorn*) sleep 0.3; {uv_exit};; esac\n'
                  "exit 0\n")
     os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return os.path.dirname(shim)
@@ -170,6 +185,209 @@ def test_run_sh_announces_and_exports_the_resolved_data_dir():
             assert "LIVE DATA" in proc.stdout, proc.stdout
         else:
             assert "first boot will create" in proc.stdout, proc.stdout
+
+
+# --- run.sh as the two-process kiosk start (uvicorn + scanner daemon) --------
+
+
+def _call_index(calls, needle):
+    """Index of the first recorded uv call containing `needle`."""
+    for i, call in enumerate(calls):
+        if needle in call:
+            return i
+    raise AssertionError(f"{needle!r} not in recorded calls: {calls}")
+
+
+# Env vars that would silently change what run.sh starts: a developer with
+# any of these exported must still see every test pass (the tests set the
+# defaults they intend explicitly).
+_STRIP_ENV = ("HCRM_DATA_DIR", "DATABASE_URL", "HCRM_SCRATCH",
+              "HCRM_SCANNER_DAEMON", "HCRM_SCANNER_PAIRING_FILE",
+              "HCRM_SCANNER_REGISTER_WAIT", "HCRM_SCANNER_CONFIG",
+              "HCRM_ALLOW_INSECURE_BIND")
+
+
+def _run_sh_with_shim(td, log, *, uvicorn_exit=None, **extra_env):
+    """Run scripts/run.sh against the uv shim; return (proc, calls)."""
+    shim_dir = _uv_shim(td, log, uvicorn_exit=uvicorn_exit)
+    env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+    env.update({"PATH": shim_dir + os.pathsep + env["PATH"],
+                "HCRM_PORT": "8199"})
+    env.update(extra_env)
+    proc = subprocess.run(
+        [BASH, "scripts/run.sh"], capture_output=True, text=True,
+        timeout=60, cwd=REPO_ROOT, env=env)
+    calls = []
+    if os.path.exists(log):
+        calls = open(log, encoding="utf-8").read().splitlines()
+    return proc, calls
+
+
+def test_run_sh_starts_scanner_daemon_with_app():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-scan-") as td:
+        data = os.path.join(td, "data")
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        # The boot gates still run first, before EITHER process is spawned.
+        # (uvicorn and the daemon are both backgrounded, so their two log
+        # lines race — only "gates before both" is deterministic.)
+        gates = _call_index(calls, "build_i18n.py --check")
+        server = _call_index(calls, "run uvicorn")
+        daemon = _call_index(calls, "scripts/scanner_daemon.py")
+        assert gates < server and gates < daemon, calls
+        daemon_call = calls[daemon]
+        assert f"--config {data}/scanner.json" in daemon_call, daemon_call
+        assert "--forward http://127.0.0.1:8199" in daemon_call, daemon_call
+        assert f"--pairing-file {data}/scanner-pairing.json" in daemon_call
+        assert "--register-wait 300" in daemon_call, daemon_call
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
+
+
+def test_run_sh_scratch_mode_skips_the_scanner_daemon():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-scratch-") as td:
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not any("scanner_daemon.py" in c for c in calls), calls
+        assert "daemon skipped" in proc.stdout, proc.stdout
+
+
+def test_run_sh_scanner_daemon_opt_out():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-optout-") as td:
+        data = os.path.join(td, "data")
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"),
+            HCRM_SCANNER_DAEMON="0", HCRM_DATA_DIR=data)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not any("scanner_daemon.py" in c for c in calls), calls
+        assert any("run uvicorn" in c for c in calls), calls
+        assert "daemon disabled" in proc.stdout, proc.stdout
+
+
+def test_run_sh_propagates_the_uvicorn_exit_code():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-exit-") as td:
+        data = os.path.join(td, "data")
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"),
+            uvicorn_exit=3, HCRM_DATA_DIR=data)
+        assert proc.returncode == 3, (proc.returncode, proc.stdout,
+                                      proc.stderr)
+        # the daemon was started and still did not turn into a hang
+        assert any("scanner_daemon.py" in c for c in calls), calls
+
+
+def test_run_sh_scanner_env_overrides_flow_into_the_daemon_argv():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-env-") as td:
+        offer = os.path.join(td, "offer.json")
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"),
+            HCRM_DATA_DIR=os.path.join(td, "data"),
+            HCRM_SCANNER_PAIRING_FILE=offer,
+            HCRM_SCANNER_REGISTER_WAIT="5")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        daemon_call = calls[_call_index(calls, "scripts/scanner_daemon.py")]
+        assert f"--pairing-file {offer}" in daemon_call, daemon_call
+        assert "--register-wait 5" in daemon_call, daemon_call
+
+
+def test_run_sh_ipv6_only_bind_forwards_to_ipv6_loopback():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-v6-") as td:
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"),
+            HCRM_DATA_DIR=os.path.join(td, "data"), HCRM_HOST="::1")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        daemon_call = calls[_call_index(calls, "scripts/scanner_daemon.py")]
+        assert "--forward http://[::1]:8199" in daemon_call, daemon_call
+        assert "--host ::1" in calls[_call_index(calls, "run uvicorn")]
+
+
+def test_run_sh_non_loopback_bind_skips_the_daemon_with_a_warning():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-lan-") as td:
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"),
+            HCRM_DATA_DIR=os.path.join(td, "data"), HCRM_HOST="192.168.1.5")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not any("scanner_daemon.py" in c for c in calls), calls
+        assert any("run uvicorn" in c for c in calls), calls
+        assert "not a loopback/wildcard bind" in proc.stdout, proc.stdout
+        assert "HCRM_HOST=192.168.1.5" in proc.stdout, proc.stdout
+
+
+def test_run_sh_refusal_spawns_no_processes():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-refuse-") as td:
+        log = os.path.join(td, "calls.log")
+        proc, calls = _run_sh_with_shim(
+            td, log, HCRM_HOST="0.0.0.0", HCRM_DEV_ADMIN="1")
+        assert proc.returncode == 1, (proc.returncode, proc.stderr[-500:])
+        assert "refusing to bind" in proc.stderr
+        # the guard fires before ANY uv invocation — nothing is spawned
+        assert calls == [], calls
+
+
+def _uv_hold_shim(dirpath: str, log: str) -> str:
+    """A uv shim whose two app children wait for signals and record their PIDs."""
+    shim = os.path.join(dirpath, "uv")
+    with open(shim, "w", encoding="utf-8") as fh:
+        fh.write("#!/usr/bin/env bash\n"
+                 f'echo "DATA_DIR=$HCRM_DATA_DIR ARGS=$*" >> "{log}"\n'
+                 'case "$*" in\n'
+                 f'  *uvicorn*) echo $$ > "{dirpath}/server.pid"; exec sleep 30 ;;\n'
+                 f'  *scanner_daemon.py*) echo $$ > "{dirpath}/daemon.pid"; exec sleep 30 ;;\n'
+                 "esac\n"
+                 "exit 0\n")
+    os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return os.path.dirname(shim)
+
+
+def _pid_when_ready(proc, path: str) -> int:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            with open(path, encoding="ascii") as fh:
+                return int(fh.read().strip())
+        except (FileNotFoundError, ValueError):
+            pass
+        if proc.poll() is not None:
+            raise AssertionError(f"run.sh exited before creating {path}: {proc.returncode}")
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {path}")
+
+
+@pytest.mark.parametrize(("sig", "expected"), [
+    (signal.SIGTERM, 143),
+    (signal.SIGINT, 130),
+])
+def test_run_sh_signal_reaps_both_children_and_preserves_signal_status(sig, expected):
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-signal-") as td:
+        log = os.path.join(td, "calls.log")
+        shim_dir = _uv_hold_shim(td, log)
+        env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+        env.update({"PATH": shim_dir + os.pathsep + env["PATH"],
+                    "HCRM_DATA_DIR": os.path.join(td, "data"),
+                    "HCRM_PORT": "8199"})
+        proc = subprocess.Popen(
+            [BASH, "scripts/run.sh"], cwd=REPO_ROOT, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        children = []
+        try:
+            children = [_pid_when_ready(proc, os.path.join(td, "server.pid")),
+                        _pid_when_ready(proc, os.path.join(td, "daemon.pid"))]
+            proc.send_signal(sig)
+            out, err = proc.communicate(timeout=15)
+            assert proc.returncode == expected, (proc.returncode, out, err)
+            for pid in children:
+                with pytest.raises(ProcessLookupError):
+                    os.kill(pid, 0)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=10)
+            for pid in children:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def test_python_scripts_are_syntactically_valid():
