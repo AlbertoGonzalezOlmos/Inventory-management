@@ -6,6 +6,8 @@
 # hardcoded-copy finding is fatal. Add a namespace when its slice lands; never remove
 # one to silence a finding.
 account.
+admin.
+analysis.
 app.
 auth.
 calendar.
@@ -14,6 +16,8 @@ catalogue.
 checkout.
 common.
 date.
+export.
+field.
 intake.
 item.
 lang.
@@ -22,3 +26,5 @@ nav.
 purchases.
 scan.
 scanner.
+status.
+table.

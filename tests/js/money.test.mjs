@@ -18,11 +18,23 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import HcrmI18n from "../../static/i18n.js";
+import MESSAGES from "../../static/i18n.messages.js";
 
 const { money, MONEY_CODE } = HcrmI18n;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const src = readFileSync(join(ROOT, "static", "app.js"), "utf8");
+
+/** Slice E: the export bodies read their copy through the SHIPPED runtime, so
+ *  the assertions below see the real CSV cells (not a test-only copy). The
+ *  bundle is published only for the export tests: the money contract above
+ *  runs on the formatter's own DKK default, which is the point of that pin. */
+function useBundle(t) {
+  globalThis.HCRM_MESSAGES = MESSAGES;
+  t.after(() => { delete globalThis.HCRM_MESSAGES; });
+}
+const enT = (id, vars) => HcrmI18n.translate(id, vars, "en");
+const enTp = (base, n, vars) => HcrmI18n.plural(base, n, vars, "en");
 
 // --- the DKK contract ------------------------------------------------------
 
@@ -172,15 +184,22 @@ test("app.js: exportPDF writes the subtitle, formatted cells and geometry", (t) 
     else globalThis.window = originalWindow;
   });
 
+  useBundle(t);
   const m = appMethods(
     "formatPrice(cents) {",
+    "formatLang() {",
     "exportValue(row, key) {",
     "exportPdfValue(row, key) {",
+    "msg(value) {",
+    "_counts(vars) {",
     "exportPDF() {",
   );
   const row = { name: "Widget", price_cents: 123450, stock: 3 };
   const toasts = [];
-  Object.assign(m, { showToast: (msg) => toasts.push(msg) });
+  Object.assign(m, {
+    lang: "en", t: enT, tp: enTp,
+    showToast: (msg) => toasts.push(msg),
+  });
 
   // With a price column: title, summary, the currency note, the moved
   // table top, and formatted money in the body.
@@ -191,17 +210,28 @@ test("app.js: exportPDF writes the subtitle, formatted cells and geometry", (t) 
   ];
   m.exportPDF();
   assert.equal(texts.length, 3);
-  assert.deepEqual(texts[0], ["HCRM — Items export", 14, 15]);
+  assert.deepEqual(texts[0], [MESSAGES.en["export.pdf_title"], 14, 15]);
   assert.equal(texts[1][1], 14, "summary x");
   assert.equal(texts[1][2], 22, "summary y (unchanged)");
-  assert.match(texts[1][0], /^1 row\(s\) × 2 column\(s\) — /);
-  assert.deepEqual(texts[2], ["Prices in DKK", 14, 28]);
+  // The summary is the row pair, not a "row(s)" idiom: 1 row, 2 columns.
+  assert.match(texts[1][0], /^1 row × 2 columns — /);
+  assert.deepEqual(texts[2], [MESSAGES.en["export.pdf_prices"], 14, 28]);
   assert.equal(tables.length, 1);
   assert.equal(tables[0].startY, 33);
   assert.deepEqual(tables[0].head, [["Name", "Price (DKK)"]]);
   assert.deepEqual(tables[0].body, [["Widget", "1.234,50 DKK"]]);
   assert.deepEqual(saves, ["items-export.pdf"]);
-  assert.deepEqual(toasts, ["Exported 1 row(s) × 2 column(s) as PDF"]);
+  // The toast is a descriptor with a count PER dimension (slice E): the two
+  // phrases are resolved at paint time, so an open toast flips with the flag.
+  assert.deepEqual(toasts, [{
+    key: "export.done",
+    vars: {
+      rows: { key: "common.rows", plural: 1 },
+      cols: { key: "common.cols", plural: 2 },
+      format: "PDF",
+    },
+  }]);
+  assert.equal(m.msg(toasts[0]), "Exported 1 row × 2 columns as PDF");
 
   // Without a price column: no currency claim and today's exact layout.
   texts.length = 0; tables.length = 0; saves.length = 0; toasts.length = 0;
@@ -211,26 +241,31 @@ test("app.js: exportPDF writes the subtitle, formatted cells and geometry", (t) 
   ];
   m.exportPDF();
   assert.equal(texts.length, 2);
-  assert.ok(!texts.some(([s]) => s === "Prices in DKK"), "no currency note without a price column");
+  assert.ok(!texts.some(([s]) => s === MESSAGES.en["export.pdf_prices"]),
+            "no currency note without a price column");
   assert.equal(tables[0].startY, 27);
   assert.deepEqual(tables[0].body, [["Widget", "3"]]);
   assert.deepEqual(saves, ["items-export.pdf"]);
 });
 
-test("app.js: exportCSV keeps cells numeric while the header names the currency", () => {
+test("app.js: exportCSV keeps cells numeric while the header names the currency", (t) => {
   // The other half of the export decision (item 1's whole point for CSVs):
   // the header states the currency, the cells stay summable, the BOM and the
   // formula-injection guard survive. Pinned by RUNNING exportCSV with a
   // recorded downloadBlob rather than by grepping its body.
+  useBundle(t);
   const m = appMethods(
     "formatPrice(cents) {",
     "exportValue(row, key) {",
     "csvEscape(value) {",
+    "msg(value) {",
+    "_counts(vars) {",
     "exportCSV() {",
   );
   const downloads = [];
   const toasts = [];
   Object.assign(m, {
+    lang: "en", t: enT, tp: enTp,
     downloadBlob: (content, filename, type) => downloads.push({ content, filename, type }),
     showToast: (msg) => toasts.push(msg),
   });
@@ -255,5 +290,5 @@ test("app.js: exportCSV keeps cells numeric while the header names the currency"
     "Widget,1234.50",
     "\"'=SUM(1,2)\",0.05",
   ]);
-  assert.deepEqual(toasts, ["Exported 2 row(s) × 2 column(s) as CSV"]);
+  assert.equal(m.msg(toasts[0]), "Exported 2 rows × 2 columns as CSV");
 });

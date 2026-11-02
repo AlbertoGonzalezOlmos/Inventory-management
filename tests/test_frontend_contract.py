@@ -709,9 +709,9 @@ def test_account_modals_copy_is_csv_bound():
 def test_scan_intake_and_item_form_copy_is_csv_bound():
     """The intake modal and the item add/edit form: labels/placeholders are
     bound, the price field is the money-column row (common.price_dkk), the
-    suggestion SKU line uses common.sku's placeholder, and the colliding bare
-    field labels (Name/Category/Description/Stock/SKU) stay deferred to the
-    shared slice-E rows (see the slice notes)."""
+    suggestion SKU line uses common.sku's placeholder, and the field labels
+    (Name/Category/Description/Stock/SKU) are the shared `field.*` rows slice E
+    landed — the same rows the admin tables' headers use."""
     html = _read("index.html")
     for key in ("intake.title", "intake.item_name", "intake.also_cart",
                 "intake.staff_note", "intake.submit_staff", "intake.submit_member",
@@ -765,3 +765,144 @@ def test_slice_d_toasts_are_csv_bound():
     assert 'showToast("QR badge revoked")' not in js
     assert 'showToast("Logged off")' not in js
     assert 'confirm("Revoke your QR badge?' not in js
+
+
+# --- Slice E: the table view, its analysis panel and the exports ------------
+
+def test_table_view_copy_is_csv_bound():
+    """The data explorer: toolbar, hint, pagination, empty state, the column
+    header's tooltip, and the analysis panel's every stat label. The column
+    LABELS are CSV rows too (DATA_COLUMNS carries labelKey), which is what
+    lets one row feed the header, the picker, the CSV head and the PDF head."""
+    html = _read("index.html")
+    for key in ("table.title", "table.reload", "table.clear_selection",
+                "table.export_csv", "table.export_pdf", "table.selection_hint",
+                "table.column_title", "table.empty", "table.previous",
+                "table.page", "table.next", "analysis.title",
+                "analysis.by_category"):
+        assert f"t('{key}'" in html, key
+    assert ':title="t(\'table.column_title\')"' in html, (
+        "the column header's tooltip is a bound row, not a literal title=")
+    for key in ("analysis.items", "analysis.inventory_value", "analysis.avg_price",
+                "analysis.median_price", "analysis.min_max_price",
+                "analysis.price_std", "analysis.total_stock", "analysis.avg_stock",
+                "analysis.min_max_stock"):
+        assert f"t('{key}')" in html, key
+    for gone in (">Items in the database<", ">Clear selection<", ">No items.<",
+                 "← Previous", ">Analysis<", ">By category<", "Inventory value",
+                 "Median price", "Total stock", "Avg stock"):
+        assert gone not in html, gone
+    # The '(s)' count idiom is gone from the template: the scope line is one
+    # computed that picks a plural pair per count.
+    assert "? 's' : ''" not in html and "selected row{{" not in html, (
+        "no template-level plural suffix — use a .one/.other pair through tp()")
+    assert "{{ analysisScopeLabel }}" in html
+    js = _read("app.js")
+    scope = _method_body("analysisScopeLabel() {")
+    assert 't("analysis.all_shown"' in scope
+    assert 'tp("common.rows"' in scope and 'tp("table.selected_rows"' in scope
+    assert 'tp("common.cols"' in scope and "this.exportCols.length" in scope
+
+
+def test_data_columns_carry_label_keys_not_literals():
+    """DATA_COLUMNS is the one place a column label could be resurrected as a
+    literal; every column names a CSV row instead (the money column included:
+    its old `Price (DKK)` literal was the last allowlisted key finding)."""
+    js = _read("app.js")
+    columns = js[js.index("const DATA_COLUMNS = ["):js.index("];", js.index("const DATA_COLUMNS = ["))]
+    assert columns.count("labelKey:") == 9, "nine data columns, nine CSV rows"
+    assert "label:" not in columns, "a literal label would bypass the CSV"
+    for key in ("table.col.id", "field.sku", "field.name", "field.category",
+                "common.price_dkk", "field.stock", "field.description",
+                "table.col.embedded", "table.col.created"):
+        assert f'labelKey: "{key}"' in columns, key
+    allcols = _method_body("allColumns() {")
+    assert "this.t(c.labelKey)" in allcols, (
+        "the labels must be resolved per language (a computed, so a flip "
+        "relabels the open table)")
+    assert 'head: [cols.map((c) => c.label)]' in _method_body("exportPDF() {")
+
+
+def test_admin_screens_copy_is_csv_bound():
+    """The administration screen: its three tabs, the scan-request queue (intro,
+    filter, headers, row actions, empty state), the item table and the members
+    table + their action buttons. The queue's headers are the SHARED
+    table.col.* rows the account tab's request table uses too."""
+    html = _read("index.html")
+    for key in ("admin.tab_items", "admin.tab_members", "admin.tab_requests",
+                "admin.requests_intro", "admin.request_create",
+                "admin.request_dismiss", "admin.requests_empty",
+                "admin.filter_all", "admin.catalogue_count",
+                "admin.member_create_title", "admin.member_create",
+                "admin.members_count", "admin.role_member", "admin.role_staff",
+                "admin.badge_show", "admin.reset_password"):
+        assert f"t('{key}'" in html, key
+    assert html.count("{{ t('admin.tab_requests') }}") == 2, (
+        "the tab and the panel heading share one row")
+    for key in ("table.col.requested", "table.col.requester", "table.col.code",
+                "table.col.proposed_item", "field.status", "table.col.badge",
+                "table.col.joined", "field.sku", "field.name",
+                "field.category", "field.description", "field.stock",
+                "table.col.ai", "common.edit", "common.delete", "common.view",
+                "common.revoke"):
+        assert f"t('{key}" in html, key
+    assert html.count("t('table.col.requested')") == 2, (
+        "the member request table and the staff queue share the header row")
+    assert html.count("t('field.status')") == 3, (
+        "two request tables' Status header + the queue's filter label")
+    for key in ("status.open", "status.resolved", "status.dismissed"):
+        assert f"t('{key}')" in html, key
+    assert ':placeholder="t(\'field.image_url_placeholder\')"' in html
+    assert "{{ m.has_qr_badge ? t('table.badge_active') : \"—\" }}" in html
+    for gone in (">Catalogue input<", ">Members (", ">Scan requests<",
+                 ">Create member account<", ">Temporary password (min. 8 chars)",
+                 ">Member (buyer)<", ">Staff (can input items)<",
+                 ">Create account<", ">QR badge</button>", ">Reset PW<",
+                 ">Edit</button>", ">Revoke</button>", "No requests with this status.",
+                 'placeholder="https://…"'):
+        assert gone not in html, gone
+    js = _read("app.js")
+    assert '"status." + status' in _method_body("statusLabel(status) {")
+    assert '<span class="status-chip" :class="req.status">{{ statusLabel(req.status) }}</span>' in html, (
+        "the chip's machine value stays the CSS class; only the label is copy")
+
+
+def test_slice_e_toasts_confirms_and_exports_are_csv_bound():
+    """Every remaining global toast/confirm and the whole export surface."""
+    js = _read("app.js")
+    for needle in (
+        'key: "scanner.paired_toast"', 'key: "scanner.unpaired_toast"',
+        't("scanner.pair_loopback_only")', 't("scanner.pair_no_file")',
+        't("scanner.pair_failed", { status })',
+        'key: "export.empty"', 'key: "export.pdf_unavailable"',
+        'key: "admin.request_dismissed"', 'key: "admin.item_deleted"',
+        'key: "admin.member_created"', 'key: "admin.member_deleted"',
+        'key: "admin.badge_revoked_for"',
+        't("admin.request_dismiss_confirm"', 't("admin.item_delete_confirm"',
+        't("admin.member_delete_confirm"', 't("admin.badge_revoke_confirm"',
+        't("admin.badge_print_now")', 't("admin.badge_warn_member")',
+    ):
+        assert needle in js, needle
+    for gone in ('showToast("Nothing to export")',
+                 'showToast("PDF library not loaded")',
+                 'showToast("Item deleted")',
+                 'showToast("Account deleted")',
+                 'showToast("Scan request dismissed")',
+                 "row(s)", "column(s)"):
+        assert gone not in js, gone
+
+    csv_export = _method_body("exportCSV() {")
+    pdf_export = _method_body("exportPDF() {")
+    for body in (csv_export, pdf_export):
+        assert 'key: "export.done"' in body
+        assert 'rows: { key: "common.rows", plural: this.exportRows.length }' in body
+        assert 'cols: { key: "common.cols", plural: cols.length }' in body
+    # A PDF is a document: its title, summary and currency note are rows too,
+    # and the summary's counts are plural pairs (never a "row(s)" idiom).
+    assert 'doc.text(this.t("export.pdf_title"), 14, 15)' in pdf_export
+    assert 'doc.text(this.t("export.pdf_prices"), 14, 28)' in pdf_export
+    assert 't("export.summary", {' in pdf_export
+    assert 'tp("common.rows", this.exportRows.length)' in pdf_export
+    assert 'tp("common.cols", cols.length)' in pdf_export
+    assert 'format: "CSV"' in csv_export and 'format: "PDF"' in pdf_export, (
+        "the file format is the one machine token the sentence takes as a var")

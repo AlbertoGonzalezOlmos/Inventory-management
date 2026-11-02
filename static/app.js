@@ -100,17 +100,20 @@ const emptyItemForm = () => ({
   price: 0, stock: 0, image_url: "",
 });
 
-/** Columns of the data explorer table. */
+/** Columns of the data explorer table (slice E): each row names the CSV row that
+ *  labels it, and the allColumns computed resolves that per language — so the
+ *  header, the picker, the CSV head and the PDF head cannot drift apart, and a
+ *  language flip relabels an open table. */
 const DATA_COLUMNS = [
-  { key: "id", label: "ID" },
-  { key: "sku", label: "SKU" },
-  { key: "name", label: "Name" },
-  { key: "category", label: "Category" },
-  { key: "price_cents", label: "Price (DKK)" },
-  { key: "stock", label: "Stock" },
-  { key: "description", label: "Description" },
-  { key: "has_embedding", label: "Embedded" },
-  { key: "created_at", label: "Created" },
+  { key: "id", labelKey: "table.col.id" },
+  { key: "sku", labelKey: "field.sku" },
+  { key: "name", labelKey: "field.name" },
+  { key: "category", labelKey: "field.category" },
+  { key: "price_cents", labelKey: "common.price_dkk" },
+  { key: "stock", labelKey: "field.stock" },
+  { key: "description", labelKey: "field.description" },
+  { key: "has_embedding", labelKey: "table.col.embedded" },
+  { key: "created_at", labelKey: "table.col.created" },
 ];
 
 // Language bootstrap (item 3): resolve ONCE (query > stored > default), apply
@@ -185,8 +188,8 @@ Vue.createApp({
                             // focused pill would drop focus to <body> and
                             // grey a status indicator)
 
-      // data explorer
-      allColumns: DATA_COLUMNS,
+      // data explorer (allColumns is a COMPUTED since slice E: the labels are
+      // CSV rows, resolved per language)
       dataRows: [],
       dataPage: 0,
       dataLimit: 100,
@@ -409,7 +412,27 @@ Vue.createApp({
       };
     },
 
-    /* ---------- data explorer ---------- */
+    /* ---------- data explorer (slice E: labels + analysis scope) ---------- */
+    allColumns() {
+      // The explorer's columns with their label resolved in the UI language.
+      // Computed (not data) so a flip relabels the header, and both exports
+      // read the SAME label the table shows at export time.
+      return DATA_COLUMNS.map((c) => ({ key: c.key, label: this.t(c.labelKey) }));
+    },
+    analysisScopeLabel() {
+      // The panel's scope line has TWO counts (rows × columns), so each is its
+      // own plural pair and the sentence takes the phrases as placeholders.
+      // Computed, so a flip re-renders it (tp reads this.lang).
+      if (!this.selectedRowIds.length) {
+        return this.t("analysis.all_shown", {
+          rows: this.tp("common.rows", this.dataRows.length),
+        });
+      }
+      return this.t("analysis.selected", {
+        rows: this.tp("table.selected_rows", this.selectedRowIds.length),
+        cols: this.tp("common.cols", this.exportCols.length),
+      });
+    },
     exportRows() {
       return this.selectedRowIds.length
         ? this.dataRows.filter((r) => this.selectedRowIds.includes(r.id))
@@ -549,10 +572,26 @@ Vue.createApp({
       // ({key, plural, vars?}) — {key, vars} cannot express which .one/.other
       // row to pick, and the toast must still re-render with the flag (tp
       // reads this.lang at paint time, exactly like t()).
+      // Slice E: a var may itself be a count descriptor ({key, plural}), so a
+      // sentence with TWO counts ("Exported 3 rows × 2 columns") is plural-correct
+      // on both counts AND still re-renders on a flip — a phrase rendered at
+      // call time would freeze the old language in an open toast.
       if (value && typeof value === "object" && value.plural !== undefined) {
-        return this.tp(value.key, value.plural, value.vars || null);
+        return this.tp(value.key, value.plural, this._counts(value.vars));
       }
-      return HcrmI18n.descriptorText(value, (id, vars) => this.t(id, vars));
+      return HcrmI18n.descriptorText(value, (id, vars) => this.t(id, this._counts(vars)));
+    },
+    _counts(vars) {
+      // Resolve the nested count descriptors of a descriptor's var bag.
+      if (!vars) return null;
+      const out = {};
+      for (const name of Object.keys(vars)) {
+        const v = vars[name];
+        out[name] = v && typeof v === "object" && v.plural !== undefined
+          ? this.tp(v.key, v.plural, v.vars || null)
+          : v;
+      }
+      return out;
     },
     formatPrice(cents) {
       // DKK via the shared runtime, which loads before this file: fixed
@@ -566,6 +605,11 @@ Vue.createApp({
       // previous no-argument call inherited the BROWSER locale, so a Danish
       // UI on an English kiosk printed English dates.
       return new Date(iso).toLocaleDateString(this.formatLang());
+    },
+    statusLabel(status) {
+      // Slice E: a status CHIP shows a visible label for a machine value; the
+      // :class binding keeps the raw value, so the CSS states never translate.
+      return this.t("status." + status);
     },
     showToast(msg) {
       this.toast = msg;
@@ -1863,22 +1907,18 @@ Vue.createApp({
           // The pill flipping to live/off IS the success feedback; say it
           // once as a toast.
           this.pairOpen = false;
-          this.showToast("Scanner paired — scans from this terminal now " +
-                         "arrive here, even with this window unfocused");
+          this.showToast({ key: "scanner.paired_toast" });
           this._feedDispatch({ type: "paired", token: data.token });
         } else {
           // The server's messages ARE the operator instructions; fall
           // back per status when the body carried none.
           const detail = data && data.detail;
           const fallbacks = {
-            403: "One-click pairing is loopback-only — use a browser on " +
-                 "the server host, or set HCRM_SCANNER_PAIR_ANY=1",
-            404: "No pairing file on the server — run " +
-                 "scanner_daemon.py --register on the kiosk host, then " +
-                 "click the pill again",
+            403: this.t("scanner.pair_loopback_only"),
+            404: this.t("scanner.pair_no_file"),
           };
           this.showToast((detail && detail.message) ||
-                         fallbacks[status] || ("Pairing failed (" + status + ")"));
+                         fallbacks[status] || this.t("scanner.pair_failed", { status }));
         }
       } catch (e) {
         this.showToast(e.message);
@@ -1894,8 +1934,7 @@ Vue.createApp({
       // (one click once the daemon has re-registered) — the recovery
       // loop is Unpair → DELETE + --register → click the pill.
       this.pairOpen = false;
-      this.showToast("Unpaired — re-run scanner_daemon.py --register, " +
-                     "then click the pill to pair again");
+      this.showToast({ key: "scanner.unpaired_toast" });
     },
 
     /* ---------- kiosk logoff countdown (Task 4's server deadline) ---------- */
@@ -2369,7 +2408,7 @@ Vue.createApp({
     },
 
     exportCSV() {
-      if (!this.exportRows.length) return this.showToast("Nothing to export");
+      if (!this.exportRows.length) return this.showToast({ key: "export.empty" });
       const cols = this.exportCols;
       const header = cols.map((c) => this.csvEscape(c.label)).join(",");
       const lines = this.exportRows.map(
@@ -2379,14 +2418,19 @@ Vue.createApp({
       this.downloadBlob(
         "\ufeff" + [header, ...lines].join("\n"), "items-export.csv", "text/csv;charset=utf-8"
       );
-      this.showToast(
-        `Exported ${this.exportRows.length} row(s) × ${cols.length} column(s) as CSV`
-      );
+      this.showToast({
+        key: "export.done",
+        vars: {
+          rows: { key: "common.rows", plural: this.exportRows.length },
+          cols: { key: "common.cols", plural: cols.length },
+          format: "CSV",
+        },
+      });
     },
 
     exportPDF() {
-      if (!this.exportRows.length) return this.showToast("Nothing to export");
-      if (!window.jspdf) return this.showToast("PDF library not loaded");
+      if (!this.exportRows.length) return this.showToast({ key: "export.empty" });
+      if (!window.jspdf) return this.showToast({ key: "export.pdf_unavailable" });
       const cols = this.exportCols;
       // The body cells below are formatted ("1.234,50 DKK"), so the sheet
       // names the currency once, above the table — but only when a price
@@ -2394,13 +2438,16 @@ Vue.createApp({
       const hasPrice = cols.some((c) => c.key === "price_cents");
       const doc = new window.jspdf.jsPDF({ orientation: "landscape" });
       doc.setFontSize(14);
-      doc.text("HCRM — Items export", 14, 15);
+      doc.text(this.t("export.pdf_title"), 14, 15);
       doc.setFontSize(9);
-      doc.text(
-        `${this.exportRows.length} row(s) × ${cols.length} column(s) — ` +
-        new Date().toLocaleString(), 14, 22
-      );
-      if (hasPrice) { doc.setFontSize(9); doc.text("Prices in DKK", 14, 28); }
+      // The date follows the UI language, like every other date (formatLang is
+      // the one source; a no-arg toLocaleString would inherit the browser's).
+      doc.text(this.t("export.summary", {
+        rows: this.tp("common.rows", this.exportRows.length),
+        cols: this.tp("common.cols", cols.length),
+        date: new Date().toLocaleString(this.formatLang()),
+      }), 14, 22);
+      if (hasPrice) { doc.setFontSize(9); doc.text(this.t("export.pdf_prices"), 14, 28); }
       doc.autoTable({
         startY: hasPrice ? 33 : 27,
         head: [cols.map((c) => c.label)],
@@ -2409,9 +2456,14 @@ Vue.createApp({
         headStyles: { fillColor: [37, 99, 235] },
       });
       doc.save("items-export.pdf");
-      this.showToast(
-        `Exported ${this.exportRows.length} row(s) × ${cols.length} column(s) as PDF`
-      );
+      this.showToast({
+        key: "export.done",
+        vars: {
+          rows: { key: "common.rows", plural: this.exportRows.length },
+          cols: { key: "common.cols", plural: cols.length },
+          format: "PDF",
+        },
+      });
     },
 
     /* ---------- admin: items ---------- */
@@ -2474,10 +2526,11 @@ Vue.createApp({
     },
 
     async dismissRequest(req) {
-      if (!confirm(`Dismiss the scan request from ${req.requester.name} for "${req.name}"?`)) return;
+      if (!confirm(this.t("admin.request_dismiss_confirm",
+        { name: req.requester.name, item: req.name }))) return;
       try {
         await api(`/scan-requests/${req.id}/dismiss`, { method: "POST" });
-        this.showToast("Scan request dismissed");
+        this.showToast({ key: "admin.request_dismissed" });
         this.loadScanRequests();
       } catch (e) {
         this.showToast(e.message);
@@ -2544,10 +2597,10 @@ Vue.createApp({
     },
 
     async deleteItem(item) {
-      if (!confirm(`Delete "${item.name}" from the catalogue?`)) return;
+      if (!confirm(this.t("admin.item_delete_confirm", { name: item.name }))) return;
       try {
         await api("/items/" + item.id, { method: "DELETE" });
-        this.showToast("Item deleted");
+        this.showToast({ key: "admin.item_deleted" });
         this.loadAdminData();
         if (this.currentView === "table") this.loadDataPage();
       } catch (e) {
@@ -2561,18 +2614,17 @@ Vue.createApp({
       this.busy = true;
       try {
         const data = await api("/members", { method: "POST", body: this.memberForm });
-        this.showToast("Account created for " + this.memberForm.name);
+        this.showToast({ key: "admin.member_created", vars: { name: this.memberForm.name } });
         // Task 2: the 201 carries the member's first badge — show it so the
         // counter can print the card immediately (re-viewable after Task A;
         // keep the urgency, drop the old unrecoverability claim).
         if (data.qr_badge) {
           this.badgePrint = {
-            title: "QR badge — " + this.memberForm.name,
-            subtitle: "Print the membership card now",
+            title: this.t("account.badge_modal_title", { name: this.memberForm.name }),
+            subtitle: this.t("admin.badge_print_now"),
             svg: data.qr_badge.svg,
             payload: data.qr_badge.payload,
-            warning: "Anyone holding this code can log in as the member — " +
-                     "hand it over privately. Print it now while you have it.",
+            warning: this.t("admin.badge_warn_member"),
           };
         }
         this.memberForm = { name: "", email: "", password: "", role: "member" };
@@ -2585,10 +2637,10 @@ Vue.createApp({
     },
 
     async deleteMember(member) {
-      if (!confirm(`Delete the account of ${member.name}?`)) return;
+      if (!confirm(this.t("admin.member_delete_confirm", { name: member.name }))) return;
       try {
         await api("/members/" + member.id, { method: "DELETE" });
-        this.showToast("Account deleted");
+        this.showToast({ key: "admin.member_deleted" });
         this.loadAdminData();
       } catch (e) {
         this.showToast(e.message);
@@ -2609,10 +2661,10 @@ Vue.createApp({
     },
 
     async revokeMemberBadge(member) {
-      if (!confirm(`Revoke the QR badge of ${member.name}?`)) return;
+      if (!confirm(this.t("admin.badge_revoke_confirm", { name: member.name }))) return;
       try {
         await api("/members/" + member.id + "/qr-badge", { method: "DELETE" });
-        this.showToast("QR badge revoked for " + member.name);
+        this.showToast({ key: "admin.badge_revoked_for", vars: { name: member.name } });
         if (this.memberBadge && this.memberBadge.id === member.id) this.memberBadge = null;
         this.loadAdminData();
       } catch (e) {

@@ -59,6 +59,47 @@ account.tab_profile,Profile,Profil
 account.tab_requests,My scan requests,Mine scananmodninger
 account.tab_security,Security,Sikkerhed
 account.temp_password,Temporary password (min. 8 characters),Midlertidig adgangskode (min. 8 tegn)
+admin.badge_print_now,Print the membership card now,Udskriv medlemskortet nu
+admin.badge_revoke_confirm,Revoke the QR badge of {name}?,Tilbagekald QR-badget for {name}?
+admin.badge_revoked_for,QR badge revoked for {name},QR-badget blev tilbagekaldt for {name}
+admin.badge_show,QR badge,QR-badge
+admin.badge_warn_member,Anyone holding this code can log in as the member — hand it over privately. Print it now while you have it.,"Alle med denne kode kan logge ind som medlemmet — udlever den personligt. Udskriv den nu, mens du har den."
+admin.catalogue_count,Catalogue ({n}),Katalog ({n})
+admin.filter_all,All,Alle
+admin.item_delete_confirm,Delete “{name}” from the catalogue?,Slet “{name}” fra kataloget?
+admin.item_deleted,Item deleted,Varen blev slettet
+admin.member_create,Create account,Opret konto
+admin.member_create_title,Create member account,Opret medlemskonto
+admin.member_created,Account created for {name},Kontoen blev oprettet for {name}
+admin.member_delete_confirm,Delete the account of {name}?,Slet kontoen for {name}?
+admin.member_deleted,Account deleted,Kontoen blev slettet
+admin.members_count,Members ({n}),Medlemmer ({n})
+admin.request_create,Create & resolve,Opret og behandl
+admin.request_dismiss,Dismiss,Afvis
+admin.request_dismiss_confirm,Dismiss the scan request from {name} for “{item}”?,Afvis scananmodningen fra {name} om “{item}”?
+admin.request_dismissed,Scan request dismissed,Scananmodningen blev afvist
+admin.requests_empty,No requests with this status.,Ingen scananmodninger med denne status.
+admin.requests_intro,"Unknown items reported by members at the counter. Create the catalogue entry (prefilled from their proposal) to resolve, or dismiss as junk.","Ukendte varer, som medlemmer rapporterer ved disken. Opret katalogvaren (forudfyldt fra deres forslag) for at behandle anmodningen, eller afvis den som skrald."
+admin.reset_password,Reset password,Nulstil adgangskode
+admin.role_member,Member (buyer),Medlem (køber)
+admin.role_staff,Staff (can input items),Personale (kan indtaste varer)
+admin.tab_items,Catalogue input,Vareindtastning
+admin.tab_members,Members,Medlemmer
+admin.tab_requests,Scan requests,Scananmodninger
+analysis.all_shown,(all {rows} shown),(alle {rows} vist)
+analysis.avg_price,Avg price,Gennemsnitspris
+analysis.avg_stock,Avg stock,Gennemsnitligt lager
+analysis.by_category,By category,Efter kategori
+analysis.inventory_value,Inventory value,Lagerværdi
+analysis.items,Items,Varer
+analysis.median_price,Median price,Medianpris
+analysis.min_max_price,Min / Max price,Mindste / største pris
+analysis.min_max_stock,Min / Max stock,Mindste / største lager
+analysis.price_std,Price σ,Pris σ
+analysis.selected,({rows} × {cols}),({rows} × {cols})
+analysis.title,Analysis,Analyse
+analysis.total_stock,Total stock,Lager i alt
+app.brand_shop,Shop,Butik
 app.title,HCRM — Shop Catalogue,HCRM — Butikskatalog
 auth.already_member,Already a member?,Er du allerede medlem?
 auth.badge_check_failed,Badge check failed,Badgekontrollen mislykkedes
@@ -154,7 +195,11 @@ checkout.skipped.one,{n} scanned item no longer exists and was skipped.,{n} scan
 checkout.skipped.other,{n} scanned items no longer exist and were skipped.,{n} scannede varer findes ikke længere og blev sprunget over.
 common.cancel,Cancel,Annuller
 common.close,Close,Luk
+common.cols.one,{n} column,{n} kolonne
+common.cols.other,{n} columns,{n} kolonner
+common.delete,Delete,Slet
 common.done,Done,Færdig
+common.edit,Edit,Redigér
 common.item,Item,Vare
 common.item_count.one,{n} item,{n} vare
 common.item_count.other,{n} items,{n} varer
@@ -163,8 +208,12 @@ common.price,Price,Pris
 common.price_dkk,Price (DKK),Pris (DKK)
 common.print,Print,Udskriv
 common.qty,Qty,Antal
+common.revoke,Revoke,Tilbagekald
+common.rows.one,{n} row,{n} række
+common.rows.other,{n} rows,{n} rækker
 common.sku,SKU {sku},SKU {sku}
 common.total,Total,I alt
+common.view,View,Vis
 date.dow.fri,Fri,fr
 date.dow.mon,Mon,ma
 date.dow.sat,Sat,lø
@@ -196,6 +245,20 @@ date.month_long.6,June,juni
 date.month_long.7,July,juli
 date.month_long.8,August,august
 date.month_long.9,September,september
+export.done,Exported {rows} × {cols} as {format},Eksporterede {rows} × {cols} som {format}
+export.empty,Nothing to export,Intet at eksportere
+export.pdf_prices,Prices in DKK,Priser i DKK
+export.pdf_title,HCRM — Items export,HCRM — Vareeksport
+export.pdf_unavailable,PDF library not loaded,PDF-biblioteket er ikke indlæst
+export.summary,{rows} × {cols} — {date},{rows} × {cols} — {date}
+field.category,Category,Kategori
+field.description,Description,Beskrivelse
+field.image_url_placeholder,https://…,https://…
+field.name,Name,Navn
+field.role,Role,Rolle
+field.sku,SKU,SKU
+field.status,Status,Status
+field.stock,Stock,Lager
 intake.added,{name} added to the catalogue and your purchase list,{name} blev tilføjet til kataloget og din indkøbsliste
 intake.already_filed,Already filed as {sku} — added instead,Allerede registreret som {sku} — tilføjet i stedet
 intake.also_cart,Also add the item to {name}'s purchase list,Tilføj også varen til {name}s indkøbsliste
@@ -243,8 +306,12 @@ scan.staged_saved,Scan saved — log in or scan your badge to assign it,"Scannin
 scanner.label.live,scanner,scanner
 scanner.label.off,scanner offline,scanner inaktiv
 scanner.label.unpaired,no scanner,ingen scanner
+scanner.pair_failed,Pairing failed ({status}),Parringen mislykkedes ({status})
+scanner.pair_loopback_only,"One-click pairing is loopback-only — use a browser on the server host, or set HCRM_SCANNER_PAIR_ANY=1","Parring med ét klik virker kun fra loopback — brug en browser på serverværten, eller sæt HCRM_SCANNER_PAIR_ANY=1"
+scanner.pair_no_file,"No pairing file on the server — run scanner_daemon.py --register on the kiosk host, then click the pill again","Ingen parringsfil på serveren — kør scanner_daemon.py --register på kioskværten, og klik derefter på statusknappen igen"
 scanner.paired,"Paired — scans from this terminal now arrive here, even with this window unfocused.","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus."
 scanner.paired_offline,"Paired — scans from this terminal now arrive here, even with this window unfocused (server unreachable — retrying).","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus (serveren er ikke tilgængelig — prøver igen)."
+scanner.paired_toast,"Scanner paired — scans from this terminal now arrive here, even with this window unfocused","Scanner parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke har fokus"
 scanner.pairing_label,Scanner pairing,Scannerparring
 scanner.repair_prefix,"To re-pair: DELETE the terminal (staff or loopback), re-run","For at parre igen: SLET terminalen (personale eller loopback), kør igen"
 scanner.repair_suffix,", then click the pill.",", og klik derefter på statusknappen."
@@ -252,3 +319,31 @@ scanner.title.live,Scans arrive via the grab daemon (no window focus needed) —
 scanner.title.off,"Paired, but the server is unreachable — retrying — click to manage the pairing","Parret, men serveren er ikke tilgængelig — prøver igen — klik for at administrere parringen"
 scanner.title.unpaired,Not paired — click to pair this kiosk from the pairing file the daemon wrote,"Ikke parret — klik for at parre denne kiosk ud fra den parringsfil, daemonen skrev"
 scanner.unpair,Unpair,Fjern parring
+scanner.unpaired_toast,"Unpaired — re-run scanner_daemon.py --register, then click the pill to pair again","Ikke parret — kør scanner_daemon.py --register igen, og klik derefter på statusknappen for at parre igen"
+status.dismissed,Dismissed,Afvist
+status.open,Open,Åben
+status.resolved,Resolved,Behandlet
+table.badge_active,✓ active,✓ aktiv
+table.clear_selection,Clear selection,Ryd markering
+table.col.ai,AI,AI
+table.col.badge,Badge,Badge
+table.col.code,Code,Kode
+table.col.created,Created,Oprettet
+table.col.embedded,Embedded,Embedding
+table.col.id,ID,ID
+table.col.joined,Joined,Medlem siden
+table.col.proposed_item,Proposed item,Foreslået vare
+table.col.requested,Requested,Anmodet
+table.col.requester,Requester,Anmodende medlem
+table.column_title,Click to select column · Shift-click for a range · Ctrl/Cmd-click to add/remove,Klik for at markere kolonnen · Skift-klik for et interval · Ctrl/Cmd-klik for at tilføje eller fjerne
+table.empty,No items.,Ingen varer.
+table.export_csv,Export CSV,Eksportér CSV
+table.export_pdf,Export PDF,Eksportér PDF
+table.next,Next,Næste
+table.page,Page {n},Side {n}
+table.previous,Previous,Forrige
+table.reload,Reload,Opdatér
+table.selected_rows.one,{n} selected row,{n} markeret række
+table.selected_rows.other,{n} selected rows,{n} markerede rækker
+table.selection_hint,Click a row or a column header to select it · Shift-click for a range · Ctrl/Cmd-click to add/remove · analysis and exports use the current selection (or everything shown if nothing is selected).,"Klik på en række eller en kolonneoverskrift for at markere den · Skift-klik for et interval · Ctrl/Cmd-klik for at tilføje eller fjerne · analysen og eksporten bruger den aktuelle markering (eller alt det, der vises, hvis intet er markeret)."
+table.title,Items in the database,Varer i databasen

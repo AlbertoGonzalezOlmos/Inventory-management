@@ -108,7 +108,8 @@ test("a plural toast descriptor picks .one/.other and re-renders on a flip", () 
   // the count picks the sibling row through tp(), and msg() still reads
   // this.lang at paint time, so an open count toast flips with the flag (a
   // {key, vars} descriptor has no way to choose .one vs .other).
-  const m = appObject("t(id, vars) {", "tp(base, n, vars) {", "msg(value) {");
+  const m = appObject("t(id, vars) {", "tp(base, n, vars) {", "msg(value) {",
+                      "_counts(vars) {");
   const state = { lang: "en", ...m };
   assert.equal(state.msg({ key: "cart.restored", plural: 1 }),
     MESSAGES.en["cart.restored.one"].replace("{n}", "1"));
@@ -119,6 +120,42 @@ test("a plural toast descriptor picks .one/.other and re-renders on a flip", () 
     MESSAGES.da["cart.imported.other"].replace("{n}", "3"));
   assert.equal(state.msg({ key: "checkout.skipped", plural: 1 }),
     MESSAGES.da["checkout.skipped.one"].replace("{n}", "1"));
+});
+
+
+test("a TWO-count toast descriptor pluralises each count and re-renders on a flip", () => {
+  // Slice E: the export toast says "Exported 3 rows × 2 columns as CSV" — ONE
+  // plural pair per count cannot express that, and a phrase rendered at call
+  // time would freeze the old language in an open toast. A var may therefore
+  // be its own count descriptor, resolved at PAINT time (msg -> _counts -> tp),
+  // so both counts follow the flag.
+  const m = appObject("t(id, vars) {", "tp(base, n, vars) {", "msg(value) {",
+                      "_counts(vars) {");
+  const state = { lang: "en", ...m };
+  const toast = {
+    key: "export.done",
+    vars: {
+      rows: { key: "common.rows", plural: 1 },
+      cols: { key: "common.cols", plural: 2 },
+      format: "CSV",
+    },
+  };
+  assert.equal(state.msg(toast), MESSAGES.en["export.done"]
+    .replace("{rows}", MESSAGES.en["common.rows.one"].replace("{n}", "1"))
+    .replace("{cols}", MESSAGES.en["common.cols.other"].replace("{n}", "2"))
+    .replace("{format}", "CSV"));
+
+  // Flip AND swap the counts: the plural choice moves with the number, and the
+  // sentence with the language (3 rows -> .other, 1 column -> .one).
+  state.lang = "da";
+  assert.equal(state.msg({ ...toast, vars: {
+    rows: { key: "common.rows", plural: 3 },
+    cols: { key: "common.cols", plural: 1 },
+    format: "CSV",
+  } }), MESSAGES.da["export.done"]
+    .replace("{rows}", MESSAGES.da["common.rows.other"].replace("{n}", "3"))
+    .replace("{cols}", MESSAGES.da["common.cols.one"].replace("{n}", "1"))
+    .replace("{format}", "CSV"));
 });
 
 
@@ -191,8 +228,9 @@ test("detectLang never writes (a first visit stays unwritten)", () => {
 test("an open toast and greeting re-render through the real Vue when lang flips", async () => {
   // Every body here is the SHIPPED one, including the two computeds: the
   // test does not re-implement the descriptor path it is proving.
-  const m = appObject("t(id, vars) {", "msg(value) {", "nextLang() {",
-                      "toastText() {", "greetingText() {", "toggleLang() {");
+  const m = appObject("t(id, vars) {", "msg(value) {", "_counts(vars) {",
+                      "nextLang() {", "toastText() {", "greetingText() {",
+                      "toggleLang() {");
   const state = Vue.reactive({
     lang: "en",
     toast: { key: "auth.greeting", vars: { name: "Ada" } },
@@ -236,7 +274,8 @@ test("an open toast and greeting re-render through the real Vue when lang flips"
 });
 
 test("plain-string transients neither change nor re-render (server messages)", async () => {
-  const m = appObject("t(id, vars) {", "msg(value) {", "toastText() {");
+  const m = appObject("t(id, vars) {", "msg(value) {", "_counts(vars) {",
+                      "toastText() {");
   // api() surfaces a server `detail` as a plain string (item 6 owns its copy),
   // so the plain-string path must keep passing it through untouched.
   const state = Vue.reactive({ lang: "en", toast: "Request failed (500)" });
