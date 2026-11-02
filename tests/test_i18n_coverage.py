@@ -6,10 +6,9 @@ and six planted defects — one per failure class the checker claims to catch �
 make it exit 1 at the planted `file:line`.
 
 The planted cases run against a COPY of the real tree (i18n/, static/, tests/), so the
-real checkout is never mutated. Pass-4 cases that are not about the ratchet delete the
-copy's `i18n/migrated.txt`: with no file, nothing is exempt and every hardcoded-copy
-finding is fatal (exactly the item-7 mode). The checker is read-only; one test asserts
-that too.
+real checkout is never mutated. Item 7's flip deleted `i18n/migrated.txt`, so this tree
+IS the strict mode: nothing is exempt and every hardcoded-copy finding is fatal (pass-4
+cases need no setup any more). The checker is read-only; one test asserts that too.
 """
 
 import hashlib
@@ -118,6 +117,19 @@ def test_current_tree_passes_and_the_info_count_is_pinned():
                      text.stdout, re.M), text.stdout[-500:]
 
 
+def test_the_ratchet_file_is_gone_and_the_tree_is_strict():
+    """Item 7's flip: with no `i18n/migrated.txt`, nothing is exempt.
+
+    The file's ABSENCE is the flip — a reinstated namespace list would silently
+    re-open the exemption, so it is pinned here rather than left to review.
+    """
+    assert not (REPO_ROOT / "i18n" / "migrated.txt").exists(), (
+        "i18n/migrated.txt is deleted at the flip: a hardcoded literal matching "
+        "any CSV cell is fatal, in every namespace")
+    summary = json.loads(_run("--json").stdout)["summary"]
+    assert summary == {"errors": 0, "info": 0}
+
+
 def test_json_and_text_report_the_same_findings():
     as_json, as_text = _run("--json"), _run()
     findings = _findings(as_json)
@@ -147,7 +159,7 @@ def test_the_checker_never_writes():
     """
     watched = [CSV, ARTIFACT, REPO_ROOT / "static" / "index.html",
                REPO_ROOT / "static" / "app.js", REPO_ROOT / "static" / "i18n.js",
-               REPO_ROOT / "static" / "style.css", REPO_ROOT / "i18n" / "migrated.txt",
+               REPO_ROOT / "static" / "style.css",
                REPO_ROOT / "i18n" / "copy-allowlist.txt"]
     before = {p: (p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest())
               for p in watched}
@@ -193,18 +205,16 @@ def test_planted_dead_row(tmp_path):
 
 
 def test_planted_literal_show_toast(tmp_path):
-    """(d) A literal showToast argument (strict mode: nothing exempt)."""
+    """(d) A literal showToast argument (strict: nothing is exempt)."""
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "app.js", "      this.toast = msg;",
                           '      showToast("Saved the report");')
     _assert_planted(_run("--json", root=tree), "static/app.js", line, kind="call")
 
 
 def test_planted_literal_placeholder(tmp_path):
-    """(e) A literal placeholder attribute (strict mode: nothing exempt)."""
+    """(e) A literal placeholder attribute (strict: nothing is exempt)."""
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "index.html", "</main>",
                           '  <input placeholder="Type a name" />')
     _assert_planted(_run("--json", root=tree), "static/index.html", line, kind="attr")
@@ -256,7 +266,6 @@ def test_allowlist_entry_is_content_addressed(tmp_path):
 def test_planted_value_attribute(tmp_path):
     """An input's `value` is its visible label — not a machine payload."""
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "index.html", "</main>",
                           '  <input value="Type a name" />')
     _assert_planted(_run("--json", root=tree), "static/index.html", line, kind="attr")
@@ -265,7 +274,6 @@ def test_planted_value_attribute(tmp_path):
 def test_planted_aria_description_attribute(tmp_path):
     """`aria-description` is copy (the other aria-* attributes are state/config)."""
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "index.html", "</main>",
                           '  <div aria-description="Product details"></div>')
     _assert_planted(_run("--json", root=tree), "static/index.html", line, kind="attr")
@@ -274,7 +282,6 @@ def test_planted_aria_description_attribute(tmp_path):
 def test_planted_click_handler_show_toast(tmp_path):
     """A @click handler is JS: its showToast literal must be caught (item 5's home)."""
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "index.html", "</main>",
                           "  <div @click=\"showToast('Saved the report')\"></div>")
     _assert_planted(_run("--json", root=tree), "static/index.html", line, kind="call")
@@ -282,7 +289,6 @@ def test_planted_click_handler_show_toast(tmp_path):
 
 def test_planted_submit_handler_confirm(tmp_path):
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "index.html", "</main>",
                           "  <form @submit=\"confirm('Delete it?')\"></form>")
     _assert_planted(_run("--json", root=tree), "static/index.html", line, kind="call")
@@ -290,7 +296,6 @@ def test_planted_submit_handler_confirm(tmp_path):
 
 def test_planted_bare_onclick_alert(tmp_path):
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "index.html", "</main>",
                           "  <button onclick=\"alert('Hi there')\"></button>")
     _assert_planted(_run("--json", root=tree), "static/index.html", line, kind="call")
@@ -299,7 +304,6 @@ def test_planted_bare_onclick_alert(tmp_path):
 def test_plain_handler_without_literals_stays_clean(tmp_path):
     """The negative: `@click="toggleLang"` has no literal copy and must not be flagged."""
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "index.html", "</main>",
                           '  <button @click="toggleLang"></button>')
     findings = _findings(_run("--json", root=tree))
@@ -311,7 +315,6 @@ def test_plain_handler_without_literals_stays_clean(tmp_path):
 def test_planted_inline_script_is_scanned_as_js(tmp_path):
     """An inline <script> body is scanned by the JS scanners (absolute line)."""
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     line = _insert_before(tree / "static" / "index.html", "</main>",
                           "  <script>showToast('Saved the report');</script>")
     _assert_planted(_run("--json", root=tree), "static/index.html", line, kind="call")
@@ -320,7 +323,6 @@ def test_planted_inline_script_is_scanned_as_js(tmp_path):
 def test_planted_backtick_and_single_word_expression(tmp_path):
     """Backtick literals and 1-word literals in expressions are copy too."""
     tree = _copy_tree(tmp_path)
-    (tree / "i18n" / "migrated.txt").unlink()
     html = tree / "static" / "index.html"
     first = _insert_before(html, "</main>", "  <p>{{ `Open` }}</p>")
     second = _insert_before(html, "</main>", '  <span :title="\'close\'"></span>')

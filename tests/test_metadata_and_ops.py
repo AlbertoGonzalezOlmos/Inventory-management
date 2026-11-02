@@ -208,6 +208,12 @@ CITED_PATH_ALLOWLIST = {
     # all", PLAN-v2 §8.2 F3). The probe file was deliberately never
     # committed — PLAN-v2:849 says do not create it in the real tree.
     "static/docs.html",
+    # i18n/README.md, scripts/i18n_check.py and tests/test_i18n_coverage.py cite
+    # the namespace ratchet file to say it was DELETED at the item-7 flip (its
+    # absence is what makes the checker strict). A citation of a deliberately
+    # absent file, exactly like the static/docs.html precedent — and the docs
+    # must keep naming it, or nobody learns why it must never come back.
+    "i18n/migrated.txt",
 }
 
 #: A citation worth pinning carries its directory: one of these prefixes.

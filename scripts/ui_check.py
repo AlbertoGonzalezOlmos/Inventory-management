@@ -268,9 +268,54 @@ def count(pattern: str, text: str) -> int:
     return len(re.findall(pattern, text))
 
 
+#: The copy rows each view MUST render — ids, never cells. The cells are read
+#: from i18n/strings.csv for the target's language (see `_copy_cells`), so the
+#: gate holds no copy of its own: a wording change cannot redden it, and a
+#: language flip only changes which column is asserted.
+LOGIN_COPY_IDS = (
+    "auth.email_or_username", "auth.password", "auth.login",
+    "auth.scan_anywhere", "auth.no_account",
+)
+REGISTER_COPY_IDS = (
+    "auth.register_title", "auth.full_name", "auth.email",
+    "auth.password_min", "auth.signup",
+)
+
+
+def _copy_cells(ids: tuple[str, ...], lang: str) -> list[tuple[str, str]]:
+    """[(id, rendered cell)] for `lang`, from the copy source (never a literal)."""
+    source = _copy_source()
+    return [(rid, source[rid].cell(lang)) for rid in ids]
+
+
+def _copy_source() -> dict:
+    """id -> Row, read once from i18n/strings.csv via the shared loader."""
+    global _COPY_SOURCE
+    if _COPY_SOURCE is None:
+        scripts_dir = str(Path(__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import _i18n
+        rows, problems = _i18n.read_rows()
+        if problems:
+            raise SystemExit("i18n: " + problems[0])
+        _COPY_SOURCE = {row.id: row for row in rows}
+    return _COPY_SOURCE
+
+
+_COPY_SOURCE: dict | None = None
+
+
 def check_app_route(label: str, dom: str, console: list[str], liveness: str | None,
-                    copy: str | None, expected_lang: str = "en") -> list[str]:
-    """The compiler canary: the Vue runtime compiler must have executed."""
+                    copy_ids: tuple[str, ...], expected_lang: str,
+                    view: str = "") -> list[str]:
+    """The compiler canary: the Vue runtime compiler must have executed.
+
+    `copy_ids` are the rows this view must render, asserted in
+    `expected_lang`'s column of i18n/strings.csv — the gate never carries copy
+    itself. `view` selects the view-specific STRUCTURAL pins (login), so they
+    no longer key off an English sentence.
+    """
     failures = []
     if liveness:
         failures.append(f"[{label}] {liveness}")
@@ -285,8 +330,10 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
         failures.append(f"[{label}] fewer than 2 <input> elements rendered")
     if count(r"<button\b", dom) < 1:
         failures.append(f"[{label}] no <button> rendered")
-    if copy is not None and copy not in dom:
-        failures.append(f"[{label}] expected copy {copy!r} not rendered")
+    for rid, cell in _copy_cells(copy_ids, expected_lang):
+        if cell not in dom:
+            failures.append(f"[{label}] {expected_lang} copy for {rid!r} not "
+                            f"rendered (expected {cell!r})")
     # Task 5 pins (count()-only, per the repo's no-interaction harness):
     # - the global scan bus must be LIVE (the keydown listener's installer
     #   flips the binding that renders this attribute — a JS error in the
@@ -317,23 +364,19 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
             or count(r'placeholder="8 characters"', dom) != 0:
         failures.append(f"[{label}] manual pairing inputs rendered — the "
                         "pill is one-click; the form must not come back")
-    if copy == "Log in" and count(r'placeholder="Scan your QR badge here"', dom) != 0:
-        failures.append(f"[{label}] badge login field rendered — the "
-                        "removed fallback must not come back (scan "
-                        "anywhere is the one badge path)")
-    # Task E: auto-detect is the primary login path — the "scan anywhere"
-    # copy must render on the login view (always-rendered, so a one-shot DOM
-    # dump can pin it), and no click-to-scan language may remain.
-    if copy == "Log in":
-        if count(r"logs you in automatically", dom) < 1:
-            failures.append(f"[{label}] 'scan anywhere' auto-detect copy "
-                            "missing — the no-click login hint regressed")
-        if count(r"Point the scanner at your badge", dom) != 0:
-            failures.append(f"[{label}] stale click-to-scan copy still "
-                            "rendered — the auto-detect rewording regressed")
-    # The language toggle (item 3), for every app target — copy=None (the
-    # ?lang=da target) skips the English copy pins above but still runs
-    # the structural checks and these.
+    # Task E: auto-detect is the primary login path. The "scan anywhere" row is
+    # in LOGIN_COPY_IDS (asserted above in the target's language), so its
+    # PRESENCE is copy-checked; the negative "no click-to-scan wording" pin is
+    # gone with the wording — a hardcoded reappearance is now the i18n
+    # checker's ERROR (migrated.txt is deleted at the flip), not this gate's.
+    if view == "login" and count(r"<input\b", dom) != 2:
+        # Structural, not a placeholder string: the email and password fields
+        # and NOTHING else. A reintroduced badge-code field would make it 3.
+        failures.append(f"[{label}] the login view must render exactly the two "
+                        "credential inputs (the badge-code fallback must not "
+                        "come back — scan anywhere is the one badge path)")
+    # The language toggle (item 3), for every app target: `expected_lang` is the
+    # DEFAULT direction or the ?lang= opposite one — both polarities run.
     failures.extend(check_lang_direction(dom, expected_lang))
     return failures
 
@@ -344,21 +387,14 @@ _LANG_LABELS: dict[str, str] | None = None
 def _lang_labels() -> dict[str, str]:
     """en/da → the toggle's accessible name, read from the copy source.
 
-    Read from i18n/strings.csv (via the shared loader) so a wording change
-    can never redden this gate: the browser gate asserts structure and
+    The cell comes from i18n/strings.csv (via `_copy_source`) so a wording
+    change can never redden this gate: the browser gate asserts structure and
     polarity, never copy. Lazy so importing this module (the parser tests)
     needs neither scripts/ on sys.path nor the CSV until a check runs.
     """
     global _LANG_LABELS
     if _LANG_LABELS is None:
-        scripts_dir = str(Path(__file__).resolve().parent)
-        if scripts_dir not in sys.path:
-            sys.path.insert(0, scripts_dir)
-        import _i18n
-        rows, problems = _i18n.read_rows()
-        if problems:
-            raise SystemExit("i18n: " + problems[0])
-        row = next(r for r in rows if r.id == "lang.switch_to")
+        row = _copy_source()["lang.switch_to"]
         _LANG_LABELS = {"en": row.en, "da": row.da}
     return _LANG_LABELS
 
@@ -419,19 +455,33 @@ def _reachable(base: str) -> bool:
     return _hcrm.healthz(base, timeout=5.0) is not None
 
 
+#: The app coverage table: (label, path, view, expected language, copy rows).
+#: Danish is the DEFAULT (item 7), so "/" and "/#/register" assert the DANISH
+#: column of the copy source and "/?lang=en" the English one — the cells come
+#: from i18n/strings.csv, never from this file.
+#:
+#: The ENGLISH target runs FIRST on purpose. Each target gets its own browser
+#: profile; if that isolation ever regressed, the `en` this run persists would
+#: leak into the default target and its Danish pins would fail. Ordering it
+#: first turns a persistence leak into a failure instead of a silent no-op.
+APP_TARGETS = (
+    ("app-lang-en", "/?lang=en", "login", "en", LOGIN_COPY_IDS),
+    ("app-root", "/", "login", "da", LOGIN_COPY_IDS),
+    ("app-register", "/#/register", "register", "da", REGISTER_COPY_IDS),
+)
+
+
+def _app_check(label: str, view: str, lang: str, copy_ids: tuple[str, ...]):
+    """Bind one APP_TARGETS row into the (dom, console, live) callback."""
+    return lambda dom, console, live: check_app_route(
+        label, dom, console, live, copy_ids, lang, view)
+
+
 def _check_targets(browser: str, base: str, workdir: str, report: dict) -> list[str]:
-    targets = [
-        ("app-root", "/", lambda dom, console, live: check_app_route(
-            "app-root", dom, console, live, "Log in")),
-        ("app-register", "/#/register", lambda dom, console, live: check_app_route(
-            "app-register", dom, console, live, "Create your member account")),
-        # The ?lang=da direction: copy=None skips the English copy pins (the
-        # page is Danish-bootstrapped); a fresh per-label profile keeps the
-        # persisted ?lang from bleeding into the other targets.
-        ("app-lang-da", "/?lang=da", lambda dom, console, live: check_app_route(
-            "app-lang-da", dom, console, live, None, "da")),
-        ("docs", "/docs", lambda dom, console, live: check_docs(dom, console, live)),
-    ]
+    targets = [(label, path, _app_check(label, view, lang, copy_ids))
+               for label, path, view, lang, copy_ids in APP_TARGETS]
+    targets.append(("docs", "/docs",
+                    lambda dom, console, live: check_docs(dom, console, live)))
     failures: list[str] = []
     titles: dict[str, str] = {}
     for label, path, check in targets:
@@ -461,15 +511,27 @@ def _check_targets(browser: str, base: str, workdir: str, report: dict) -> list[
         print(f"  [{status:>4}] {label:<12} DOM "
               f"{report['targets'][label]['dom_bytes']:>7} B, "
               f"{record_count(stderr)} console record(s), {len(console)} parsed")
-    # Both-direction proof with zero Danish copy: the en and da targets must
-    # render DIFFERENT titles, both carrying the brand token (the title is
-    # set from the CSV's app.title before mount).
-    en_title, da_title = titles.get("app-root"), titles.get("app-lang-da")
-    if en_title is None or da_title is None:
-        failures.append("[lang-direction] an app target rendered no <title>")
-    elif en_title == da_title or "HCRM" not in en_title or "HCRM" not in da_title:
-        failures.append("[lang-direction] the en and da targets must show "
-                        "different HCRM titles")
+    # Both-direction proof, copy from the CSV only: the DEFAULT target ("/") and
+    # the ?lang= opposite must each render THEIR language's `app.title` cell
+    # (applyLang sets it before mount), the two must differ (so a stuck language
+    # can never pass) and both must carry the brand token.
+    default = next(spec for spec in APP_TARGETS if spec[1] == "/")
+    other = next(spec for spec in APP_TARGETS if spec[3] != default[3])
+    for label, lang in ((default[0], default[3]), (other[0], other[3])):
+        rendered = titles.get(label)
+        expected = _copy_source()["app.title"].cell(lang)
+        if rendered is None:
+            failures.append(f"[lang-direction] {label} rendered no <title>")
+        elif rendered != expected:
+            failures.append(f"[lang-direction] {label} title must be the {lang} "
+                            f"app.title cell {expected!r}, got {rendered!r}")
+    default_title, other_title = titles.get(default[0]), titles.get(other[0])
+    if default_title is not None and default_title == other_title:
+        failures.append(f"[lang-direction] {default[0]} and {other[0]} must not "
+                        "share a title (the language did not switch)")
+    elif default_title is not None and other_title is not None \
+            and ("HCRM" not in default_title or "HCRM" not in other_title):
+        failures.append("[lang-direction] both titles must carry the brand token")
     return failures
 
 

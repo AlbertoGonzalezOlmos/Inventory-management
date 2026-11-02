@@ -79,6 +79,46 @@ On first run the app seeds:
 > defaults to **`/tmp/fastembed_cache`**, so a tmp-cleaner wipes it and the next
 > boot re-downloads. Set `FASTEMBED_CACHE_PATH` to a stable path to avoid that.
 
+## Internationalisation
+
+The UI is **Danish by default** and switches to English with the flag in the topbar
+(a per-device preference in `localStorage.hcrm_lang`) or a `?lang=en` link (applied,
+persisted, then stripped from the URL so a stale link can never beat a later toggle).
+English stays the fallback for a row whose Danish translation is missing.
+
+- **One copy source.** `i18n/strings.csv` (UTF-8 **with BOM**, header `id,en,da`) is
+  the only hand-edited user-visible copy. `static/i18n.messages.js` is **generated**
+  from it and committed; the app loads that data first, then the small runtime
+  `static/i18n.js` (`t()`, `tp()` plural pairs, `money()`/`moneyCode()`,
+  `errorText()`, language detection and everything else).
+- **Edit → build → commit.** Edit the CSV, run
+  `uv run python scripts/build_i18n.py --write`, commit **both** files.
+  `--check` proves the artifact is fresh (`scripts/run.sh` and CI refuse to serve a
+  stale one); `--report` prints row/prefix counts.
+- **The checker (a ratchet).** `uv run python scripts/i18n_check.py` is read-only:
+  CSV shape, every `t()`/`tp()` reference, dead rows, hardcoded copy in
+  `index.html`/`static/*.js`, and which findings are fatal. It exits `1` with
+  `file:line` and a fix per class. The ratchet is **global** now — `i18n/migrated.txt`
+  (the migration's namespace allowlist) was deleted at the flip, so any hardcoded
+  literal that matches a CSV cell is an **error**, and the pinned INFO count is `0`.
+  `i18n/copy-allowlist.txt` exempts only content that must not be translated (a shell
+  command, a glyph, the brand token, a default category slug), says why, and may only
+  shrink.
+- **Money is DKK.** Amounts are formatted by a hand-rolled integer formatter:
+  `0,00 DKK` / `1.234,50 DKK` / `-1.234,50 DKK`, Danish numerals in **both** UI
+  languages, ASCII space, never `Intl` currency mode (it emits a non-breaking space
+  before the code and drifts with the browser's ICU build). The code itself is the
+  `money.code` CSV row; CSV cells of an export stay numeric, PDF cells are formatted.
+- **Server errors follow the UI language.** Backend errors carry an additive
+  `X-Error-Code` header (plus `X-Error-Vars` for a parameterised message); the SPA
+  renders the `error.<code>` row, so a 401/403/404/409/422 reads Danish — **without
+  changing any response body**.
+- **Adding a language.** The CSV is `en` + `da` today. A third language means a third
+  column in `i18n/strings.csv` and in `LANGUAGES` (`scripts/_i18n.py`), a new code in
+  `SUPPORTED_LANGS` plus its flag/label in `static/i18n.js` and the topbar toggle, and
+  `build_i18n.py --write`. The tests and `ui_check` read their expectations from the
+  CSV, so they need no new copy — only the new column.
+
 ## Configuration
 
 | Environment variable | Default | Purpose |
