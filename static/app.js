@@ -103,7 +103,14 @@ async function api(path, { method = "GET", body, raw = false, token } = {}) {
     localStorage.removeItem(USER_KEY);
     window.dispatchEvent(new Event("hcrm-session-expired"));
     if (location.hash !== "#/login") location.hash = "#/login";
-    throw Object.assign(new Error(tGlobal("auth.session_expired")), { status: 401 });
+    // The flag marks this as a CONTROL-FLOW signal, not a failure to report:
+    // the teardown above already cleared the session and routed to #/login,
+    // so a caller that does nothing with it has nothing left to do. It lets
+    // the boot guard silence exactly this rejection without hiding real ones.
+    throw Object.assign(new Error(tGlobal("auth.session_expired")), {
+      status: 401,
+      sessionExpired: true,
+    });
   }
   let data = null;
   if (res.status !== 204) {
@@ -120,6 +127,34 @@ async function api(path, { method = "GET", body, raw = false, token } = {}) {
   if (res.status === 204) return null;
   return data;
 }
+
+/** True only for the flag api() sets on its post-teardown 401. */
+function isSessionExpiredRejection(reason) {
+  return !!reason && reason.sessionExpired === true;
+}
+
+/**
+ * The window "unhandledrejection" guard for the session-expiry signal.
+ *
+ * api()'s 401 branch clears the tokens, dispatches hcrm-session-expired (which
+ * clears the session and routes to #/login) and THEN throws, by design, so the
+ * caller's continuation stops. A boot/route load with no view left to fill
+ * (the initial cart load) has nothing to do with that rejection; left uncaught
+ * it becomes "Uncaught (in promise)" console noise, which the browser gate
+ * treats as a hard failure.
+ *
+ * The guard is deliberately NARROW: it calls preventDefault ONLY for the flag
+ * api() sets. Any other rejection — a real 500, a programming error, a plain
+ * string — still reaches the console gate, so the gate stays meaningful.
+ */
+function installSessionExpiredGuard(target) {
+  target.addEventListener("unhandledrejection", (event) => {
+    if (isSessionExpiredRejection(event.reason)) event.preventDefault();
+  });
+}
+
+// Module scope, before Vue mounts and before any boot/route load can run.
+if (typeof window !== "undefined") installSessionExpiredGuard(window);
 
 const emptyItemForm = () => ({
   sku: "", name: "", description: "", category: "general",
@@ -704,8 +739,10 @@ Vue.createApp({
         return;
       }
       await this.loadCart();
+      if (!this.user) return;   // a 401 tore the session down; already on #/login
       this._announceCartRestored();
       await this.replayStagedScans();
+      if (!this.user) return;   // replay can 401 too; the teardown already routed
       location.hash = "#/catalogue";
       this.route = "#/catalogue";
       this.reloadItems();
@@ -1039,8 +1076,16 @@ Vue.createApp({
 
     async loadCart() {
       if (!this.user || this.user.must_change_password) return; // 403-gated
-      this.cart = await api("/cart");
-      this._cartImportedLegacy = await this.importLegacyPurchase();
+      try {
+        this.cart = await api("/cart");
+        this._cartImportedLegacy = await this.importLegacyPurchase();
+      } catch (e) {
+        // The 401 branch ALREADY cleared the session and routed to #/login:
+        // there is no cart view left to fill and rethrowing would only turn
+        // into an uncaught rejection. Real failures still propagate.
+        if (isSessionExpiredRejection(e)) return;
+        throw e;
+      }
     },
 
     /* The "your list is durable" reassurance: called ONLY at the session-entry
@@ -2077,6 +2122,7 @@ Vue.createApp({
         return;
       }
       await this.loadCart();                        // 6. the incoming user's list
+      if (!this.user) return;                       // a 401 already routed to #/login
       this._announceCartRestored();
       this.reloadItems();
       this.loadCategories();
