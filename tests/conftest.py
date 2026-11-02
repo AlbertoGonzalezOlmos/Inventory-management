@@ -1,7 +1,7 @@
 """Pytest fixtures for the HCRM API tests.
 
-Every test gets a fresh database (drop/recreate/reseed), so tests are
-order-independent and cannot poison each other via shared state.
+Every test gets a fresh database (the canonical seeded snapshot is restored),
+so tests are order-independent and cannot poison each other via shared state.
 
 The embedding model is NEVER loaded: warm_up is neutralised and embed calls
 are replaced with fast, deterministic fakes (one-hot vectors derived from a
@@ -12,8 +12,10 @@ IMPORTANT: the environment must be configured before any `app.*` import,
 because the database URL is computed at import time.
 """
 
+import contextlib
 import hashlib
 import os
+import shutil
 import tempfile
 
 # setdefault: pytest can import this module twice (as `conftest` and as
@@ -95,8 +97,19 @@ def _client():
     return TestClient(app)
 
 
-def _reset_db() -> None:
-    """Drop and recreate everything, then reseed the canonical fixture data."""
+#: The canonical seeded database, built once per session and copied into place
+#: for every test. Building it means executing the full DDL (drop/create the
+#: tables + the last-admin triggers), running the migrations and reseeding —
+#: measured at ~130 ms per test, i.e. ~30 s of the suite's wall clock, spent
+#: rebuilding the exact same bytes 600 times. One snapshot + one file copy
+#: gives every test the identical fixture state for ~2 ms.
+_TEMPLATE_DIR = tempfile.mkdtemp(prefix="hcrm-test-template-")
+_TEMPLATE_DB = os.path.join(_TEMPLATE_DIR, "hcrm.db")
+_template_built = False
+
+
+def _build_template() -> None:
+    """Build the canonical fixture database (DDL, migrations, seed, embeddings)."""
     from sqlmodel import Session, SQLModel
 
     from app.database import create_all, engine
@@ -110,6 +123,35 @@ def _reset_db() -> None:
         seed_default_admin(session)
         seed_example_items(session)
         backfill_embeddings(session)
+    # Fold the write-ahead log back into the main file: the template must be a
+    # single self-contained file, or the copy silently loses the newest rows.
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+    engine.dispose()
+    shutil.copyfile(get_db_path(), _TEMPLATE_DB)
+
+
+def _reset_db() -> None:
+    """Restore the canonical fixture state, so each test starts clean."""
+    global _template_built
+
+    from app.database import engine
+
+    if not _template_built:
+        _build_template()
+        _template_built = True
+    # Release the pooled connections first: they hold open handles to the file
+    # being replaced. New connections re-run the app's connect hook, which
+    # reloads the sqlite-vector extension and re-registers the items.embedding
+    # column.
+    engine.dispose()
+    db_path = get_db_path()
+    for path in (db_path, db_path + "-wal", db_path + "-shm"):
+        # A stale -wal/-shm pair would replay the *previous* test's writes on
+        # top of the restored file; deleting them is what makes the copy exact.
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
+    shutil.copyfile(_TEMPLATE_DB, db_path)
 
 
 @pytest.fixture()

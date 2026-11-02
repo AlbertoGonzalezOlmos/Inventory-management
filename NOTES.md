@@ -449,16 +449,23 @@ uv run pytest          # 40 tests, ~2.5 s, fully offline (verified green)
 Headless Chrome loads `/`, `/#/register`, `/docs`; fails (exit 1) on console
 *error text* (classified by message content, never severity — fatal errors log
 as `INFO:CONSOLE`), missing `data-v-app`, lingering `v-cloak`, missing inputs,
-or a docs DOM < 20 KB. Exit 3 = no browser found. Exists because a CSP change
-was twice "verified" with `curl -I` while it blanked the UI.
+or a docs DOM < 20 KB. Exit 3 = no browser found, 4 = browser found but its
+console detector is blind (CI must treat both as failures, never skips).
+Exists because a CSP change was twice "verified" with `curl -I` while it
+blanked the UI.
 
-**Known open defects (PLAN-v2 §8–9, W2.3 is the fix)**: the console regex only
-matches Chrome-131-style `:CONSOLE(n)] "…", source: …` lines — Chrome 150 logs
-a different shape, so the detector returns 0 messages and **fails open** (F1);
-browser discovery sorts by mtime and can pick a blind binary (F2). The planned
-fix: split on record headers, a liveness guard (records > 0 but parsed == 0 →
-fail), a per-binary self-probe with a truncation-defeating payload, exit 4 for
-"detector blind", and parser unit tests without a browser.
+**W2.3 landed (closes PLAN-v2 §8.2 F1/F2, §9.2 F7)**: `console_records()` splits
+stderr on record *headers*, so both `:CONSOLE(n)]` (Chrome 131) and
+`:CONSOLE:n]` (Chrome 150+) parse — a Chrome 150 page with a live CSP violation
+no longer reads as zero messages. A per-page liveness guard fails whenever the
+browser logged records but none parsed, and each candidate binary is
+self-probed with an inner-quote + newline payload that must survive verbatim
+before it is trusted; if no candidate passes the detector exits **4** instead of
+reporting pass with a blind detector. Discovery prefers full Chrome over
+`chrome-headless-shell` (which emits zero `:CONSOLE` records and would make the
+gate permanently blind). The parser is pinned by `tests/test_ui_check_parser.py`
+— fixtures covering both formats, a missing-`source:` suffix, inner quotes,
+embedded newlines and the liveness guard; no browser needed.
 
 ### `scripts/smoke_test.py` — end-to-end vs a live server
 

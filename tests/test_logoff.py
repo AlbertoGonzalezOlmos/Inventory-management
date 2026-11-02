@@ -10,6 +10,7 @@ No test sleeps: expiry is exercised either by monkeypatching the grace to 0
 past deadline directly into the row.
 """
 
+import json
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -266,19 +267,35 @@ def test_fresh_logins_are_unarmed(client, admin_token):
 # --- the grace constant wiring --------------------------------------------------------
 
 
+_GRACE_SNIPPET = """
+import importlib, json, os, sys
+from app import security
+
+out = {}
+for value in sys.argv[1:]:
+    os.environ["HCRM_LOGOFF_GRACE_SECONDS"] = value
+    # re-runs the module body, i.e. the import-time read being pinned
+    importlib.reload(security)
+    out[value] = security.LOGOFF_GRACE_SECONDS
+print("JSON>>" + json.dumps(out))
+"""
+
+
 def test_grace_env_override_and_clamp():
     """HCRM_LOGOFF_GRACE_SECONDS is read at import and clamped >= 1 (a zero
     env value must not make scheduling an instant self-logout — tests that
-    need zero monkeypatch the module attribute instead)."""
-    for env_value, expected in (("0", 1), ("5", 5), ("120", 120), ("-9", 1)):
-        proc = subprocess.run(
-            [sys.executable, "-c",
-             "import os; os.environ['HCRM_LOGOFF_GRACE_SECONDS'] = "
-             f"{env_value!r}; "
-             "from app.security import LOGOFF_GRACE_SECONDS; "
-             "print(LOGOFF_GRACE_SECONDS)"],
-            capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
-            env={"PATH": "/usr/bin:/bin", "HCRM_DATA_DIR": "/tmp/hcrm-grace-test"},
-        )
-        assert proc.returncode == 0, proc.stderr
-        assert int(proc.stdout.strip()) == expected, (env_value, proc.stdout)
+    need zero monkeypatch the module attribute instead).
+
+    One fresh interpreter for all four values (reload re-runs the import-time
+    read): four separate `python -c` boots cost ~1 s of app import each, all
+    for the same constant.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _GRACE_SNIPPET, "0", "5", "120", "-9"],
+        capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
+        env={"PATH": "/usr/bin:/bin", "HCRM_DATA_DIR": "/tmp/hcrm-grace-test"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    line = next(l for l in proc.stdout.splitlines() if l.startswith("JSON>>"))
+    read = json.loads(line[len("JSON>>"):])
+    assert read == {"0": 1, "5": 5, "120": 120, "-9": 1}, read
