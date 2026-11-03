@@ -74,4 +74,78 @@ else
     echo "           LIVE DATA — back it up first with scripts/backup_db.sh"
 fi
 
-exec uv run uvicorn app.main:app --host "$HOST" --port "$PORT"
+# --- process composition: the M-10 daemon comes up with the app ----------
+# run.sh is the kiosk's one-command start, so it starts both processes the
+# operator needs: uvicorn, then (unless this is a scratch run, or the
+# operator opted out) the scanner grab daemon. The trap stops the daemon
+# FIRST — its SIGTERM handler closes the fd, releasing the EVIOCGRAB — then
+# the server. A dead daemon is degraded, never fatal: the app boots and
+# serves without a scanner, and registration precedes the grab, so the pill
+# still pairs. `--forward` is ALWAYS loopback: the register/pair gates hold
+# even when HCRM_HOST=0.0.0.0. No HCRM_SCANNER_*_ANY flag is ever set.
+SERVER_PID=""
+DAEMON_PID=""
+
+_reap() {  # zombie-safe: `jobs -pr` lists live children only, `kill -0` does not
+    [ -n "$1" ] || return 0
+    # Only a LIVE child is ever signalled: a dead/reaped pid must not be
+    # TERMed — the number could already belong to a recycled process.
+    jobs -pr | grep -qx "$1" || return 0
+    kill -TERM "$1" 2>/dev/null || return 0
+    for _ in $(seq 50); do
+        jobs -pr | grep -qx "$1" || return 0
+        sleep 0.1
+    done
+    kill -KILL "$1" 2>/dev/null || true
+}
+shutdown() {
+    rc=$?
+    trap - EXIT INT TERM
+    _reap "$DAEMON_PID"; wait "$DAEMON_PID" 2>/dev/null || true
+    _reap "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null || true
+    exit "$rc"
+}
+# EXIT preserves uvicorn's status; INT/TERM select 130/143 and then run that
+# same cleanup, so a child exiting first cannot turn a signal into status 0.
+trap shutdown EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+uv run uvicorn app.main:app --host "$HOST" --port "$PORT" &
+SERVER_PID=$!
+
+SCANNER_DAEMON="${HCRM_SCANNER_DAEMON:-1}"
+case "$SCANNER_DAEMON" in 0|false|FALSE|no|off) SCANNER_DAEMON="" ;; esac
+if [ -z "$SCANNER_DAEMON" ]; then
+    echo "scanner:   daemon disabled (HCRM_SCANNER_DAEMON=${HCRM_SCANNER_DAEMON:-1})"
+elif [ -n "${HCRM_SCRATCH:-}" ]; then
+    echo "scanner:   daemon skipped (scratch run — the real scanner stays alone)"
+else
+    # The forward URL is ALWAYS loopback (the register/pair gates): [::1]
+    # for IPv6-only binds, 127.0.0.1 otherwise. A bind to one specific
+    # non-loopback address leaves no loopback listener for the daemon —
+    # warn and skip rather than forward to a LAN address (that would need
+    # the HCRM_SCANNER_*_ANY flags, which this script never sets).
+    case "$HOST" in
+        ::1|::) SCANNER_FORWARD="http://[::1]:$PORT" ;;
+        127.0.0.1|localhost|0.0.0.0|"") SCANNER_FORWARD="http://127.0.0.1:$PORT" ;;
+        *)
+            echo "scanner:   daemon skipped — HCRM_HOST=$HOST gives the daemon no 127.0.0.1/[::1] listener to forward to (use HCRM_HOST=127.0.0.1 or 0.0.0.0)"
+            SCANNER_FORWARD="" ;;
+    esac
+    if [ -n "$SCANNER_FORWARD" ]; then
+        SCANNER_CONFIG="$RESOLVED_DATA_DIR/scanner.json"
+        uv run python scripts/scanner_daemon.py \
+            --config "$SCANNER_CONFIG" \
+            --forward "$SCANNER_FORWARD" \
+            --pairing-file "${HCRM_SCANNER_PAIRING_FILE:-$RESOLVED_DATA_DIR/scanner-pairing.json}" \
+            --register-wait "${HCRM_SCANNER_REGISTER_WAIT:-300}" &
+        DAEMON_PID=$!
+        echo "scanner:   daemon pid $DAEMON_PID (config $SCANNER_CONFIG)"
+    fi
+fi
+
+STATUS=0
+wait "$SERVER_PID" || STATUS=$?   # set -e-safe: capture uvicorn's exit code
+SERVER_PID=""                     # the EXIT path must never signal this pid again
+exit "$STATUS"                    # fires the EXIT trap, which re-exits with $?

@@ -202,8 +202,17 @@ print("JSON>>" + json.dumps(out))
     assert out["items"] == 200, out               # not blocked by the flag
 
 
+# Isolation (polish item 1): a developer with these exported must not
+# change what the guard tests prove — HCRM_ALLOW_INSECURE_BIND=1 in the
+# ambient env would silently turn every refusal into a pass-through.
+_STRIP_ENV = ("HCRM_SCANNER_DAEMON", "HCRM_SCANNER_PAIRING_FILE",
+              "HCRM_SCANNER_REGISTER_WAIT", "HCRM_SCANNER_CONFIG",
+              "HCRM_ALLOW_INSECURE_BIND", "HCRM_SCRATCH")
+
+
 def _run_sh(extra_env: dict):
-    env = {**os.environ, **extra_env}
+    env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+    env.update(extra_env)
     # `uv` is hidden so the script cannot actually sync/start a server: exit 127
     # proves it got PAST the bind guard, exit 1 + "refusing" proves it did not.
     # bash must be resolved BEFORE PATH is emptied, hence the absolute path.

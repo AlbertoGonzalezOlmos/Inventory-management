@@ -27,6 +27,7 @@ from scripts.scanner_daemon import (
     Forwarder,
     PostError,
     Spool,
+    _Stopped,
     default_pairing_file,
     main,
     save_pairing_file,
@@ -85,13 +86,20 @@ def reader_yielding(*codes, then=KeyboardInterrupt):
     return reader
 
 
-def run(args, post, reader, scanner_sysfs):
-    """Drive main() once with everything injected; return its exit code."""
+def run(args, post, reader, scanner_sysfs, *, sleep=lambda s: None,
+         clock=None):
+    """Drive main() once with everything injected; return its exit code.
+
+    ``sleep`` defaults to a no-op (the grab loop's re-discovery naps must
+    never really sleep); retry tests pass a recorder (and, for budget
+    exhaustion, a ``clock`` the recorder advances — a monotonic deadline
+    cannot be faked with real time and a no-op sleep).
+    """
     fake = FakeGrab()
     lock = os.path.join(tempfile.mkdtemp(prefix="hcrm-t5-"), "daemon.lock")
     return main(args, post=post, opener=fake.opener, ioctl=fake.ioctl,
                 closer=fake.closer, scan_reader=reader, lock_path=lock,
-                sysfs_root=scanner_sysfs, sleep=lambda s: None)
+                sysfs_root=scanner_sysfs, sleep=sleep, clock=clock)
 
 
 def write_config(tmp_path, terminal_id="counter-1", secret=None):
@@ -202,6 +210,192 @@ def test_failed_register_writes_no_pairing_file(tmp_path, scanner_sysfs):
                post, reader_yielding(), scanner_sysfs)
     assert code != 0
     assert not offer.exists()   # a failed register leaves no offer behind
+
+
+# --- --register-wait: bounded, transient-only registration retry -------------
+
+
+def test_register_wait_retries_transient_then_succeeds(tmp_path, scanner_sysfs,
+                                                        capsys):
+    """Transient failures (server still booting) retry within the budget;
+    the config + offer land exactly as with a first-try success."""
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    post = PostScript([PostError(0, "refused"), PostError(503, "boom"),
+                       PostError(429, "busy"), {"pairing_code": PAIRING_CODE}])
+    sleeps = []
+    code = run(["--config", str(cfg), "--register", "--register-wait", "10",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs, sleep=sleeps.append)
+    assert code == 0
+    assert len(post.calls) == 4
+    assert all(c["url"].endswith("/api/scanner/terminals") for c in post.calls)
+    assert sleeps == [2.0, 2.0, 2.0]
+    assert "retrying in 2s" in capsys.readouterr().err
+    assert stat.S_IMODE(offer.stat().st_mode) == 0o600
+    saved = json.loads(offer.read_text())
+    assert saved == {"terminal_id": "counter-1", "pairing_code": PAIRING_CODE}
+
+
+def test_register_wait_default_is_a_single_attempt(tmp_path, scanner_sysfs,
+                                                   capsys):
+    """No --register-wait (the default, and the systemd unit's contract):
+    one attempt, today's loud failure — and no "budget" line, because the
+    default path never had a budget to exhaust."""
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    post = PostScript([PostError(0, "refused"), {"pairing_code": PAIRING_CODE}])
+    sleeps = []
+    code = run(["--config", str(cfg), "--register",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs, sleep=sleeps.append)
+    assert code == 1
+    assert len(post.calls) == 1
+    assert sleeps == []
+    err = capsys.readouterr().err
+    assert "registration failed" in err          # still exactly as loud
+    assert "budget" not in err                    # ...but claims no budget
+    assert not offer.exists()
+
+
+def test_register_wait_never_retries_permanent_failures(tmp_path, scanner_sysfs):
+    """A 409 (terminal already registered) is an operator problem, not a
+    transient one: one attempt, loud exit, regardless of the budget."""
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    post = PostScript([PostError(409, "already registered")])
+    sleeps = []
+    code = run(["--config", str(cfg), "--register", "--register-wait", "300",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs, sleep=sleeps.append)
+    assert code == 1
+    assert len(post.calls) == 1
+    assert sleeps == []
+    assert not offer.exists()
+
+
+def test_register_wait_non_integer_status_is_permanent(tmp_path, scanner_sysfs):
+    """Legacy callers pass string statuses; .transient's ``status >= 500``
+    would TypeError on them — the guard must classify, never crash (this is
+    what keeps test_failed_register_writes_no_pairing_file green)."""
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    post = PostScript([PostError("409: already registered")])
+    code = run(["--config", str(cfg), "--register", "--register-wait", "300",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs, sleep=lambda s: None)
+    assert code == 1
+    assert len(post.calls) == 1
+    assert not offer.exists()
+
+
+def test_register_wait_budget_exhaustion_is_loud(tmp_path, scanner_sysfs,
+                                                 capsys):
+    """A always-transient outage exhausts the budget and re-raises: the
+    daemon's exit-1-with-one-line contract, with the budget named."""
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    post = PostScript([PostError(0, "refused")] * 5)
+    now = [0.0]
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds          # advance the fake clock with each nap
+
+    code = run(["--config", str(cfg), "--register", "--register-wait", "6",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs,
+               sleep=fake_sleep, clock=lambda: now[0])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "registration failed" in err
+    assert "budget of 6s exhausted after 4 attempt(s)" in err
+    assert sleeps == [2.0, 2.0, 2.0]
+    assert not offer.exists()
+    assert not cfg.exists()
+
+
+def test_register_wait_caps_final_sleep_to_the_remaining_budget(tmp_path,
+                                                                 scanner_sysfs):
+    """The last pause is shortened, not allowed to overrun the time budget."""
+    cfg = tmp_path / "scanner.json"
+    post = PostScript([PostError(0, "refused")] * 4)
+    now = [0.0]
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    code = run(["--config", str(cfg), "--register", "--register-wait", "5"],
+               post, reader_yielding(), scanner_sysfs,
+               sleep=fake_sleep, clock=lambda: now[0])
+    assert code == 1
+    assert len(post.calls) == 4       # t=0, 2, 4 and the final attempt at t=5
+    assert sleeps == [2.0, 2.0, 1.0]
+    assert not cfg.exists()
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_register_wait_rejects_invalid_budgets_before_any_post(
+        tmp_path, scanner_sysfs, value):
+    cfg = tmp_path / "scanner.json"
+    post = PostScript([])
+    with pytest.raises(SystemExit) as exc:
+        run(["--config", str(cfg), "--register", "--register-wait", value],
+            post, reader_yielding(), scanner_sysfs)
+    assert exc.value.code == 2
+    assert post.calls == []
+    assert not cfg.exists()
+
+
+def test_stopped_during_register_wait_exits_clean(tmp_path, scanner_sysfs):
+    """SIGTERM while waiting out the retry budget: a clean exit 0, no
+    traceback, and no half-written state."""
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+    post = PostScript([PostError(0, "refused")])
+
+    def stop_sleep(seconds):
+        raise _Stopped()
+
+    code = run(["--config", str(cfg), "--register", "--register-wait", "10",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_yielding(), scanner_sysfs, sleep=stop_sleep)
+    assert code == 0
+    assert not cfg.exists()
+    assert not offer.exists()
+
+
+def test_register_only_registers_without_grabbing(tmp_path, scanner_sysfs):
+    """--register-only: config + offer written, the grab path never runs;
+    a second run with the saved config registers nothing and leaves the
+    (possibly consumed) offer alone."""
+    cfg = tmp_path / "scanner.json"
+    offer = tmp_path / "scanner-pairing.json"
+
+    def reader_must_not_run(fd, on_unmapped=None):
+        raise AssertionError("the grab path must not run under --register-only")
+
+    post = PostScript([{"pairing_code": PAIRING_CODE}])
+    code = run(["--config", str(cfg), "--register", "--register-only",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post, reader_must_not_run, scanner_sysfs)
+    assert code == 0
+    assert len(post.calls) == 1
+    assert stat.S_IMODE(offer.stat().st_mode) == 0o600
+    saved = json.loads(offer.read_text())
+    assert saved == {"terminal_id": "counter-1", "pairing_code": PAIRING_CODE}
+
+    # Second run: the config exists, so no re-registration, offer untouched.
+    post2 = PostScript([])
+    code = run(["--config", str(cfg), "--register-only",
+                "--terminal-id", "counter-1", "--pairing-file", str(offer)],
+               post2, reader_must_not_run, scanner_sysfs)
+    assert code == 0
+    assert post2.calls == []
+    assert json.loads(offer.read_text()) == saved
 
 
 def test_re_register_overwrites_a_stale_pairing_file(tmp_path, scanner_sysfs):

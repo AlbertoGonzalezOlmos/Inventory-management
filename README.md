@@ -138,6 +138,8 @@ English stays the fallback for a row whose Danish translation is missing.
 | `HCRM_SCANNER_REGISTER_ANY` | unset | `1` opens terminal registration (`POST /api/scanner/terminals`) to LAN clients — loopback-only by default |
 | `HCRM_SCANNER_PAIR_ANY` | unset | `1` opens one-click pairing (`POST /api/scanner/pair/auto`) to non-loopback callers — loopback-only by default, and **independent** of `HCRM_SCANNER_REGISTER_ANY` (the two flags answer different questions) |
 | `HCRM_SCANNER_PAIRING_FILE` | `<repo>/data/scanner-pairing.json` | the one-click pairing offer file the daemon writes on `--register` and the server reads + consumes on the first successful pair (0600; the daemon and the server must resolve the SAME path — set this on both sides if you override it) |
+| `HCRM_SCANNER_DAEMON` | `1` | `0` (or `false`/`no`/`off`) stops `run.sh` from starting the scanner daemon — the app then boots without it (the round-3 wedge capture stays the scan path) |
+| `HCRM_SCANNER_REGISTER_WAIT` | `300` | seconds `run.sh`'s daemon retries a transiently failing registration (`0` = one attempt) — rides out the server's own boot window |
 | `HCRM_BROWSER` | auto | browser binary for `scripts/ui_check.py` (it probes each candidate and refuses to run with one that cannot log console messages) |
 
 ## Vector search with sqlite-vector
@@ -284,25 +286,41 @@ import; `app/seed.py::backfill_embeddings()` repairs any NULL embedding at boot.
   daemon *as data* and to nothing else, decodes them (reusing the tested
   HID assembler) and forwards each scan to the server-side terminal queue;
   the SPA polls that queue (see *Kiosk scan feed* in the API summary).
-  **Install, once per kiosk**:
+  **Startup is automatic**: `scripts/run.sh` starts the daemon beside the
+  server (skipped for `HCRM_SCRATCH` runs and with
+  `HCRM_SCANNER_DAEMON=0`, and skipped with a warning when `HCRM_HOST` is
+  one specific non-loopback address — the daemon always talks to a
+  loopback URL, `127.0.0.1` or `[::1]` for IPv6-only binds, so use
+  `HCRM_HOST=127.0.0.1` or `0.0.0.0` if you want it started), keeps its
+  config + spool + offer in the data dir, and gives registration a
+  `--register-wait` budget
+  (`HCRM_SCANNER_REGISTER_WAIT`, default 300 s) so a slow server boot
+  cannot fail it. On the **first** start the daemon registers the terminal
+  and writes the **single-use pairing offer file** (0600,
+  `<data>/scanner-pairing.json`); in the kiosk browser, click the
+  **"no scanner"** pill in the header once — the server reads the offer
+  file, pairs, and consumes it. The pairing code is not printed (it must
+  never touch a journal); `--print-code` opts in for the manual fallback
+  (`curl -X POST /api/scanner/pair -H 'Content-Type: application/json'
+  -d '{"terminal_id": …, "code": …}'`) — e.g. a kiosk whose browser is
+  not on the server host. Under run.sh both processes are the operator's
+  own user, so the 0600 offer file is always server-readable.
+  **Manual / repair / always-on**:
   1. `sudo cp scripts/udev/99-opticon-scanner.rules /etc/udev/rules.d/` +
-     re-plug the scanner (the event node is `root:input 0660` otherwise);
-  2. register the terminal and pair the browser — **one click, no code
-     to type**: `uv run python scripts/scanner_daemon.py --config
-     /etc/hcrm/scanner.json --register` writes a **single-use pairing
-     offer file** (0600, `<repo>/data/scanner-pairing.json` by default);
-     in the kiosk browser, click the **"no scanner"** pill in the header
-     once — the server reads the offer file, pairs, and consumes it. The
-     pairing code is not printed (it must never touch a journal);
-     `--print-code` opts in for the manual fallback
-     (`curl -X POST /api/scanner/pair -H 'Content-Type: application/json'
-     -d '{"terminal_id": …, "code": …}'`) — e.g. a kiosk whose browser is
-     not on the server host. **Same-user caveat**: the daemon must write
-     the offer file as a user the server can read (under systemd, set
-     `User=` in the unit — a root-written 0600 file is unreadable and
-     /pair/auto answers 500 naming the fix);
+     re-plug the scanner (the event node is `root:input 0660` otherwise;
+     a daemon without permission logs the fix and the app still boots);
+  2. register without grabbing — the manual/repair step (on a fresh host
+     with no config, `--register-only` alone is enough). For the lost-browser-token
+     recovery, `DELETE /api/scanner/terminals/<id>` from a staff session or
+     loopback, then explicitly re-register the existing identity:
+     `uv run python scripts/scanner_daemon.py --config
+     <data>/scanner.json --register --register-only`;
   3. `sudo cp scripts/systemd/scanner-daemon.service /etc/systemd/system/ &&
-     sudo systemctl enable --now scanner-daemon`.
+     sudo systemctl enable --now scanner-daemon` — the always-on kiosk
+     option (`Restart=always`; set `User=` so the offer file stays
+     server-readable — a root-written 0600 file makes /pair/auto answer
+     500 naming the fix; `DaemonLock` keeps a second daemon loud, not
+     fatal).
   The daemon exits (even `kill -9`) → the kernel instantly releases the
   grab → the scanner reverts to the round-3 browser capture (no operator
   action — the status pill shows which path is live). A server outage

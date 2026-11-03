@@ -254,7 +254,12 @@ binary protocol at the wrong parity and calling it barcodes (`--any-port` is the
 explicit, warned opt-in).
 
 ```bash
-./scripts/run.sh &                       # 1. start HCRM
+./scripts/run.sh &                       # 1. start HCRM (uvicorn + the
+                                         #    scanner daemon). Stop it with
+                                         #    kill -TERM — a backgrounded
+                                         #    run.sh inherits POSIX
+                                         #    SIGINT-ignore (foreground
+                                         #    Ctrl-C is covered)
 
 uv run python scripts/scanner_bridge.py \  # 2. listen & look up
     --email staff@shop.local --password 'secret'

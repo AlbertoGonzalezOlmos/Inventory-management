@@ -52,6 +52,15 @@
 # both can reach. Adjust WorkingDirectory to the checkout/deployment
 # being run.
 
+# NOTE (run.sh): scripts/run.sh now starts the daemon itself — same user as
+# the server, config/spool/offer in the data dir, a --register-wait budget
+# that rides out the server's boot. This unit remains the ALWAYS-ON kiosk
+# option (Restart=always survives crashes too); DaemonLock makes a double
+# start loud, not fatal, so enabling both is visible immediately.
+# --register-only is the no-grab registration step (enough when config is
+# absent); after a DELETE, --register --register-only explicitly re-registers
+# an existing identity and writes a fresh offer.
+
 [Unit]
 Description=HCRM scanner grab daemon (Opticon M-10, USB-HID keyboard mode 065a:a001)
 Documentation=file:/opt/hcrm/docs/opticon-hardware.md
