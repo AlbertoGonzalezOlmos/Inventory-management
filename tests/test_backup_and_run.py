@@ -467,8 +467,18 @@ def test_run_sh_scratch_on_announces_and_skips_the_daemon():
         proc, calls = _run_sh_with_shim(
             td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "scratch:   on" in proc.stdout, proc.stdout
-        assert "(scratch" in proc.stdout, proc.stdout
+        # The unmissable 3-line banner: what is served, what is NOT used,
+        # and how to run the shop — an operator with a stale HCRM_SCRATCH=1
+        # once read the old two-liner as "the catalogue is broken".
+        assert "scratch:   ON — throwaway database" in proc.stdout, proc.stdout
+        assert "(seeded with the 12 demo items)" in proc.stdout, proc.stdout
+        assert "are NOT used" in proc.stdout, proc.stdout
+        assert "set HCRM_SCRATCH=0 to run the shop" in proc.stdout, proc.stdout
+        # The banner is honest about where the shop's data actually is when
+        # this checkout has one (CI has no data/ — the line is conditional).
+        if os.path.exists(os.path.join(REPO_ROOT, "data", "hcrm.db")):
+            assert "live database found:" in proc.stdout, proc.stdout
+            assert "HCRM_SCRATCH=0 uses it" in proc.stdout, proc.stdout
         assert not any("scanner_daemon.py" in c for c in calls), calls
 
 

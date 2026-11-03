@@ -145,7 +145,7 @@ English stays the fallback for a row whose Danish translation is missing.
 | `HCRM_EMBED_RETRY_SECONDS` | `60` | after a model load failure, retry at most this often (a transient network blip must not disable semantic search until restart) |
 | `HCRM_DEV_ADMIN` | `1` (**this round**) | seed/ensure the well-known dev admin `admin`/`admin`. `0` restores the secure default (`admin@shop.local`/`changeme`, blocked until changed) |
 | `HCRM_ALLOW_INSECURE_BIND` | unset | let `scripts/run.sh` bind a non-loopback `HCRM_HOST` while `HCRM_DEV_ADMIN` is on (trusted networks only) |
-| `HCRM_SCRATCH` | unset | `1` (or `true`/`yes`/`on`) makes `run.sh` boot on a throwaway database instead of `./data`; `0`/`false`/`no`/`off` keep the live one; anything else refuses to boot (strictly parsed — the banner says `scratch: on/off`) |
+| `HCRM_SCRATCH` | unset | `1` (or `true`/`yes`/`on`) is for **experiments only**: it boots a throwaway database seeded with the 12 demo items — not the shop catalogue — and skips the scanner daemon (the boot prints a 3-line banner saying so); `0`/`false`/`no`/`off` keep the live `./data`; anything else refuses to boot (strictly parsed) |
 | `HCRM_CATALOGUE_IMPORT` | `1` | `0` (or `false`/`no`/`off`) disables the create-only supplier-catalogue seed at boot (the demo items become the fresh-database fallback) |
 | `HCRM_CATALOGUE_CSV` | unset | an explicit supplier CSV for the boot seed — honoured verbatim, with **no fallback** if unreadable (unset = the data-dir CSV, if the operator provisioned one) |
 | `HCRM_LOGOFF_GRACE_SECONDS` | `60` | the kiosk logoff countdown (own-badge scan → “log off?”): the server-enforced deadline on the session token; clamped ≥ 1, read at import time |

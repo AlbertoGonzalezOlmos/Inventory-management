@@ -79,13 +79,25 @@ export HCRM_DATA_DIR
 if [ -n "$DEV_ADMIN" ]; then DEV_ADMIN_LABEL="ON (admin/admin)"; else DEV_ADMIN_LABEL="off"; fi
 echo "database:  ${DATABASE_URL:-sqlite:///$RESOLVED_DATA_DIR/hcrm.db}"
 echo "bind:      http://$HOST:$PORT   dev admin: $DEV_ADMIN_LABEL"
-if [ "$SCRATCH" = 1 ]; then echo "scratch:   on"; else echo "scratch:   off"; fi
 if [ "$SCRATCH" = 1 ]; then
-    echo "           (scratch — seeded fresh, safe to delete: $RESOLVED_DATA_DIR)"
-elif [ ! -e "$RESOLVED_DATA_DIR/hcrm.db" ]; then
-    echo "           (no database yet — first boot will create, migrate and seed it)"
+    # Unmissable by design: an operator with a stale HCRM_SCRATCH=1 once read
+    # the old two-line banner as "the shop catalogue is broken". Three lines
+    # that say WHAT is served, WHAT is not used, and HOW to run the shop.
+    echo "scratch:   ON — throwaway database (seeded with the 12 demo items)"
+    echo "           the catalogue and scanner state in $PWD/data are NOT used"
+    echo "           set HCRM_SCRATCH=0 to run the shop (this DB: $RESOLVED_DATA_DIR)"
+    if [ -e "$PWD/data/hcrm.db" ]; then
+        echo "           live database found: $PWD/data/hcrm.db — HCRM_SCRATCH=0 uses it"
+    fi
 else
-    echo "           LIVE DATA — back it up first with scripts/backup_db.sh"
+    echo "scratch:   off"
+fi
+if [ "$SCRATCH" != 1 ]; then
+    if [ ! -e "$RESOLVED_DATA_DIR/hcrm.db" ]; then
+        echo "           (no database yet — first boot will create, migrate and seed it)"
+    else
+        echo "           LIVE DATA — back it up first with scripts/backup_db.sh"
+    fi
 fi
 
 # --- process composition: the M-10 daemon comes up with the app ----------

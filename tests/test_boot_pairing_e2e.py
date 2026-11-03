@@ -49,6 +49,10 @@ def _run_daemon(server):
     the parity the one-click flow depends on), loopback forward, retry
     budget, and --register-only so no device is ever touched."""
     env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+    # The daemon lock lives in $XDG_RUNTIME_DIR (default /run/user/<uid>), which
+    # is shared with a real kiosk daemon: point it at the throwaway server dir
+    # so this test also passes on the machine that runs the shop (it failed
+    # with "another scanner_daemon instance is already running" otherwise).
     return subprocess.run(
         [sys.executable, "scripts/scanner_daemon.py",
          "--config", os.path.join(server.data_dir, "scanner.json"),
@@ -56,7 +60,8 @@ def _run_daemon(server):
          "--register-wait", "30",
          "--register-only"],
         capture_output=True, text=True, timeout=90, cwd=REPO_ROOT,
-        env={**env, "HCRM_DATA_DIR": server.data_dir},
+        env={**env, "HCRM_DATA_DIR": server.data_dir,
+             "XDG_RUNTIME_DIR": server.data_dir},
     )
 
 
