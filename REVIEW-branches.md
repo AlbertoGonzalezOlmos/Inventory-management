@@ -519,11 +519,13 @@ existed: `item1-kimi-k3` (`e07f4db`), the crawler variant PR #39 did not adopt.
 - Deleted all 10 local topic branches: 7 ancestry-merged (`feat/biogan-catalogue-item1/2/3`,
   `fix/boot-scanner-processes`, `item1-glm53/mimo26-pro/qwen38-max`), 3 after the
   checks above (`item1-deepseek-flash`, `item1-kimi-k3`, `fix/catalogue-boot-seed` —
-  squash-merged in PR #53, tree identical to `main`).
+  squash-merged in PR #53; its tip's tree is identical to the merged `main` commit,
+  verified as `git diff df8c95f 0abd95c` empty before the deletion).
 - Deleted all 32 merged origin branches in one batched `git push origin --delete`,
   then `git fetch --prune`.
 
-**Post-state (verified)**
+**Post-state (verified at sweep time — this section's own record branch and PR
+post-date it, and local `main` carried the record commit until #54 merged)**
 
 - `git branch -a` → `main` + `origin/main` only; `git ls-remote --heads origin` →
   `main` only; `git worktree list` → the primary checkout only; `git status` clean;
