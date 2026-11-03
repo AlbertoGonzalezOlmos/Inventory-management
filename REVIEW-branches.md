@@ -490,3 +490,46 @@ after the merge and what remains.
 - **`stock-count` companion endpoint** — the counted-quantity variant of
   `stock-adjust`; the bridge only needs relative deltas today, so this stays
   future work (docs/scanner-opn2001.md §6).
+
+
+## 13. Round-8 audit (2026-11-03) — every branch re-checked, all merged leftovers deleted
+
+Method: `git ls-remote --heads origin` (server truth, not stale local refs), per-ref
+`git rev-list --count <ref> ^origin/main`, `git merge-base --is-ancestor`,
+`git cherry main <ref>` (patch equivalence), `git diff <ref> main` (content
+equivalence), `gh pr list --state all --head <ref>` (the review record), and
+`git worktree list`. Four agents re-ran the audit independently before anything was
+deleted; all agreed no ref held unlanded work (the only corrections were to the
+prescribed commands: two tips are patch/tree-equivalent but not ancestors, so they
+need `-D`, and the non-main origin count was 32, not 31).
+
+**Measured state before the sweep:** 33 origin heads (`main` + 32 topic branches, every
+one with a MERGED PR), 11 local branches, 5 prunable `item1-*` worktrees, 0 open PRs,
+53 merged PRs (#1–#53). Only one unique unmerged commit
+existed: `item1-kimi-k3` (`e07f4db`), the crawler variant PR #39 did not adopt.
+
+**Executed**
+
+- `git worktree prune` — the five `/tmp/herdr-crew/biogan-catalogue/wt-*` entries were
+  prunable (directories already gone); no work lived in them.
+- Tagged the one deliberately abandoned draft: `archive/item1-kimi-k3-e07f4db`
+  (local, matching the `archive/m10*` convention). `item1-deepseek-flash` (`6644e2b`)
+  needed no tag: `git cherry` marks it patch-equivalent and its tree is identical to
+  the merged `45a3d3a`.
+- Deleted all 10 local topic branches: 7 ancestry-merged (`feat/biogan-catalogue-item1/2/3`,
+  `fix/boot-scanner-processes`, `item1-glm53/mimo26-pro/qwen38-max`), 3 after the
+  checks above (`item1-deepseek-flash`, `item1-kimi-k3`, `fix/catalogue-boot-seed` —
+  squash-merged in PR #53, tree identical to `main`).
+- Deleted all 32 merged origin branches in one batched `git push origin --delete`,
+  then `git fetch --prune`.
+
+**Post-state (verified)**
+
+- `git branch -a` → `main` + `origin/main` only; `git ls-remote --heads origin` →
+  `main` only; `git worktree list` → the primary checkout only; `git status` clean;
+  `gh pr list --state open` empty.
+- Tags: `archive/m10-4755422`, `archive/m10-qr-eeeeb4e`, `archive/opn2001-b2ed226`
+  (deliberate, §6 — and note §12's "no tags" line was wrong: they were never pushed,
+  only never deleted locally) plus the new `archive/item1-kimi-k3-e07f4db`.
+- `git fsck --dangling` residue ages out with `gc`; nothing was reachable only from a
+  deleted branch except the kimi tip, which the tag keeps.
