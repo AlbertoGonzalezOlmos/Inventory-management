@@ -81,14 +81,12 @@ echo "database:  ${DATABASE_URL:-sqlite:///$RESOLVED_DATA_DIR/hcrm.db}"
 echo "bind:      http://$HOST:$PORT   dev admin: $DEV_ADMIN_LABEL"
 if [ "$SCRATCH" = 1 ]; then
     # Unmissable by design: an operator with a stale HCRM_SCRATCH=1 once read
-    # the old two-line banner as "the shop catalogue is broken". These three
-    # lines are TRUE under every override on purpose: they name this boot's
-    # data dir (never the shop's) and how to run the shop, leaving
-    # DATABASE_URL / HCRM_CATALOGUE_* to the lines that already report them
-    # ("database: …" above, and the app's "Catalogue: …" boot line).
-    echo "scratch:   ON — experiments only, NOT the shop"
+    # the old two-line banner as "the shop catalogue is broken". Only say what
+    # is unconditionally true — no claim about ./data (HCRM_DATA_DIR may point
+    # elsewhere) and none about "the shop" (DATABASE_URL may select it); the
+    # "database:" line above reports the database actually opened.
+    echo "scratch:   ON — experiments (HCRM_SCRATCH=1); unset it to run the shop"
     echo "           this boot's data dir: $RESOLVED_DATA_DIR"
-    echo "           run the shop with HCRM_SCRATCH=0 (its data dir: $PWD/data)"
 else
     echo "scratch:   off"
 fi

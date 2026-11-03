@@ -469,12 +469,15 @@ def test_run_sh_scratch_on_announces_and_skips_the_daemon():
         proc, calls = _run_sh_with_shim(
             td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        # The unmissable banner: experiments-only, this boot's data dir (never
-        # the shop's), and how to run the shop — an operator with a stale
-        # HCRM_SCRATCH=1 once read the old two-liner as "the catalogue is broken".
-        assert "scratch:   ON — experiments only, NOT the shop" in proc.stdout, proc.stdout
-        assert "this boot's data dir: /tmp/hcrm-scratch-" in proc.stdout, proc.stdout
-        assert "run the shop with HCRM_SCRATCH=0" in proc.stdout, proc.stdout
+        # The unmissable banner says only what is unconditionally true: you
+        # are in scratch mode, and this boot's data dir (TMPDIR-derived).
+        assert "scratch:   ON — experiments (HCRM_SCRATCH=1); unset it to run the shop" in proc.stdout, proc.stdout
+        assert "this boot's data dir: " in proc.stdout, proc.stdout
+        scratch_dir = [l.split("data dir: ", 1)[1].strip()
+                       for l in proc.stdout.splitlines()
+                       if "this boot's data dir: " in l][0]
+        assert os.path.isdir(scratch_dir), scratch_dir
+        assert scratch_dir.startswith(tempfile.gettempdir()), scratch_dir
         assert not any("scanner_daemon.py" in c for c in calls), calls
 
 
@@ -488,9 +491,8 @@ def test_run_sh_scratch_banner_stays_true_under_the_surviving_overrides():
             DATABASE_URL="sqlite:////tmp/elsewhere.db",
             HCRM_CATALOGUE_CSV="/tmp/supplier.csv")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "scratch:   ON — experiments only, NOT the shop" in proc.stdout
-        assert "this boot's data dir: /tmp/hcrm-scratch-" in proc.stdout
-        assert "run the shop with HCRM_SCRATCH=0" in proc.stdout
+        assert "scratch:   ON — experiments (HCRM_SCRATCH=1); unset it to run the shop" in proc.stdout
+        assert "this boot's data dir: " in proc.stdout
         # the overrides are reported by their own lines, not by the banner
         assert "database:  sqlite:////tmp/elsewhere.db" in proc.stdout, proc.stdout
 
