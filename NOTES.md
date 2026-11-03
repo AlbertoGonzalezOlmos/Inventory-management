@@ -187,7 +187,7 @@ search, a vendored Vue 3 SPA (no Node build step) served by FastAPI.
 | `HCRM_EMBED_STRICT` | unset | `1` → abort boot on model problems instead of degrading |
 | `HCRM_EMBED_RETRY_SECONDS` | `60` | Cooldown before retrying a failed model load |
 | `HCRM_HOST` / `HCRM_PORT` | `127.0.0.1` / `8000` | Used by `scripts/run.sh` |
-| `HCRM_SCRATCH` | unset | Strictly parsed by `run.sh`: `1/true/yes/on` → throwaway database, `0/false/no/off` → live, anything else refuses the boot |
+| `HCRM_SCRATCH` | unset | Strictly parsed by `run.sh`: `1/true/yes/on` → experiments only — a throwaway `HCRM_DATA_DIR` and no scanner daemon, with a loud 2-line banner (experiments/unset-it notice + the data dir); `DATABASE_URL`/`HCRM_CATALOGUE_*` keep their usual effect and are reported separately; `0/false/no/off` → live; anything else refuses the boot |
 | `HCRM_CATALOGUE_IMPORT` / `HCRM_CATALOGUE_CSV` | `1` / unset | The create-only supplier-catalogue boot seed: `0` disables; an explicit CSV is honoured verbatim (no fallback; unset = the data-dir CSV when provisioned) |
 | `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` |
 | `HCRM_PBKDF2_ITERATIONS` | `600000` | Password hashing cost (tests set 1000) |

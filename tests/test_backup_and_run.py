@@ -202,6 +202,8 @@ def _call_index(calls, needle):
 # any of these exported must still see every test pass (the tests set the
 # defaults they intend explicitly).
 _STRIP_ENV = ("HCRM_DATA_DIR", "DATABASE_URL", "HCRM_SCRATCH",
+              "HCRM_CATALOGUE_CSV", "HCRM_CATALOGUE_IMPORT",
+              "HCRM_CATALOGUE_IMAGES_DIR",
               "HCRM_SCANNER_DAEMON", "HCRM_SCANNER_PAIRING_FILE",
               "HCRM_SCANNER_REGISTER_WAIT", "HCRM_SCANNER_CONFIG",
               "HCRM_ALLOW_INSECURE_BIND")
@@ -467,9 +469,32 @@ def test_run_sh_scratch_on_announces_and_skips_the_daemon():
         proc, calls = _run_sh_with_shim(
             td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "scratch:   on" in proc.stdout, proc.stdout
-        assert "(scratch" in proc.stdout, proc.stdout
+        # The unmissable banner says only what is unconditionally true: you
+        # are in scratch mode, and this boot's data dir (TMPDIR-derived).
+        assert "scratch:   ON — experiments (HCRM_SCRATCH=1); unset it to run the shop" in proc.stdout, proc.stdout
+        assert "this boot's data dir: " in proc.stdout, proc.stdout
+        scratch_dir = [l.split("data dir: ", 1)[1].strip()
+                       for l in proc.stdout.splitlines()
+                       if "this boot's data dir: " in l][0]
+        assert os.path.isdir(scratch_dir), scratch_dir
+        assert scratch_dir.startswith(tempfile.gettempdir()), scratch_dir
         assert not any("scanner_daemon.py" in c for c in calls), calls
+
+
+def test_run_sh_scratch_banner_stays_true_under_the_surviving_overrides():
+    """DATABASE_URL and HCRM_CATALOGUE_CSV still apply in scratch mode; the
+    banner must stay true anyway (it names this boot's data dir and the shop
+    switch, and leaves the DB/CSV to the lines that already report them)."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-scratch-ovr-") as td:
+        proc, _ = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1",
+            DATABASE_URL="sqlite:////tmp/elsewhere.db",
+            HCRM_CATALOGUE_CSV="/tmp/supplier.csv")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "scratch:   ON — experiments (HCRM_SCRATCH=1); unset it to run the shop" in proc.stdout
+        assert "this boot's data dir: " in proc.stdout
+        # the overrides are reported by their own lines, not by the banner
+        assert "database:  sqlite:////tmp/elsewhere.db" in proc.stdout, proc.stdout
 
 
 def test_run_sh_scratch_unknown_value_refuses_to_boot():
