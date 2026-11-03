@@ -306,11 +306,12 @@ def test_run_sh_non_loopback_bind_skips_the_daemon_with_a_warning():
     with tempfile.TemporaryDirectory(prefix="hcrm-runsh-lan-") as td:
         proc, calls = _run_sh_with_shim(
             td, os.path.join(td, "calls.log"),
-            HCRM_DATA_DIR=os.path.join(td, "data"), HCRM_HOST="192.168.1.5")
+            HCRM_DATA_DIR=os.path.join(td, "data"), HCRM_HOST="192.168.1.5",
+            HCRM_DEV_ADMIN="0")  # a non-loopback bind + dev admin would refuse
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert not any("scanner_daemon.py" in c for c in calls), calls
         assert any("run uvicorn" in c for c in calls), calls
-        assert "not a loopback/wildcard bind" in proc.stdout, proc.stdout
+        assert "gives the daemon no 127.0.0.1/[::1] listener" in proc.stdout, proc.stdout
         assert "HCRM_HOST=192.168.1.5" in proc.stdout, proc.stdout
 
 

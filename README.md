@@ -292,8 +292,8 @@ import; `app/seed.py::backfill_embeddings()` repairs any NULL embedding at boot.
   one specific non-loopback address — the daemon always talks to a
   loopback URL, `127.0.0.1` or `[::1]` for IPv6-only binds, so use
   `HCRM_HOST=127.0.0.1` or `0.0.0.0` if you want it started), keeps its
-  config + spool + offer in the data
-  dir, and gives registration a `--register-wait` budget
+  config + spool + offer in the data dir, and gives registration a
+  `--register-wait` budget
   (`HCRM_SCANNER_REGISTER_WAIT`, default 300 s) so a slow server boot
   cannot fail it. On the **first** start the daemon registers the terminal
   and writes the **single-use pairing offer file** (0600,

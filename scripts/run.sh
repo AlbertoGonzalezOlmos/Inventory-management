@@ -130,7 +130,7 @@ else
         ::1|::) SCANNER_FORWARD="http://[::1]:$PORT" ;;
         127.0.0.1|localhost|0.0.0.0|"") SCANNER_FORWARD="http://127.0.0.1:$PORT" ;;
         *)
-            echo "scanner:   daemon skipped — HCRM_HOST=$HOST is not a loopback/wildcard bind (use HCRM_HOST=127.0.0.1 or 0.0.0.0)"
+            echo "scanner:   daemon skipped — HCRM_HOST=$HOST gives the daemon no 127.0.0.1/[::1] listener to forward to (use HCRM_HOST=127.0.0.1 or 0.0.0.0)"
             SCANNER_FORWARD="" ;;
     esac
     if [ -n "$SCANNER_FORWARD" ]; then

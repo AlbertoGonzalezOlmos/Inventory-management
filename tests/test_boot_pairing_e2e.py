@@ -60,7 +60,7 @@ def _run_daemon(server):
     )
 
 
-def test_register_only_pairs_the_kiosk_browser_end_to_end(tmp_path, monkeypatch):
+def test_register_only_pairs_the_kiosk_browser_end_to_end(monkeypatch):
     # The self-hosted server inherits OUR env too — scrub the same vars so
     # both subprocesses resolve the default pairing path the way run.sh
     # would on a clean host.
