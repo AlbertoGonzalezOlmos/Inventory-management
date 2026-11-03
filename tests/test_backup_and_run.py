@@ -467,19 +467,29 @@ def test_run_sh_scratch_on_announces_and_skips_the_daemon():
         proc, calls = _run_sh_with_shim(
             td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        # The unmissable 3-line banner: what is served, what is NOT used,
-        # and how to run the shop — an operator with a stale HCRM_SCRATCH=1
-        # once read the old two-liner as "the catalogue is broken".
-        assert "scratch:   ON — throwaway database" in proc.stdout, proc.stdout
-        assert "(seeded with the 12 demo items)" in proc.stdout, proc.stdout
-        assert "are NOT used" in proc.stdout, proc.stdout
+        # The unmissable banner: what is served, what is NOT used, and how to
+        # run the shop — an operator with a stale HCRM_SCRATCH=1 once read the
+        # old two-liner as "the catalogue is broken".
+        assert "scratch:   ON — experiments: a throwaway data dir" in proc.stdout, proc.stdout
+        assert "the catalogue and scanner state in " in proc.stdout, proc.stdout
+        assert "/data are NOT used" in proc.stdout, proc.stdout
         assert "set HCRM_SCRATCH=0 to run the shop" in proc.stdout, proc.stdout
-        # The banner is honest about where the shop's data actually is when
-        # this checkout has one (CI has no data/ — the line is conditional).
-        if os.path.exists(os.path.join(REPO_ROOT, "data", "hcrm.db")):
-            assert "live database found:" in proc.stdout, proc.stdout
-            assert "HCRM_SCRATCH=0 uses it" in proc.stdout, proc.stdout
+        assert "note: DATABASE_URL is set" not in proc.stdout, proc.stdout
+        assert "note: HCRM_CATALOGUE_CSV is set" not in proc.stdout, proc.stdout
         assert not any("scanner_daemon.py" in c for c in calls), calls
+
+
+def test_run_sh_scratch_banner_names_the_surviving_overrides():
+    """Scratch is not a lie: DATABASE_URL and HCRM_CATALOGUE_CSV still apply."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-scratch-ovr-") as td:
+        proc, _ = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1",
+            DATABASE_URL="sqlite:////tmp/elsewhere.db",
+            HCRM_CATALOGUE_CSV="/tmp/supplier.csv")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "note: DATABASE_URL is set" in proc.stdout, proc.stdout
+        assert "(DB: sqlite:////tmp/elsewhere.db)" in proc.stdout, proc.stdout
+        assert "note: HCRM_CATALOGUE_CSV is set" in proc.stdout, proc.stdout
 
 
 def test_run_sh_scratch_unknown_value_refuses_to_boot():

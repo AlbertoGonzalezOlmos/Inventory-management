@@ -81,13 +81,19 @@ echo "database:  ${DATABASE_URL:-sqlite:///$RESOLVED_DATA_DIR/hcrm.db}"
 echo "bind:      http://$HOST:$PORT   dev admin: $DEV_ADMIN_LABEL"
 if [ "$SCRATCH" = 1 ]; then
     # Unmissable by design: an operator with a stale HCRM_SCRATCH=1 once read
-    # the old two-line banner as "the shop catalogue is broken". Three lines
-    # that say WHAT is served, WHAT is not used, and HOW to run the shop.
-    echo "scratch:   ON — throwaway database (seeded with the 12 demo items)"
+    # the old two-line banner as "the shop catalogue is broken". These lines
+    # say what is served, what is NOT used, and how to run the shop. They must
+    # stay TRUE under the env overrides that survive scratch mode:
+    #   DATABASE_URL      — the app opens that database, not the scratch file;
+    #   HCRM_CATALOGUE_CSV — the boot seed still imports that supplier CSV.
+    echo "scratch:   ON — experiments: a throwaway data dir, not the shop's"
     echo "           the catalogue and scanner state in $PWD/data are NOT used"
-    echo "           set HCRM_SCRATCH=0 to run the shop (this DB: $RESOLVED_DATA_DIR)"
-    if [ -e "$PWD/data/hcrm.db" ]; then
-        echo "           live database found: $PWD/data/hcrm.db — HCRM_SCRATCH=0 uses it"
+    echo "           set HCRM_SCRATCH=0 to run the shop (DB: ${DATABASE_URL:-sqlite:///$RESOLVED_DATA_DIR/hcrm.db})"
+    if [ -n "${DATABASE_URL:-}" ]; then
+        echo "           note: DATABASE_URL is set — that database is used, not the scratch file"
+    fi
+    if [ -n "${HCRM_CATALOGUE_CSV:-}" ]; then
+        echo "           note: HCRM_CATALOGUE_CSV is set — the boot seed still imports it"
     fi
 else
     echo "scratch:   off"
