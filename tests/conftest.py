@@ -28,6 +28,12 @@ os.environ.setdefault("HCRM_PBKDF2_ITERATIONS", "1000")  # cheap hashing for tes
 # exercising the secure default. tests/test_dev_admin.py covers the mode itself
 # in a subprocess, because the flag is read at import time.
 os.environ.setdefault("HCRM_DEV_ADMIN", "0")
+# The supplier-catalogue boot seed is OFF for the whole suite: tests seed
+# their own data, and an ambient supplier CSV would otherwise replace the
+# canonical
+# 12-demo fixture in every lifespan boot (and every subprocess that inherits
+# this env). Read at call time, so tests re-enable it with monkeypatch.setenv.
+os.environ["HCRM_CATALOGUE_IMPORT"] = "0"
 
 import pytest
 

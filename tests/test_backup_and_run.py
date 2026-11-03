@@ -440,3 +440,46 @@ def test_backup_succeeds_without_a_badge_key():
         assert proc.returncode == 0, proc.stderr
         assert not os.path.exists(os.path.join(dest, "badge.key"))
         assert "credential-bearing" not in proc.stderr
+
+
+# --- HCRM_SCRATCH: strictly parsed (1/0/true/false/yes/no/on/off) --------------
+
+
+def test_run_sh_scratch_off_values_use_the_live_dir_and_start_the_daemon():
+    for value in ("0", "false", ""):
+        with tempfile.TemporaryDirectory(prefix="hcrm-runsh-scratchoff-") as td:
+            data = os.path.join(td, "data")
+            proc, calls = _run_sh_with_shim(
+                td, os.path.join(td, "calls.log"),
+                HCRM_DATA_DIR=data, HCRM_SCRATCH=value)
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            assert "scratch:   off" in proc.stdout, proc.stdout
+            assert "(scratch" not in proc.stdout, proc.stdout
+            # not a scratch run: the SAME resolved data dir reaches uvicorn
+            # and the scanner daemon starts (item 1 keys off $SCRATCH).
+            server_call = calls[_call_index(calls, "run uvicorn")]
+            assert server_call.startswith(f"DATA_DIR={data} "), server_call
+            assert any("scanner_daemon.py" in c for c in calls), calls
+
+
+def test_run_sh_scratch_on_announces_and_skips_the_daemon():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-scratchon-") as td:
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "scratch:   on" in proc.stdout, proc.stdout
+        assert "(scratch" in proc.stdout, proc.stdout
+        assert not any("scanner_daemon.py" in c for c in calls), calls
+
+
+def test_run_sh_scratch_unknown_value_refuses_to_boot():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-scratchbad-") as td:
+        log = os.path.join(td, "calls.log")
+        proc, calls = _run_sh_with_shim(
+            td, log, HCRM_DATA_DIR=os.path.join(td, "data"),
+            HCRM_SCRATCH="maybe")
+        assert proc.returncode == 1, (proc.returncode, proc.stdout,
+                                      proc.stderr)
+        assert "refusing to boot" in proc.stderr
+        assert "HCRM_SCRATCH=maybe" in proc.stderr
+        assert calls == [], calls  # nothing is spawned on a refused boot

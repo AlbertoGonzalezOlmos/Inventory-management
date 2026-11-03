@@ -162,8 +162,11 @@ search, a vendored Vue 3 SPA (no Node build step) served by FastAPI.
   by its INT trap).
 
 - First boot seeds: default admin `admin@shop.local` / `changeme`
-  (**flagged `must_change_password` → blocked from the API until changed**) and
-  12 example items (`EX-001`…`EX-012`) with embeddings.
+  (**flagged `must_change_password` → blocked from the API until changed**),
+  the Biogan supplier catalogue (create-only, from the data-dir CSV or
+  `HCRM_CATALOGUE_CSV` — not committed; a fresh clone provisions the CSV
+  once; `HCRM_CATALOGUE_IMPORT=0` opts out) and — only when no catalogue
+  was imported — 12 example items (`EX-001`…`EX-012`) with embeddings.
 - DB lives in `data/hcrm.db` (gitignored; the directory is created on demand).
 - **Golden rule from the team's process: never run experiments against `./data`.**
   Always use a scratch dir:
@@ -184,6 +187,8 @@ search, a vendored Vue 3 SPA (no Node build step) served by FastAPI.
 | `HCRM_EMBED_STRICT` | unset | `1` → abort boot on model problems instead of degrading |
 | `HCRM_EMBED_RETRY_SECONDS` | `60` | Cooldown before retrying a failed model load |
 | `HCRM_HOST` / `HCRM_PORT` | `127.0.0.1` / `8000` | Used by `scripts/run.sh` |
+| `HCRM_SCRATCH` | unset | Strictly parsed by `run.sh`: `1/true/yes/on` → throwaway database, `0/false/no/off` → live, anything else refuses the boot |
+| `HCRM_CATALOGUE_IMPORT` / `HCRM_CATALOGUE_CSV` | `1` / unset | The create-only supplier-catalogue boot seed: `0` disables; an explicit CSV is honoured verbatim (no fallback; unset = the data-dir CSV when provisioned) |
 | `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` |
 | `HCRM_PBKDF2_ITERATIONS` | `600000` | Password hashing cost (tests set 1000) |
 | `HCRM_BASE`, `HCRM_ADMIN_EMAIL`, `HCRM_ADMIN_PASSWORD` | — | Used by `scripts/smoke_test.py` |

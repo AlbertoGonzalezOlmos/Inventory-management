@@ -26,6 +26,7 @@ import stat
 import sys
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 # Bootstrap for "python scripts/import_biogan.py …" — the real-run entrypoint
 # (and what the --db guard tells an in-process caller to use). Without the
@@ -297,7 +298,8 @@ def _base_result(row: bio.Row, image_url: str, source: str, barcode: str | None,
 
 
 def _plan_row(session: Session, row: bio.Row, args, images_dir: Path,
-              crawl: dict) -> tuple[dict, Item | None, dict, bytes | None]:
+              crawl: dict, *, create_without_embedding: bool = False) \
+        -> tuple[dict, Item | None, dict, bytes | None]:
     image_url, source, notes = choose_image_url(row, images_dir)
     provenance = crawl.get(row.sku, {})
     if row.is_blank or not row.sku.strip() or not row.name.strip():
@@ -337,9 +339,15 @@ def _plan_row(session: Session, row: bio.Row, args, images_dir: Path,
         text = embeddings.item_embedding_text(row.name, "")
         blob = embeddings.embed_text_blob(text)
         if blob is None:
-            result["action"] = "deferred"
-            result["review"].append("embedding_unavailable")
-            return result, None, {}, None
+            if not create_without_embedding:
+                result["action"] = "deferred"
+                result["review"].append("embedding_unavailable")
+                return result, None, {}, None
+            # Boot-only policy: the row lands with embedding=NULL and the
+            # app's backfill_embeddings repairs it on this or a later boot
+            # (seed_example_items' policy, not the API's 503 — a boot must
+            # not depend on the model being up).
+            result["review"].append("embedding_backfill_pending")
         result["action"] = "created"
         create_values = {"sku": row.sku, **values, "description": "", "stock": args.stock}
         return result, item, create_values, blob
@@ -384,10 +392,12 @@ def _prune_demo(session: Session, dry_run: bool) -> list[str]:
 
 
 def import_masterdata(session: Session, md: bio.MasterData, args, *,
-                      images_dir: Path, crawl: dict, dry_run: bool) -> dict:
+                      images_dir: Path, crawl: dict, dry_run: bool,
+                      create_without_embedding: bool = False) -> dict:
     """Plan every row (including embeddings), then apply with one commit."""
     plans = [
-        _plan_row(session, row, args, images_dir, crawl)
+        _plan_row(session, row, args, images_dir, crawl,
+                  create_without_embedding=create_without_embedding)
         for row in md.rows
     ]
     pruned = _prune_demo(session, dry_run) if args.prune_demo else []
@@ -441,6 +451,36 @@ def import_masterdata(session: Session, md: bio.MasterData, args, *,
         "rows": rows,
     }
     return report
+
+
+def import_masterdata_file(session: Session, csv_path, *, images_dir=None,
+                           category: str = "Biogan", stock: int = 0,
+                           no_update: bool = True, prune_demo: bool = False,
+                           crawl: dict | None = None,
+                           create_without_embedding: bool = True) -> dict:
+    """Library seam for in-process callers (the app's first-boot seeding).
+
+    Defaults are the BOOT semantics: create-only, never prune, and rows land
+    with ``embedding=NULL`` when the model is unavailable (``backfill_embeddings``
+    repairs them). The CLI ``main()`` is deliberately NOT built on this seam —
+    its flags, reports and exit codes 0/1/2/3 are pinned by tests and stay
+    untouched. The seam owns no transaction or engine: the caller's session
+    is the unit of work, so a boot can never seed a database the app is not
+    bound to (``DATABASE_URL`` correctness by construction). Returns the same
+    report dict as the CLI path.
+    """
+    csv_path = Path(csv_path)
+    images = Path(images_dir) if images_dir is not None \
+        else bio.default_images_dir()
+    md = read_import_masterdata(csv_path)
+    args = SimpleNamespace(
+        csv_path=csv_path,
+        db_path=str(getattr(session.get_bind().url, "database", "") or ""),
+        category=category, stock=stock,
+        no_update=no_update, prune_demo=prune_demo)
+    return import_masterdata(session, md, args, images_dir=images,
+                             crawl=crawl or {}, dry_run=False,
+                             create_without_embedding=create_without_embedding)
 
 
 def prepare_database(engine, dry_run: bool) -> None:

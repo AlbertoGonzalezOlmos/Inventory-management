@@ -1,6 +1,8 @@
-"""Example data: seed demo items on first run and backfill missing embeddings."""
+"""Example data: seed the supplier catalogue and demo items, backfill embeddings."""
 
 import logging
+import os
+from pathlib import Path
 
 from sqlmodel import Session, select
 
@@ -181,3 +183,132 @@ def backfill_embeddings(session: Session) -> None:
     if updated:
         session.commit()
         logger.info("Backfilled embeddings for %d item(s).", updated)
+
+
+# --- the supplier catalogue (Biogan): create-only boot seeding ---------------
+
+#: The data-dir master CSV's name — MUST equal scripts/_biogan.py's
+#: default_csv_path().name (the media.py twin-rule pattern; a drift means
+#: the boot seed looks where the crawler never writes). Test-pinned.
+_DATA_DIR_CSV_NAME = "Biogan - masterdata - Sheet.csv"
+
+
+def _catalogue_import_enabled() -> bool:
+    """HCRM_CATALOGUE_IMPORT, the HCRM_DEV_ADMIN idiom: 0/false/no/off (case-
+    insensitive) disables; unset, empty or any other value keeps it on."""
+    return os.environ.get("HCRM_CATALOGUE_IMPORT", "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _catalogue_source() -> tuple[str, Path] | None:
+    """Resolve the supplier CSV: explicit env (no fallback) → the operator's
+    data-dir copy (what the kiosk uses). None when no source exists — the
+    supplier's master data is deliberately NOT committed to the repo
+    (orchestrator decision B): a fresh clone provisions the CSV once (crawl,
+    or copy the operator's file into the data dir / point
+    HCRM_CATALOGUE_CSV at it)."""
+    import app.database  # local: DATA_DIR is computed at import time
+
+    env_csv = os.environ.get("HCRM_CATALOGUE_CSV")
+    if env_csv:
+        # Explicit means explicit: a set-but-unreadable path is an operator
+        # error worth a loud line, never a silent fallback to another file.
+        return "supplier-csv", Path(env_csv)
+    data_dir_csv = Path(app.database.DATA_DIR) / _DATA_DIR_CSV_NAME
+    if data_dir_csv.is_file():
+        return "supplier-csv", data_dir_csv
+    return None
+
+
+def _catalogue_images_dir() -> Path:
+    """The media route's twin rule: $HCRM_CATALOGUE_IMAGES_DIR, else
+    <data_dir>/Catalogue-images. A missing dir is not an error (images
+    degrade to the placeholder)."""
+    import app.database
+
+    env = os.environ.get("HCRM_CATALOGUE_IMAGES_DIR")
+    if env:
+        return Path(env)
+    return Path(app.database.DATA_DIR) / "Catalogue-images"
+
+
+def seed_catalogue(session: Session) -> dict:
+    """Create-only supplier-catalogue seed, called from ``_startup`` before
+    ``seed_example_items`` (a successful import is what keeps a fresh boot
+    free of the 12 ``EX-*`` demo rows).
+
+    Never mutates existing rows (``no_update``), never prunes, and never
+    raises: any failure rolls the caller's session back, logs one loud
+    warning naming the manual fix, and lets the boot continue with the demo
+    seed. Rows land with ``embedding=None`` when the model is unavailable;
+    ``backfill_embeddings`` (which runs right after) repairs them.
+
+    Returns a status dict for :func:`final_catalogue_source` — the single
+    final ``Catalogue:`` line is logged by ``_startup`` once the demo seed
+    has run, on EVERY path; only the mid-seed diagnostics (no CSV (with
+    how to provision one), an unreadable explicit CSV, a failed import,
+    refused/bad rows, pending backfill) are logged here.
+    """
+    import app.database
+
+    if not _catalogue_import_enabled():
+        return {"source": "existing (import disabled)"}
+    source = _catalogue_source()
+    if source is None:
+        logger.warning(
+            "Catalogue: no supplier CSV — not seeding. Provision one: drop "
+            "'Biogan - masterdata - Sheet.csv' into the data dir (%s), or "
+            "point HCRM_CATALOGUE_CSV at a file",
+            app.database.DATA_DIR)
+        return {"source": "none"}
+    source_kind, csv_path = source
+    if not csv_path.is_file():
+        # Only reachable for the explicit env path (the other was is_file).
+        logger.error(
+            "catalogue: HCRM_CATALOGUE_CSV=%s is set but unreadable — not seeding",
+            csv_path)
+        return {"source": "none"}
+    try:
+        # Lazy import: scripts.import_biogan imports app.seed (EXAMPLE_ITEMS),
+        # so a top-level import here would be a cycle.
+        from scripts.import_biogan import import_masterdata_file
+        report = import_masterdata_file(
+            session, csv_path, images_dir=_catalogue_images_dir(),
+            no_update=True, prune_demo=False, create_without_embedding=True)
+    except Exception as exc:  # a broken catalogue must not take the kiosk down
+        session.rollback()
+        logger.warning(
+            "Catalogue: import of %s failed (%s) — rolled back; manual retry: "
+            "uv run python scripts/import_biogan.py --csv %s --db %s",
+            csv_path, exc, csv_path, app.database.DATABASE_URL)
+        return {"source": "failed (rolled back)"}
+    counts = report["counts"]
+    pending = sum(1 for row in report["rows"]
+                  if "embedding_backfill_pending" in row["review"])
+    if pending:
+        logger.warning("Catalogue: %d row(s) await embedding backfill "
+                       "(model unavailable at seed time)", pending)
+    if counts.get("refused") or counts.get("bad_row"):
+        logger.warning("Catalogue: %d refused / %d bad row(s) skipped — see the "
+                       "importer's --report for detail",
+                       counts.get("refused", 0), counts.get("bad_row", 0))
+    return {"source": "supplier-csv",
+            "created": counts.get("created", 0), "report": report}
+
+
+def final_catalogue_source(status: dict, items_before: int,
+                           items_after: int) -> str:
+    """The honest source label for ``_startup``'s single final line.
+
+    ``supplier-csv`` only when the import actually created rows; an import
+    that created nothing over a populated database is ``existing`` (the
+    live kiosk's every-boot case), and ``demo-seed`` when the demo fallback
+    filled a fresh database (with or without a CSV). ``none`` with nothing
+    seeded is ``existing`` — an empty catalogue is what exists.
+    """
+    source = status["source"]
+    if source in ("supplier-csv", "none"):
+        if status.get("created", 0) > 0:
+            return "supplier-csv"
+        return "demo-seed" if items_after > items_before else "existing"
+    return source  # existing (import disabled) / failed (rolled back)

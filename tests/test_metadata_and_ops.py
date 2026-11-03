@@ -222,7 +222,7 @@ _CITED_PREFIXES = ("app", "docs", "i18n", "scripts", "static", "tests")
 
 _CITED_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_./:-])"                   # not the tail of a URL or a
-    r"\b(?:app|docs|i18n|scripts|static|tests)/"  # longer path: kills https://…/docs/x.md
+    r"\b(?:app|docs|i18n|scripts|static|tests)/"  # longer path: kills URLs
     r"[A-Za-z0-9._/-]*[A-Za-z0-9]"             # path chars ONLY — no < > { } * $
     r"\.[A-Za-z0-9]{1,8}\b")                   # must end in a real extension
 

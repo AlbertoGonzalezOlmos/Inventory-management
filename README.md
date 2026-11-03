@@ -63,8 +63,23 @@ On first run the app seeds:
   **blocked from the API until you change it** (first login redirects to
   Account → Change password; only logout/me work before that). No endpoint will
   accept `changeme` or `admin` as a *new* password.
-- 12 example items (SKUs `EX-001`…`EX-012`) with embeddings, so semantic
-  search and the table view can be tested immediately.
+- **the shop's catalogue (the Biogan supplier rows)**, create-only, on every
+  boot, from the operator's `data/Biogan - masterdata - Sheet.csv` (the
+  crawler's output) or an explicit `HCRM_CATALOGUE_CSV`. The supplier's
+  master data is deliberately **not committed** to this repo, so a fresh
+  clone provisions the CSV once (run the crawler, or copy the operator's
+  file into `data/`) before the catalogue seeds — until then the boot falls
+  back to the demo items below. `HCRM_CATALOGUE_IMPORT=0` opts out; an
+  explicit `HCRM_CATALOGUE_CSV` is honoured verbatim (no fallback if
+  unreadable). Existing rows are never mutated and the 12 demo items are
+  never pruned — a deliberate refresh is the explicit importer run. When
+  the embedding model is unavailable the rows still land
+  (`embedding=NULL`, keyword search works) and the boot's backfill repairs
+  them once the model is back.
+- 12 example items (SKUs `EX-001`…`EX-012`) with embeddings — **only when no
+  catalogue was imported** (the supplier seed runs first and its rows make
+  the demo seed a no-op), so a fresh boot with a CSV goes straight to the
+  shop's catalogue.
 
 > **Upgrading an existing database:** the first boot adds the
 > `must_change_password` column and the `app_meta` table, invalidates every
@@ -130,7 +145,9 @@ English stays the fallback for a row whose Danish translation is missing.
 | `HCRM_EMBED_RETRY_SECONDS` | `60` | after a model load failure, retry at most this often (a transient network blip must not disable semantic search until restart) |
 | `HCRM_DEV_ADMIN` | `1` (**this round**) | seed/ensure the well-known dev admin `admin`/`admin`. `0` restores the secure default (`admin@shop.local`/`changeme`, blocked until changed) |
 | `HCRM_ALLOW_INSECURE_BIND` | unset | let `scripts/run.sh` bind a non-loopback `HCRM_HOST` while `HCRM_DEV_ADMIN` is on (trusted networks only) |
-| `HCRM_SCRATCH` | unset | `1` makes `run.sh` boot on a throwaway database instead of `./data` |
+| `HCRM_SCRATCH` | unset | `1` (or `true`/`yes`/`on`) makes `run.sh` boot on a throwaway database instead of `./data`; `0`/`false`/`no`/`off` keep the live one; anything else refuses to boot (strictly parsed — the banner says `scratch: on/off`) |
+| `HCRM_CATALOGUE_IMPORT` | `1` | `0` (or `false`/`no`/`off`) disables the create-only supplier-catalogue seed at boot (the demo items become the fresh-database fallback) |
+| `HCRM_CATALOGUE_CSV` | unset | an explicit supplier CSV for the boot seed — honoured verbatim, with **no fallback** if unreadable (unset = the data-dir CSV, if the operator provisioned one) |
 | `HCRM_LOGOFF_GRACE_SECONDS` | `60` | the kiosk logoff countdown (own-badge scan → “log off?”): the server-enforced deadline on the session token; clamped ≥ 1, read at import time |
 | `HCRM_BADGE_SECRET` | unset | the QR-badge derivation master secret (32+ chars). Unset ⇒ a 32-byte key is auto-generated to `data/badge.key` (0600, announced at boot). **Back the key file up with the database** (`scripts/backup_db.sh` copies it) — losing it disables badge re-viewing (logins unaffected). A set-but-too-short value refuses to boot |
 | `HCRM_DOCS` | `1` | `0` disables `/docs`, `/redoc` **and** `/openapi.json` for production |
@@ -161,9 +178,26 @@ that adds SIMD-accelerated vector search:
 
 ## Biogan supplier catalogue: crawl → import → serve
 
-The shop's own catalogue is refreshed from the supplier master CSV in three steps. Everything lives in
-`data/` — **git-ignored and never committed** (the CSV, `data/Catalogue-images/` and `data/hcrm.db`), so
-`git status` cannot show what a run changed. The crawler leaves a pre-first-run copy of the CSV
+**The app seeds the catalogue at boot** (create-only, every boot — see *On first
+run the app seeds* above) from the operator's data-dir CSV (or an explicit
+`HCRM_CATALOGUE_CSV`); the operator's full master CSV is not committed (only the
+3-row `tests/fixtures/biogan/masterdata.csv` test fixture is), so a fresh clone
+provisions the CSV once (crawl, or copy the operator's file into `data/`). Boot seeding never mutates existing rows and never prunes the
+demo items — and a supplier SKU deleted through the API returns on the next
+boot (create-only re-creates missing rows; retiring a product for good means
+removing it from the CSV). Note on images: the local
+`data/Catalogue-images/` (untracked) wins wherever it exists; without it the
+CSV's *remote* photo URLs are stored, and an unreachable remote URL shows a
+broken image — the 📦 placeholder only renders when an item has no photo URL
+at all.
+
+The three manual steps below remain the **explicit refresh path** (price/name
+updates, `--prune-demo`, crawl provenance reports — everything the boot's
+create-only seed deliberately does not do):
+
+The shop's own catalogue is refreshed from the supplier master CSV in three steps. The crawler's working
+files live in `data/` — **git-ignored and never committed** (`data/Biogan - masterdata - Sheet.csv`,
+`data/Catalogue-images/` and `data/hcrm.db`), so `git status` cannot show what a run changed. The crawler leaves a pre-first-run copy of the CSV
 (`data/Biogan - masterdata - Sheet.csv.bak`, written only when absent) to diff the CSV against; the database
 has no such copy, so take one first (`scripts/backup_db.sh`) if you need to compare before/after.
 

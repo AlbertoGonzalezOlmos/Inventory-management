@@ -15,6 +15,26 @@ cd "$(dirname "$0")/.."
 HOST="${HCRM_HOST:-127.0.0.1}"
 PORT="${HCRM_PORT:-8000}"
 
+# W1.4 + strict parse: HCRM_SCRATCH decides which DATABASE gets opened — a
+# data-safety decision, so it is settled FIRST, before anything is spawned
+# or synced (a refused boot must cost nothing). Any non-empty value used to
+# mean "on", so HCRM_SCRATCH=0 silently booted a throwaway DB (the likeliest
+# way the operator ever saw an empty catalogue). Unrecognised values refuse
+# the boot rather than guess (the PLAN-v2 §8.2 F5 class of accident).
+SCRATCH="${HCRM_SCRATCH:-0}"
+case "$SCRATCH" in
+    1|true|TRUE|yes|YES|on|ON) SCRATCH=1 ;;
+    0|""|false|FALSE|no|NO|off|OFF) SCRATCH=0 ;;
+    *)
+        echo "refusing to boot: HCRM_SCRATCH=$HCRM_SCRATCH is not one of 1/0/true/false/yes/no/on/off" >&2
+        exit 1 ;;
+esac
+export HCRM_SCRATCH="$SCRATCH"     # normalised for the children
+if [ "$SCRATCH" = 1 ]; then
+    HCRM_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hcrm-scratch-XXXXXX")"
+    export HCRM_DATA_DIR
+fi
+
 # W4.0 guard: the dev admin credential (admin/admin, HCRM_DEV_ADMIN, on by
 # default this round) must never be reachable from the network by accident.
 DEV_ADMIN="${HCRM_DEV_ADMIN:-1}"
@@ -49,13 +69,6 @@ if ! i18n_check_out=$(uv run python scripts/i18n_check.py --quiet 2>&1); then
     exit 1
 fi
 
-# W1.4: a throwaway database for experiments, so ./data (the operator's live
-# data) is never the default target of a verification run.
-if [ -n "${HCRM_SCRATCH:-}" ]; then
-    HCRM_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hcrm-scratch-XXXXXX")"
-    export HCRM_DATA_DIR
-fi
-
 # Say out loud which database is about to be opened: silently migrating or
 # mutating ./data is how the live DB got written mid-round (PLAN-v2 §8.2 F5).
 # Exported so the server, the scripts and any child process agree on one path
@@ -66,7 +79,8 @@ export HCRM_DATA_DIR
 if [ -n "$DEV_ADMIN" ]; then DEV_ADMIN_LABEL="ON (admin/admin)"; else DEV_ADMIN_LABEL="off"; fi
 echo "database:  ${DATABASE_URL:-sqlite:///$RESOLVED_DATA_DIR/hcrm.db}"
 echo "bind:      http://$HOST:$PORT   dev admin: $DEV_ADMIN_LABEL"
-if [ -n "${HCRM_SCRATCH:-}" ]; then
+if [ "$SCRATCH" = 1 ]; then echo "scratch:   on"; else echo "scratch:   off"; fi
+if [ "$SCRATCH" = 1 ]; then
     echo "           (scratch — seeded fresh, safe to delete: $RESOLVED_DATA_DIR)"
 elif [ ! -e "$RESOLVED_DATA_DIR/hcrm.db" ]; then
     echo "           (no database yet — first boot will create, migrate and seed it)"
@@ -118,7 +132,7 @@ SCANNER_DAEMON="${HCRM_SCANNER_DAEMON:-1}"
 case "$SCANNER_DAEMON" in 0|false|FALSE|no|off) SCANNER_DAEMON="" ;; esac
 if [ -z "$SCANNER_DAEMON" ]; then
     echo "scanner:   daemon disabled (HCRM_SCANNER_DAEMON=${HCRM_SCANNER_DAEMON:-1})"
-elif [ -n "${HCRM_SCRATCH:-}" ]; then
+elif [ "$SCRATCH" = 1 ]; then
     echo "scanner:   daemon skipped (scratch run — the real scanner stays alone)"
 else
     # The forward URL is ALWAYS loopback (the register/pair gates): [::1]

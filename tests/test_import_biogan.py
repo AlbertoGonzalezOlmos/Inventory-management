@@ -427,3 +427,67 @@ def test_subprocess_entrypoint_imports_and_runs(tmp_path):
     assert "ModuleNotFoundError" not in result.stderr
     assert "dry-run requires an existing DB schema" in result.stderr
     assert not missing_db.exists()
+
+
+# --- the library seam (boot seeding; CLI contract above stays untouched) -------
+
+
+def test_seam_creates_null_rows_when_the_model_is_down(tmp_path, monkeypatch):
+    """create_without_embedding=True (the seam default): rows land with
+    embedding=None and the backfill-pending review tag — the CLI default
+    (False) keeps today's deferral."""
+    from app import embeddings as app_embeddings
+    from scripts.import_biogan import import_masterdata_file
+
+    csv_path = write_csv(tmp_path / "master.csv",
+                         [supplier("SEAM1", ean=ean13(190)),
+                          supplier("SEAM2", ean=ean13(191))])
+    monkeypatch.setattr(app_embeddings, "embed_text_blob", lambda text: None)
+    engine = make_engine(tmp_path)
+    from scripts.import_biogan import prepare_database
+    prepare_database(engine, dry_run=False)  # the tmp engine needs the schema
+    with Session(engine) as session:
+        report = import_masterdata_file(session, csv_path)
+    rows = list(session.exec(select(Item)).all())
+    assert report["counts"] == {"created": 2, "skipped_blank": 1}
+    assert len(rows) == 2
+    assert all(row.embedding is None for row in rows)
+    assert all("embedding_backfill_pending" in result["review"]
+               for result in report["rows"]
+               if result["action"] == "created")
+
+    # The CLI default still defers: no row, action deferred.
+    csv2 = write_csv(tmp_path / "master2.csv",
+                     [supplier("SEAM3", ean=ean13(192))])
+    with Session(engine) as session:
+        report = import_masterdata_file(session, csv2,
+                                        create_without_embedding=False)
+    assert report["counts"] == {"deferred": 1, "skipped_blank": 1}
+    assert list(session.exec(select(Item).where(Item.sku == "SEAM3")).all()) == []
+
+
+def test_seam_is_create_only_by_default(tmp_path, monkeypatch):
+    """no_update=True: existing rows (name/price/stock) survive a seam run."""
+    from scripts.import_biogan import import_masterdata_file
+
+    csv_path = write_csv(tmp_path / "master.csv",
+                         [supplier("SEAM4", ean=ean13(193))])
+    engine = make_engine(tmp_path)
+    from scripts.import_biogan import prepare_database
+    prepare_database(engine, dry_run=False)  # the tmp engine needs the schema
+    with Session(engine) as session:
+        import_masterdata_file(session, csv_path)
+    with Session(engine) as session:
+        item = session.exec(select(Item).where(Item.sku == "SEAM4")).one()
+        item.name = "Operator renamed it"
+        item.price_cents = 1
+        item.stock = 99
+        session.add(item)
+        session.commit()
+    with Session(engine) as session:
+        report = import_masterdata_file(session, csv_path)
+    assert report["counts"] == {"unchanged": 1, "skipped_blank": 1}
+    with Session(engine) as session:
+        item = session.exec(select(Item).where(Item.sku == "SEAM4")).one()
+    assert (item.name, item.price_cents, item.stock) == \
+        ("Operator renamed it", 1, 99)

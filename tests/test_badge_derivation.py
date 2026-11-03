@@ -344,7 +344,7 @@ with TestClient(app) as c:
     env = {"PATH": "/usr/bin:/bin", "HCRM_DATA_DIR": data_dir,
            "HCRM_DEV_ADMIN": "0", "HCRM_PBKDF2_ITERATIONS": "1000",
            "HCRM_EMBED_MODEL": "bogus/model", "HCRM_BADGE_SECRET": TEST_SECRET,
-           "PYTHONPATH": REPO_ROOT}
+           "HCRM_CATALOGUE_IMPORT": "0", "PYTHONPATH": REPO_ROOT}
     proc = subprocess.run([sys.executable, "-c", snippet, "issue"],
                           capture_output=True, text=True, timeout=240,
                           cwd=REPO_ROOT, env=env)

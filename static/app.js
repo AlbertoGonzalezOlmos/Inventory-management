@@ -808,6 +808,12 @@ Vue.createApp({
         this.showToast({ key: "auth.change_password_required" });
         return;
       }
+      await this._enterCatalogue();
+    },
+
+    // The post-login catalogue tail, shared by afterLogin and the flagged
+    // password change (two copies of this drift — one method cannot).
+    async _enterCatalogue() {
       await this.loadCart();
       if (!this.user) return;   // a 401 tore the session down; already on #/login
       this._announceCartRestored();
@@ -963,6 +969,8 @@ Vue.createApp({
       this.pwError = "";
       this.pwOk = false;
       this.busy = true;
+      // Captured BEFORE the call: the flag is cleared on success below.
+      const wasFlagged = !!(this.user && this.user.must_change_password);
       try {
         await api("/auth/change-password", { method: "POST", body: this.pwForm });
         this.pwForm = { current_password: "", new_password: "" };
@@ -972,6 +980,18 @@ Vue.createApp({
           localStorage.setItem(USER_KEY, JSON.stringify(this.user));
         }
         this.showToast({ key: "account.password_updated_toast" });
+        if (wasFlagged && this.user) {
+          // The forced change was this login's only remaining step — run
+          // afterLogin's tail now instead of stranding the user on Account
+          // with an empty catalogue (bug 2's "not visible after login").
+          // A failure here is NOT a password error: toast it, keep the
+          // success state.
+          try {
+            await this._enterCatalogue();
+          } catch (e) {
+            this.showToast(this.errDescriptor(e));
+          }
+        }
       } catch (e) {
         this.pwError = this.errDescriptor(e);
       } finally {
