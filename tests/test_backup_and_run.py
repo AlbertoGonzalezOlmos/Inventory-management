@@ -202,6 +202,8 @@ def _call_index(calls, needle):
 # any of these exported must still see every test pass (the tests set the
 # defaults they intend explicitly).
 _STRIP_ENV = ("HCRM_DATA_DIR", "DATABASE_URL", "HCRM_SCRATCH",
+              "HCRM_CATALOGUE_CSV", "HCRM_CATALOGUE_IMPORT",
+              "HCRM_CATALOGUE_IMAGES_DIR",
               "HCRM_SCANNER_DAEMON", "HCRM_SCANNER_PAIRING_FILE",
               "HCRM_SCANNER_REGISTER_WAIT", "HCRM_SCANNER_CONFIG",
               "HCRM_ALLOW_INSECURE_BIND")
@@ -467,29 +469,30 @@ def test_run_sh_scratch_on_announces_and_skips_the_daemon():
         proc, calls = _run_sh_with_shim(
             td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        # The unmissable banner: what is served, what is NOT used, and how to
-        # run the shop — an operator with a stale HCRM_SCRATCH=1 once read the
-        # old two-liner as "the catalogue is broken".
-        assert "scratch:   ON — experiments: a throwaway data dir" in proc.stdout, proc.stdout
-        assert "the catalogue and scanner state in " in proc.stdout, proc.stdout
-        assert "/data are NOT used" in proc.stdout, proc.stdout
-        assert "set HCRM_SCRATCH=0 to run the shop" in proc.stdout, proc.stdout
-        assert "note: DATABASE_URL is set" not in proc.stdout, proc.stdout
-        assert "note: HCRM_CATALOGUE_CSV is set" not in proc.stdout, proc.stdout
+        # The unmissable banner: experiments-only, this boot's data dir (never
+        # the shop's), and how to run the shop — an operator with a stale
+        # HCRM_SCRATCH=1 once read the old two-liner as "the catalogue is broken".
+        assert "scratch:   ON — experiments only, NOT the shop" in proc.stdout, proc.stdout
+        assert "this boot's data dir: /tmp/hcrm-scratch-" in proc.stdout, proc.stdout
+        assert "run the shop with HCRM_SCRATCH=0" in proc.stdout, proc.stdout
         assert not any("scanner_daemon.py" in c for c in calls), calls
 
 
-def test_run_sh_scratch_banner_names_the_surviving_overrides():
-    """Scratch is not a lie: DATABASE_URL and HCRM_CATALOGUE_CSV still apply."""
+def test_run_sh_scratch_banner_stays_true_under_the_surviving_overrides():
+    """DATABASE_URL and HCRM_CATALOGUE_CSV still apply in scratch mode; the
+    banner must stay true anyway (it names this boot's data dir and the shop
+    switch, and leaves the DB/CSV to the lines that already report them)."""
     with tempfile.TemporaryDirectory(prefix="hcrm-runsh-scratch-ovr-") as td:
         proc, _ = _run_sh_with_shim(
             td, os.path.join(td, "calls.log"), HCRM_SCRATCH="1",
             DATABASE_URL="sqlite:////tmp/elsewhere.db",
             HCRM_CATALOGUE_CSV="/tmp/supplier.csv")
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "note: DATABASE_URL is set" in proc.stdout, proc.stdout
-        assert "(DB: sqlite:////tmp/elsewhere.db)" in proc.stdout, proc.stdout
-        assert "note: HCRM_CATALOGUE_CSV is set" in proc.stdout, proc.stdout
+        assert "scratch:   ON — experiments only, NOT the shop" in proc.stdout
+        assert "this boot's data dir: /tmp/hcrm-scratch-" in proc.stdout
+        assert "run the shop with HCRM_SCRATCH=0" in proc.stdout
+        # the overrides are reported by their own lines, not by the banner
+        assert "database:  sqlite:////tmp/elsewhere.db" in proc.stdout, proc.stdout
 
 
 def test_run_sh_scratch_unknown_value_refuses_to_boot():
