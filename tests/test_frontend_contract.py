@@ -915,3 +915,45 @@ def test_slice_e_toasts_confirms_and_exports_are_csv_bound():
     assert 'tp("common.cols", cols.length)' in pdf_export
     assert 'format: "CSV"' in csv_export and 'format: "PDF"' in pdf_export, (
         "the file format is the one machine token the sentence takes as a var")
+
+
+def test_after_login_delegates_to_enter_catalogue():
+    """Bug 2's frontend half: afterLogin's post-login tail lives in ONE
+    shared method (_enterCatalogue) so the flagged password change can run
+    it too without a drifting copy; the flagged branch itself still parks
+    the user on #/account (the server 403s everything else)."""
+    body = _method_body("async afterLogin(data) {")
+    assert '"#/account"' in body and "must_change_password" in body
+    assert "await this._enterCatalogue();" in body
+    assert "reloadItems()" not in body, (
+        "the catalogue tail moved to _enterCatalogue — a second copy here "
+        "is exactly the drift this refactor removes")
+
+
+def test_enter_catalogue_holds_the_full_post_login_tail():
+    body = _method_body("async _enterCatalogue() {")
+    for step in ("await this.loadCart()",
+                 "this._announceCartRestored()",
+                 "await this.replayStagedScans()",
+                 '"#/catalogue"',
+                 "this.reloadItems()",
+                 "this.loadCategories()"):
+        assert step in body, f"_enterCatalogue lost the step: {step}"
+
+
+def test_change_password_routes_a_flagged_account_to_the_catalogue():
+    """The forced change is the flagged login's last step: on success run
+    the shared tail (a loaded catalogue, not a stranded Account page). A
+    NORMAL password change stays on Account — the tail only runs inside
+    the wasFlagged branch, and wasFlagged is captured before the API call
+    (the flag is cleared on success)."""
+    body = _method_body("async changePassword() {")
+    assert body.index("wasFlagged") < body.index('api("/auth/change-password"')
+    assert "await this._enterCatalogue();" in body
+    # Normal changes stay put because the tail is inside the flagged branch,
+    # not merely below the wasFlagged declaration.
+    branch = body[body.rindex("if (wasFlagged && this.user) {"):]
+    assert "await this._enterCatalogue();" in branch
+    assert branch.index("try {") < branch.index(
+        "await this._enterCatalogue();") < branch.index("} catch (e)")
+    assert '"#/catalogue"' not in body

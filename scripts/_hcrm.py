@@ -168,6 +168,11 @@ def self_host(model: str = NO_MODEL, pbkdf2_iterations: int | None = None,
     }
     if pbkdf2_iterations is not None:
         env["HCRM_PBKDF2_ITERATIONS"] = str(pbkdf2_iterations)
+    # The catalogue boot seed is off for self-hosted servers by default:
+    # smoke/ui_check's fixtures (and their demo-item queries like q=mouse)
+    # assume the 12-demo world. Tests that WANT the boot seed opt in via
+    # extra_env — which is why this line must stay BEFORE env.update.
+    env["HCRM_CATALOGUE_IMPORT"] = "0"
     env.update(extra_env or {})
 
     log = open(log_path, "wb")

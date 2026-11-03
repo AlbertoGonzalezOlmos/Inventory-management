@@ -76,10 +76,15 @@ def test_load_cart_swallows_only_the_session_signal():
 def test_login_entry_points_stop_after_the_teardown():
     js = _read(APP_JS)
     after = _method_body(js, "async afterLogin(data) {")
-    assert re.search(r"await this\.loadCart\(\);\s*\n\s*if \(!this\.user\) return;", after), (
+    # The post-login tail lives in ONE shared helper (afterLogin and the
+    # flagged password change both run it — two copies drift); the 401
+    # guards moved with it, unchanged.
+    assert "await this._enterCatalogue();" in after
+    enter = _method_body(js, "async _enterCatalogue() {")
+    assert re.search(r"await this\.loadCart\(\);\s*\n\s*if \(!this\.user\) return;", enter), (
         "afterLogin must not keep routing to the catalogue after a 401 load")
     assert re.search(
-        r"await this\.replayStagedScans\(\);\s*\n\s*if \(!this\.user\) return;", after), (
+        r"await this\.replayStagedScans\(\);\s*\n\s*if \(!this\.user\) return;", enter), (
         "a 401 during staged-scan replay must also stop the routing")
 
     switch = _method_body(js, "async switchAccount(code) {")

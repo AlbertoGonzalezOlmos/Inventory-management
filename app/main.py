@@ -17,6 +17,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app import models  # noqa: F401  (registers tables)
@@ -24,7 +25,12 @@ from app.database import create_all, engine, vector_extension_available
 from app.embeddings import model_status, warm_up
 from app.error_codes import ERRORS, HEADER_CODE, spec, validation_code
 from app.routers import auth, cart, items, media, members, orders, scan_requests, scanner
-from app.seed import backfill_embeddings, seed_example_items
+from app.seed import (
+    backfill_embeddings,
+    final_catalogue_source,
+    seed_catalogue,
+    seed_example_items,
+)
 from app.security import (
     DEFAULT_ADMIN_EMAIL,
     DEFAULT_ADMIN_PASSWORD,
@@ -121,8 +127,21 @@ def _startup() -> None:
     with Session(engine) as session:
         seed_default_admin(session)
         _ensure_dev_admin(session)
+        # The supplier catalogue BEFORE the demo seed: a successful import
+        # makes seed_example_items' any-item guard skip the 12 EX-* rows —
+        # a fresh boot goes straight to the shop's catalogue (bug 2).
+        items_before = session.exec(
+            select(func.count()).select_from(models.Item)).one()
+        catalogue = seed_catalogue(session)
         seed_example_items(session)
-        backfill_embeddings(session)
+        items_now = session.exec(
+            select(func.count()).select_from(models.Item)).one()
+        # The ONE final catalogue line, on every path (import, fallback,
+        # opt-out, failure) — with the true row count after the demo seed.
+        logger.warning("Catalogue: %d item(s) — source: %s", items_now,
+                       final_catalogue_source(catalogue, items_before,
+                                              items_now))
+        backfill_embeddings(session)  # also repairs NULLs from a degraded boot
         _flag_well_known_passwords(session)
     # Cache the extension probe so /api/healthz never touches the database:
     # under load that turned a busy DB into a false "vector: false".
