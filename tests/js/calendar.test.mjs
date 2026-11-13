@@ -22,6 +22,16 @@ globalThis.HCRM_MESSAGES = MESSAGES;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const appSrc = readFileSync(join(ROOT, "static", "app.js"), "utf8");
 
+const COMPUTED_OPEN = appSrc.indexOf("\n  computed: {\n"), WATCH_OPEN = appSrc.indexOf("\n  watch: {\n");
+const METHODS_OPEN = appSrc.indexOf("\n  methods: {\n");
+const methodsOf = (...h) => new Function(`"use strict"; return ({\n${h.map(extractMethod).join(",\n")}\n});`)();
+function navigationObject({ year, month }) {
+  const calls = [];
+  const state = { calYear: year, calMonth: month, ...methodsOf("shiftCalendarMonth(delta) {"),
+    loadCalendar(y, m) { calls.push({ year: y, month: m }); return Promise.resolve({ year: y, month: m }); } };
+  return { state, calls };
+}
+
 function extractMethod(header) {
   // Brace-matched extraction: the header is the definition text ending in " {"
   // so a call site can never match.
@@ -136,4 +146,38 @@ test("a language flip changes the labels at paint time (no reload)", () => {
   assert.equal(state.calendarMonthLongLabel, "marts 2026");
   assert.equal(state.calendarWeekdays()[5], "lø");
   assert.equal(state.calendarDayTitle("2026-03-05"), "2 køb · 1.234,50 DKK");
+});
+
+test("the calendar tooltip is a method, not a computed (blank-SPA regression)", () => {
+  const at = appSrc.indexOf("calendarDayTitle(key) {");
+  assert.ok(COMPUTED_OPEN !== -1 && WATCH_OPEN !== -1 && METHODS_OPEN !== -1, "options blocks not found");
+  assert.ok(at > METHODS_OPEN && !(COMPUTED_OPEN < at && at < WATCH_OPEN),
+    "calendarDayTitle must sit in `methods:`, never between `computed: {` and `watch: {`");
+});
+
+test("shiftCalendarMonth returns the load, so navigation is awaitable", async () => {
+  const { state } = navigationObject({ year: 2026, month: 12 });
+  const pending = state.shiftCalendarMonth(1);
+  assert.equal(typeof pending.then, "function", "must return loadCalendar's promise");
+  await pending;
+});
+
+test("shiftCalendarMonth rolls the year over in both directions", async () => {
+  const cases = [   // from, delta, want
+    [{ year: 2026, month: 12 }, 1, { year: 2027, month: 1 }],    // December + 1 = January next year
+    [{ year: 2026, month: 1 }, -1, { year: 2025, month: 12 }],   // January - 1 = December last year
+    [{ year: 2026, month: 3 }, -1, { year: 2026, month: 2 }],    // in-month shifts keep the year
+    [{ year: 2026, month: 3 }, 1, { year: 2026, month: 4 }]];
+  for (const [from, delta, want] of cases) {
+    const { state, calls } = navigationObject(from);
+    assert.deepEqual(await state.shiftCalendarMonth(delta).then(() => calls), [want]);
+  }
+});
+
+test("calendarDay refuses a non-string key instead of coercing a Vue proxy", () => {
+  const thrower = { toString() { throw new TypeError("Cannot convert object to primitive value"); } };
+  const state = { calDays: { "2026-03-05": { cents: 1200, count: 1 } }, ...methodsOf("calendarDay(key) {") };
+  assert.deepEqual([state.calendarDay(thrower), state.calendarDay(undefined)], [null, null],
+    "a proxy-like or missing key answers null, never throws");
+  assert.deepEqual(state.calendarDay("2026-03-05"), { cents: 1200, count: 1 });
 });
