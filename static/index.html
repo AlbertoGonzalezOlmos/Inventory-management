@@ -302,23 +302,30 @@
           {{ t('checkout.empty') }}
         </p>
         <ul class="selection-list">
-          <li v-for="entry in purchase" :key="entry.item.id">
-            <div class="sel-info">
-              <span>{{ entry.item.name }}</span>
-              <small :class="{ 'stock-warn': entry.qty > entry.item.stock }">
-                {{ t('cart.price_each', { price: formatPrice(entry.item.price_cents) }) }}
-                <template v-if="entry.qty > entry.item.stock">{{ t('cart.only_in_stock', { n: entry.item.stock }) }}</template>
-              </small>
-              <small>{{ formatPrice(entry.line_total_cents) }}</small>
-            </div>
-            <div class="sel-controls">
-              <button class="btn tiny" @click="decPurchase(entry.item.id)" :disabled="entry.qty <= 1">−</button>
-              <input class="qty-input" type="number" min="1" :value="entry.qty"
-                     :title="t('cart.qty_title')"
-                     @change="setLineQty(entry.item.id, $event)" />
-              <button class="btn tiny" @click="incPurchase(entry.item.id)">+</button>
-              <button class="btn tiny danger" @click="removeFromPurchase(entry.item.id)">✕</button>
-            </div>
+          <li v-for="entry in purchase" :key="entry.item.id" class="cart-row">
+            <span class="row-name">
+              {{ entry.item.name }}
+              <small v-if="entry.qty > entry.item.stock" class="stock-warn">{{ t('cart.only_in_stock', { n: entry.item.stock }) }}</small>
+            </span>
+            <span class="row-price"
+                  :title="t('cart.price_each', { price: formatPrice(entry.item.price_cents) })">{{ formatPrice(entry.item.price_cents) }}</span>
+            <button class="btn tiny row-dec" type="button"
+                    :title="t('cart.decrease', { name: entry.item.name })"
+                    :aria-label="t('cart.decrease', { name: entry.item.name })"
+                    :disabled="entry.qty <= 1"
+                    @click="decPurchase(entry.item.id)">−</button>
+            <input class="qty-input" type="number" min="1" :value="entry.qty"
+                   :title="t('cart.qty_title')"
+                   @change="setLineQty(entry.item.id, $event)" />
+            <button class="btn tiny row-inc" type="button"
+                    :title="t('cart.increase', { name: entry.item.name })"
+                    :aria-label="t('cart.increase', { name: entry.item.name })"
+                    @click="incPurchase(entry.item.id)">+</button>
+            <span class="row-total">{{ formatPrice(entry.line_total_cents) }}</span>
+            <button class="btn tiny danger row-rm" type="button"
+                    :title="t('cart.remove_row', { name: entry.item.name })"
+                    :aria-label="t('cart.remove_row', { name: entry.item.name })"
+                    @click="removeFromPurchase(entry.item.id)">✕</button>
           </li>
         </ul>
         <div class="selection-total" v-if="purchase.length">
@@ -362,21 +369,28 @@
           {{ t('cart.empty') }}
         </p>
         <ul class="selection-list">
-          <li v-for="entry in purchase" :key="entry.item.id">
-            <div class="sel-info">
-              <span>{{ entry.item.name }}</span>
-              <small :class="{ 'stock-warn': entry.qty > entry.item.stock }">
-                {{ t('cart.price_each', { price: formatPrice(entry.item.price_cents) }) }}
-                <template v-if="entry.qty > entry.item.stock">{{ t('cart.only_in_stock', { n: entry.item.stock }) }}</template>
-              </small>
-              <small>{{ formatPrice(entry.line_total_cents) }}</small>
-            </div>
-            <div class="sel-controls">
-              <button class="btn tiny" @click="decPurchase(entry.item.id)" :disabled="entry.qty <= 1">−</button>
-              <span class="qty">{{ entry.qty }}</span>
-              <button class="btn tiny" @click="incPurchase(entry.item.id)">+</button>
-              <button class="btn tiny danger" @click="removeFromPurchase(entry.item.id)">✕</button>
-            </div>
+          <li v-for="entry in purchase" :key="entry.item.id" class="cart-row">
+            <span class="row-name">
+              {{ entry.item.name }}
+              <small v-if="entry.qty > entry.item.stock" class="stock-warn">{{ t('cart.only_in_stock', { n: entry.item.stock }) }}</small>
+            </span>
+            <span class="row-price"
+                  :title="t('cart.price_each', { price: formatPrice(entry.item.price_cents) })">{{ formatPrice(entry.item.price_cents) }}</span>
+            <button class="btn tiny row-dec" type="button"
+                    :title="t('cart.decrease', { name: entry.item.name })"
+                    :aria-label="t('cart.decrease', { name: entry.item.name })"
+                    :disabled="entry.qty <= 1"
+                    @click="decPurchase(entry.item.id)">−</button>
+            <span class="qty">{{ entry.qty }}</span>
+            <button class="btn tiny row-inc" type="button"
+                    :title="t('cart.increase', { name: entry.item.name })"
+                    :aria-label="t('cart.increase', { name: entry.item.name })"
+                    @click="incPurchase(entry.item.id)">+</button>
+            <span class="row-total">{{ formatPrice(entry.line_total_cents) }}</span>
+            <button class="btn tiny danger row-rm" type="button"
+                    :title="t('cart.remove_row', { name: entry.item.name })"
+                    :aria-label="t('cart.remove_row', { name: entry.item.name })"
+                    @click="removeFromPurchase(entry.item.id)">✕</button>
           </li>
         </ul>
         <div class="selection-actions" v-if="purchase.length">

@@ -146,16 +146,19 @@ calendar.title,Calendar,Kalender
 cart.add_to_purchase,Add to purchase list,Tilføj til indkøbslisten
 cart.added,{name} added to your purchase list,{name} blev tilføjet til din indkøbsliste
 cart.clear,Clear list,Ryd listen
+cart.decrease,Decrease quantity of {name},Reducer antallet af {name}
 cart.empty,Click items in the catalogue to add them to your purchase list.,Klik på varer i kataloget for at tilføje dem til din indkøbsliste.
 cart.empty_toast,Your purchase list is empty,Din indkøbsliste er tom
 cart.imported.one,Imported {n} item from your old purchase list,Importerede {n} vare fra din gamle indkøbsliste
 cart.imported.other,Imported {n} items from your old purchase list,Importerede {n} varer fra din gamle indkøbsliste
 cart.imported_partial,Imported your old purchase list (some items are gone),Din gamle indkøbsliste blev importeret (nogle varer findes ikke længere)
+cart.increase,Increase quantity of {name},Øg antallet af {name}
 cart.only_in_stock,— only {n} in stock,— kun {n} på lager
 cart.only_stock,Only {n} in stock,Kun {n} på lager
 cart.price_each,{price} each,{price} pr. stk.
 cart.qty_invalid,Enter a whole number of units (0 removes the line),Indtast et helt antal enheder (0 fjerner linjen)
 cart.qty_title,Set the quantity (0 removes the line),Angiv antallet (0 fjerner linjen)
+cart.remove_row,Remove {name} from the purchase list,Fjern {name} fra indkøbslisten
 cart.restored.one,Your purchase list was restored ({n} item),Din indkøbsliste blev gendannet ({n} vare)
 cart.restored.other,Your purchase list was restored ({n} items),Din indkøbsliste blev gendannet ({n} varer)
 cart.title,Purchase list,Indkøbsliste
