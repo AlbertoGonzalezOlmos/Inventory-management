@@ -574,6 +574,15 @@ def test_cart_panels_render_the_seven_cell_row():
         assert row.count('type="button"') == 3
         assert row.count(':aria-label=') == 3, "every row button needs an accessible name"
         assert row.count("{{ formatPrice(entry.line_total_cents) }}") == 1
+        assert row.count(':disabled="entry.qty <= 1"') == 1, \
+            "the minus button must stay disabled at qty 1"
+    for needle in ('@click="decPurchase(entry.item.id)"',
+                   '@click="incPurchase(entry.item.id)"',
+                   '@click="removeFromPurchase(entry.item.id)"',
+                   ':disabled="entry.qty <= 1"',
+                   'v-if="entry.qty > entry.item.stock"'):
+        assert html.count(needle) == 2, needle
+    assert ':title="t(\'cart.qty_title\')"' in review, "the qty input keeps its tooltip"
     assert review.count('@change="setLineQty(entry.item.id, $event)"') == 1
     assert sidebar.count('<span class="qty">{{ entry.qty }}</span>') == 1
     assert html.count('class="qty-input"') == 1, "no second qty input (the sidebar is read-only)"

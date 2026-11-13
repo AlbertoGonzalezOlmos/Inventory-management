@@ -382,24 +382,20 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
 .selection-panel h2 { margin: 0 0 .75rem; font-size: 1.05rem; }
 .selection-list { list-style: none; margin: 0; padding: 0; }
 .selection-list li.cart-row {
-  display: grid;
-  grid-template-columns: auto minmax(1.8rem, auto) auto minmax(0, 1fr) auto;
-  grid-template-areas:
-    "name name name name price"
-    "dec qty inc total rm";
-  gap: .25rem .35rem;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  gap: .25rem .35rem;
   padding: .55rem 0;
   border-bottom: 1px solid var(--border);
 }
-.row-name { grid-area: name; min-width: 0; font-size: .9rem; font-weight: 600; overflow-wrap: anywhere; }
-.row-price { grid-area: price; justify-self: end; min-width: 0; color: var(--muted); font-size: .85rem; white-space: nowrap; }
-.row-dec { grid-area: dec; }
-.row-inc { grid-area: inc; }
-.row-total { grid-area: total; justify-self: end; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
-.row-rm { grid-area: rm; }
-.selection-list .qty { grid-area: qty; justify-self: center; min-width: 1.8rem; text-align: center; font-weight: 600; }
-.selection-list .qty-input { width: 3rem; padding: .2rem .15rem; font-size: .9rem; }
+.selection-list .btn.tiny { padding: .15rem .35rem; }
+.row-name { flex: 1 1 55%; min-width: 0; font-size: .9rem; font-weight: 600; overflow-wrap: anywhere; }
+.row-price { flex: 0 0 auto; margin-right: auto; color: var(--muted); font-size: .85rem; white-space: nowrap; }
+.row-dec, .row-inc, .row-rm { flex: 0 0 auto; }
+.selection-list .qty { flex: 0 0 auto; min-width: 1.8rem; text-align: center; font-weight: 600; }
+.selection-list .qty-input { flex: 0 0 auto; width: 3rem; padding: .2rem .15rem; font-size: .9rem; }
+.row-total { flex: 0 0 auto; font-weight: 600; white-space: nowrap; }
 .selection-total {
   display: flex;
   justify-content: space-between;
@@ -662,21 +658,8 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
 @media (max-width: 900px) {
   .catalogue-layout { grid-template-columns: 1fr; }
   .selection-panel { position: static; order: -1; }
-  .selection-list li.cart-row {
-    grid-template-columns: minmax(0, 1fr) auto auto auto auto auto auto;
-    grid-template-areas: "name price dec qty inc total rm";
-  }
   .admin-split { grid-template-columns: 1fr; }
   .history-layout { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 600px) {
-  .selection-list li.cart-row {
-    grid-template-columns: auto minmax(1.8rem, auto) auto minmax(0, 1fr) auto;
-    grid-template-areas:
-      "name name name name price"
-      "dec qty inc total rm";
-  }
 }
 
 /* ---------- Round 3, Task C: login greeting banner ---------- */
