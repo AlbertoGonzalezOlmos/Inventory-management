@@ -562,10 +562,12 @@
         <aside class="calendar-card">
           <div class="cal-head">
             <button class="btn tiny" :disabled="calLoading || !calYear"
-                    @click="shiftCalendarMonth(-1)" :title="t('calendar.previous')">‹</button>
+                    @click="shiftCalendarMonth(-1)" :title="t('calendar.previous')"
+                    :aria-label="t('calendar.previous')">‹</button>
             <strong>{{ calendarMonthLabel || t('calendar.title') }}</strong>
             <button class="btn tiny" :disabled="calLoading || !calYear"
-                    @click="shiftCalendarMonth(1)" :title="t('calendar.next')">›</button>
+                    @click="shiftCalendarMonth(1)" :title="t('calendar.next')"
+                    :aria-label="t('calendar.next')">›</button>
           </div>
           <div class="cal-grid cal-weekdays">
             <span v-for="w in calendarWeekdays" :key="w">{{ w }}</span>

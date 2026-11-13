@@ -496,14 +496,6 @@ Vue.createApp({
         ? this.t("calendar.spent_this_month")
         : this.t("calendar.spent_in", { month: this.calendarMonthLongLabel });
     },
-    calendarDayTitle(key) {
-      // A day dot's tooltip: the count picks the .one/.other row, the money is
-      // a placeholder (never string concatenation).
-      const day = this.calendarDay(key);
-      if (!day) return "";
-      return this.tp("calendar.day_tooltip", day.count,
-        { price: this.formatPrice(day.cents) });
-    },
     // The intake modal's suggestion groups (labelled pick-lists).
     intakeGroups() {
       if (!this.scanIntake) return {};
@@ -1429,11 +1421,23 @@ Vue.createApp({
       let y = this.calYear, m = this.calMonth + delta;
       if (m < 1) { m = 12; y -= 1; }
       if (m > 12) { m = 1; y += 1; }
-      this.loadCalendar(y, m);
+      return this.loadCalendar(y, m);
     },
 
     calendarDay(key) {
+      // Defence in depth: a non-string key (the old computed-as-method bug passed
+      // the component proxy here and blanked the SPA) must never reach the lookup.
+      if (typeof key !== "string") return null;
       return this.calDays[key] || null;
+    },
+
+    calendarDayTitle(key) {
+      // A day dot's tooltip: the count picks the .one/.other row, the money is
+      // a placeholder (never string concatenation).
+      const day = this.calendarDay(key);
+      if (!day) return "";
+      return this.tp("calendar.day_tooltip", day.count,
+        { price: this.formatPrice(day.cents) });
     },
 
     dayColor(cents) {

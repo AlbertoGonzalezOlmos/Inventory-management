@@ -957,3 +957,44 @@ def test_change_password_routes_a_flagged_account_to_the_catalogue():
     assert branch.index("try {") < branch.index(
         "await this._enterCatalogue();") < branch.index("} catch (e)")
     assert '"#/catalogue"' not in body
+
+
+# --- Round 4: the calendar tooltip is a METHOD, not a computed --------------
+# The blank-SPA defect: `calendarDayTitle(key)` sat in `computed:` while
+# index.html:580 calls it as a function. Vue binds an options computed getter
+# with the component instance as its first argument, so this.calDays[<proxy>]
+# threw "Cannot convert object to primitive value" inside the render effect and
+# the prod build emptied #app. The Slice-C pins above assert the BODY only, so
+# they were blind to the block; these two pins close the class.
+_COMPUTED_OPEN, _WATCH_OPEN = "\n  computed: {\n", "\n  watch: {\n"
+_METHODS_OPEN, _CREATED_OPEN = "\n  methods: {\n", "\n  created() {\n"
+
+
+def _options_block(open_marker: str, close_marker: str) -> str:
+    """app.js slice between two options-block headers (unique + newline-wrapped)."""
+    js = _read("app.js")
+    assert js.count(open_marker) == 1 and js.count(close_marker) == 1, (open_marker, close_marker)
+    start, end = js.index(open_marker), js.index(close_marker)
+    assert start < end, (open_marker, close_marker)
+    return js[start:end]
+
+
+def test_calendar_tooltip_is_a_method_and_no_computed_takes_parameters():
+    """The template CALLS `calendarDayTitle(cell.key)`, so it must be a method.
+    In `computed:` Vue binds the getter with the instance as its first argument
+    (this.calDays[<proxy>] -> TypeError -> blank #app); the scan keeps the whole
+    class out, because a parameterised computed always sees the proxy."""
+    header = "calendarDayTitle(key) {"
+    computed = _options_block(_COMPUTED_OPEN, _WATCH_OPEN)
+    assert header not in computed, "it takes an argument — it cannot be a computed"
+    assert header in _options_block(_METHODS_OPEN, _CREATED_OPEN), \
+        "the template calls it: must be a method"
+    offenders = re.findall(r"^    ([A-Za-z_$][\w$]*)\(([^)]+)\)\s*\{", computed, re.MULTILINE)
+    assert offenders == [], f"computed members must take no arguments: {offenders}"
+
+
+def test_calendar_arrows_have_accessible_names():
+    """The ‹/› arrows reuse calendar.previous/next as :aria-label."""
+    html = _read("index.html")
+    assert ":aria-label=\"t('calendar.previous')\"" in html
+    assert ":aria-label=\"t('calendar.next')\"" in html
