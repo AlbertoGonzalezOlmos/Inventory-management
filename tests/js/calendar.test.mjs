@@ -24,6 +24,7 @@ const appSrc = readFileSync(join(ROOT, "static", "app.js"), "utf8");
 
 const COMPUTED_OPEN = appSrc.indexOf("\n  computed: {\n"), WATCH_OPEN = appSrc.indexOf("\n  watch: {\n");
 const METHODS_OPEN = appSrc.indexOf("\n  methods: {\n");
+const CREATED_OPEN = appSrc.indexOf("\n  created() {\n");
 const methodsOf = (...h) => new Function(`"use strict"; return ({\n${h.map(extractMethod).join(",\n")}\n});`)();
 function navigationObject({ year, month }) {
   const calls = [];
@@ -150,8 +151,9 @@ test("a language flip changes the labels at paint time (no reload)", () => {
 
 test("the calendar tooltip is a method, not a computed (blank-SPA regression)", () => {
   const at = appSrc.indexOf("calendarDayTitle(key) {");
-  assert.ok(COMPUTED_OPEN !== -1 && WATCH_OPEN !== -1 && METHODS_OPEN !== -1, "options blocks not found");
-  assert.ok(at > METHODS_OPEN && !(COMPUTED_OPEN < at && at < WATCH_OPEN),
+  assert.ok(COMPUTED_OPEN !== -1 && WATCH_OPEN !== -1 && METHODS_OPEN !== -1
+    && CREATED_OPEN !== -1, "options blocks not found");
+  assert.ok(at > METHODS_OPEN && at < CREATED_OPEN && !(COMPUTED_OPEN < at && at < WATCH_OPEN),
     "calendarDayTitle must sit in `methods:`, never between `computed: {` and `watch: {`");
 });
 

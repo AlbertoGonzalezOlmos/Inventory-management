@@ -967,7 +967,7 @@ def test_change_password_routes_a_flagged_account_to_the_catalogue():
 # the prod build emptied #app. The Slice-C pins above assert the BODY only, so
 # they were blind to the block; these two pins close the class.
 _COMPUTED_OPEN, _WATCH_OPEN = "\n  computed: {\n", "\n  watch: {\n"
-_METHODS_OPEN, _MOUNTED_OPEN = "\n  methods: {\n", "\n  mounted() {\n"
+_METHODS_OPEN, _CREATED_OPEN = "\n  methods: {\n", "\n  created() {\n"
 
 
 def _options_block(open_marker: str, close_marker: str) -> str:
@@ -987,7 +987,7 @@ def test_calendar_tooltip_is_a_method_and_no_computed_takes_parameters():
     header = "calendarDayTitle(key) {"
     computed = _options_block(_COMPUTED_OPEN, _WATCH_OPEN)
     assert header not in computed, "it takes an argument — it cannot be a computed"
-    assert header in _options_block(_METHODS_OPEN, _MOUNTED_OPEN), \
+    assert header in _options_block(_METHODS_OPEN, _CREATED_OPEN), \
         "the template calls it: must be a method"
     offenders = re.findall(r"^    ([A-Za-z_$][\w$]*)\(([^)]+)\)\s*\{", computed, re.MULTILINE)
     assert offenders == [], f"computed members must take no arguments: {offenders}"
