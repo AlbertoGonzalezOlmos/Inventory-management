@@ -301,7 +301,9 @@ _TEMPLATE_MONEY_IDENT = re.compile(
 #: app.js (it still calls formatPrice), so the template count dropped 28 -> 27.
 #: Bumping it is a deliberate, reviewed edit (item 5 re-points these bindings
 #: at CSV keys and updates this number).
-_TEMPLATE_MONEY_BINDINGS = 27
+#: Item 2 (feat(cart)): 27 -> 29 — each panel's price cell now ALSO shows the
+#: bare formatPrice(price_cents) next to the :title's cart.price_each call.
+_TEMPLATE_MONEY_BINDINGS = 29
 
 #: Words that make an interpolation money-bearing for the scaling check.
 _MONEY_WORD = re.compile(r"cent|price|total|amount", re.I)

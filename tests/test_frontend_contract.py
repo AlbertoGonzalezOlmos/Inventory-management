@@ -546,6 +546,54 @@ def test_cart_panels_render_through_rows_with_placeholders():
         assert f"t('{key}')" in html, key
 
 
+def test_cart_panels_render_the_seven_cell_row():
+    """Item 2: every purchase row shows seven cells in a fixed order — name,
+    price, − , qty, + , line total, discard — in BOTH panels, asserted by
+    index-of on each panel's first row, so any reorder goes red even when every
+    binding survives. The qty cell is the panels' only divergence: the sidebar
+    is read-only (span.qty via the +/- stepper), the review panel keeps direct
+    entry (input.qty-input + setLineQty) — a regression there is a real loss."""
+    html = _read("index.html")
+    review = html.split('<aside class="selection-panel review-panel"', 1)[1] \
+        .split("</aside>", 1)[0]
+    sidebar = html.split('<aside class="selection-panel" v-else>', 1)[1] \
+        .split("</aside>", 1)[0]
+    shared = [
+        'class="row-name"',
+        'class="row-price"',
+        'class="btn tiny row-dec" type="button"',
+        'class="btn tiny row-inc" type="button"',
+        'class="row-total"',
+        'class="btn tiny danger row-rm" type="button"',
+    ]
+    for panel, qty_cell in ((review, 'class="qty-input"'), (sidebar, 'class="qty"')):
+        row = panel.split('<li v-for="entry in purchase"', 1)[1].split("</li>", 1)[0]
+        cells = (shared[:2] + [shared[2], qty_cell] + shared[3:])
+        positions = [row.index(cell) for cell in cells]
+        assert positions == sorted(positions), f"row cells out of order: {cells}"
+        assert row.count('type="button"') == 3
+        assert row.count(':aria-label=') == 3, "every row button needs an accessible name"
+        assert row.count("{{ formatPrice(entry.line_total_cents) }}") == 1
+        assert row.count(':disabled="entry.qty <= 1"') == 1, \
+            "the minus button must stay disabled at qty 1"
+    for needle in ('@click="decPurchase(entry.item.id)"',
+                   '@click="incPurchase(entry.item.id)"',
+                   '@click="removeFromPurchase(entry.item.id)"',
+                   ':disabled="entry.qty <= 1"',
+                   'v-if="entry.qty > entry.item.stock"'):
+        assert html.count(needle) == 2, needle
+    assert ':title="t(\'cart.qty_title\')"' in review, "the qty input keeps its tooltip"
+    assert review.count('@change="setLineQty(entry.item.id, $event)"') == 1
+    assert sidebar.count('<span class="qty">{{ entry.qty }}</span>') == 1
+    assert html.count('class="qty-input"') == 1, "no second qty input (the sidebar is read-only)"
+    assert html.count("{{ formatPrice(entry.item.price_cents) }}") == 2
+    for key in ("decrease", "increase", "remove_row"):
+        assert html.count(f"t('cart.{key}', {{ name: entry.item.name }})") == 4, key
+    assert html.count("'stock-warn':") == 0, "the chip is v-if + class=stock-warn now"
+    assert html.count('class="stock-warn"') == 2
+    assert "sel-info" not in html and "sel-controls" not in html
+
+
 def test_receipt_counts_render_through_plural_pairs():
     """The receipt is slice B's count surface: the line count uses the shared
     common.item_count pair, the skipped-orphans sentence its own

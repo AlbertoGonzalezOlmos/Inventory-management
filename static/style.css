@@ -381,18 +381,21 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
 }
 .selection-panel h2 { margin: 0 0 .75rem; font-size: 1.05rem; }
 .selection-list { list-style: none; margin: 0; padding: 0; }
-.selection-list li {
+.selection-list li.cart-row {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
   align-items: center;
-  gap: .5rem;
+  gap: .25rem .35rem;
   padding: .55rem 0;
   border-bottom: 1px solid var(--border);
 }
-.sel-info span { display: block; font-size: .9rem; font-weight: 600; }
-.sel-info small { color: var(--muted); }
-.sel-controls { display: flex; align-items: center; gap: .3rem; }
-.qty { min-width: 1.2rem; text-align: center; font-weight: 600; }
+.selection-list .btn.tiny { padding: .15rem .35rem; }
+.row-name { flex: 1 1 55%; min-width: 0; font-size: .9rem; font-weight: 600; overflow-wrap: anywhere; }
+.row-price { flex: 0 0 auto; margin-right: auto; color: var(--muted); font-size: .85rem; white-space: nowrap; }
+.row-dec, .row-inc, .row-rm { flex: 0 0 auto; }
+.selection-list .qty { flex: 0 0 auto; min-width: 1.8rem; text-align: center; font-weight: 600; }
+.selection-list .qty-input { flex: 0 0 auto; width: 3rem; padding: .2rem .15rem; font-size: .9rem; }
+.row-total { flex: 0 0 auto; font-weight: 600; white-space: nowrap; }
 .selection-total {
   display: flex;
   justify-content: space-between;
@@ -829,6 +832,11 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
   border-radius: 6px;
   font-weight: 600;
 }
+
+/* Item 2: the chip rides at the end of the cart row's name cell. Kept BELOW
+ * the block above — test_style_tokens brace-matches the FIRST ".stock-warn {"
+ * in the file, so this rule must not precede the pinned chip block. */
+.row-name .stock-warn { margin-left: .3rem; }
 
 /* The unknown-item intake modal's suggestion groups. */
 .suggestion-group {
