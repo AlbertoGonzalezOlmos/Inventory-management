@@ -292,10 +292,14 @@ import; `app/seed.py::backfill_embeddings()` repairs any NULL embedding at boot.
 - **Scan-request queue**: unknown codes members reported at the counter are
   listed here — "Create & resolve" opens the intake prefilled from the
   member's proposal, "Dismiss" rejects junk. Resolving a request files the
-  item for the **requester** (the "Also add the item to {name}'s purchase
-  list" checkbox is that cart's only switch) and never touches the resolving
-  staff member's own purchase list — a normal staff intake is what adds to
-  the staff member's list.
+  item for the **requester** — the "Also add the item to {name}'s purchase
+  list" checkbox decides that cart — and leaves the resolving staff member's
+  own purchase list alone, with two documented exceptions: a staff member
+  resolving their **own** request gets the item in their own list (as the
+  requester; the same checkbox decides), and the "Add that instead"
+  suggestion in the intake modal still adds to the staff member's list
+  without closing the request (a known gap being revisited — see NOTES.md).
+  A normal staff intake is what adds to the staff member's list.
 
 ### Barcode scanner hardware (back office)
 - `scripts/opticon_detect.py` — one shared map of the Opticon USB
