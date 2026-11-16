@@ -190,6 +190,15 @@ def resolve_request(
     path. ``add_to_cart`` (default false) additionally puts the item in the
     REQUESTER's cart via the race-free upsert — the loop-closing option;
     stock is never touched (coordinator decision 6).
+
+    Invariant: the requester's cart is the ONLY cart this endpoint may
+    write — resolution must never mutate the resolver's (staff) cart.
+    Whether the staff member's own cart is touched when filing the intake
+    is purely a client-side decision: the client skips its own
+    POST /api/cart/items call when the intake came from the request queue
+    (static/app.js, submitIntakeStaff). POST /api/cart/items itself writes
+    only the authenticated caller's cart, so no server-side sequence can
+    attribute a cart mutation to "resolution".
     """
     request = _get_open_request(session, request_id)
     item = session.get(Item, payload.item_id)
