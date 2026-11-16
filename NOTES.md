@@ -387,11 +387,11 @@ Inventory-management/
   bottom follows live prices. Checkout is a placeholder toast. Scans at the
   counter (M-10 USB-HID) add to it; own-badge scans arm a 60 s logoff
   countdown, another badge saves-and-switches accounts
-  (docs/opticon-m10.md §10). A request-originated intake does NOT touch
-  this list: it files the item for the REQUESTER (§9) — the staff member's
-  own list is written only by a normal intake, by resolving their own
-  request (as the requester), or via the deferred "Add that instead" corner
-  (§9).
+  (docs/opticon-m10.md §10). A request-originated intake for another
+  member does NOT touch this list: it files the item for the REQUESTER
+  (§9) — the staff member's own list is written only by a normal intake,
+  by resolving their own request (as the requester), or via the deferred
+  "Add that instead" corner (§9).
 - Table view: click/Shift/Ctrl selection of rows *and* columns, CSV export
   (UTF-8 BOM, formula-injection guard) and PDF export, stats panel
   (min/max/mean/median/σ, per-category breakdown).
