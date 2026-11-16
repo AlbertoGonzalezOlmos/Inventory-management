@@ -821,6 +821,31 @@ def test_slice_d_toasts_are_csv_bound():
     assert 'confirm("Revoke your QR badge?' not in js
 
 
+def test_staff_intake_cart_add_is_guarded_for_request_resolution():
+    """Request-originated intake resolves for the requester, not the staff cart.
+
+    The behavioural matrix lives in tests/js/intake.test.mjs. This source pin
+    makes plain pytest catch the original unconditional-call regression too,
+    and protects the three branch tails while that guard is edited.
+    """
+    body = _method_body("async submitIntakeStaff(intake) {")
+    cart_calls = list(re.finditer(r"await this\._intakeAddToCart\(", body))
+    assert len(cart_calls) == 3, "pre-check, 409 fallback and new-item paths"
+    for call in cart_calls:
+        prefix = body[:call.start()]
+        assert re.search(
+            r"if\s*\(\s*!intake\.resolveRequestId\s*\)\s*\{[^\n]*\n\s*$", prefix
+        ), "every staff-cart add must be skipped for request-originated intake"
+
+    assert body.count("await this._resolveIfRequested(intake,") == 3
+    assert body.count("this.closeIntake();") == 3
+    admin_tail = '''if (this.currentView === "admin" || this.currentView === "table") {
+        this.loadAdminData();
+      }'''
+    assert admin_tail in body
+    assert body.index(admin_tail) > body.rindex("await this._resolveIfRequested(intake,")
+
+
 # --- Slice E: the table view, its analysis panel and the exports ------------
 
 def test_table_view_copy_is_csv_bound():
