@@ -289,6 +289,13 @@ import; `app/seed.py::backfill_embeddings()` repairs any NULL embedding at boot.
 - Item input form; descriptions are embedded automatically on create/update
   (an `AI ✓` column shows which items have embeddings)
 - Member account creation (member or staff role), account management
+- **Scan-request queue**: unknown codes members reported at the counter are
+  listed here — "Create & resolve" opens the intake prefilled from the
+  member's proposal, "Dismiss" rejects junk. Resolving a request files the
+  item for the **requester** (the "Also add the item to {name}'s purchase
+  list" checkbox is that cart's only switch) and never touches the resolving
+  staff member's own purchase list — a normal staff intake is what adds to
+  the staff member's list.
 
 ### Barcode scanner hardware (back office)
 - `scripts/opticon_detect.py` — one shared map of the Opticon USB
