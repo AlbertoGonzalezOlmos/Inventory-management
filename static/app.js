@@ -2463,11 +2463,16 @@ Vue.createApp({
 
       // Pre-check: the code may have been catalogued since the scan 404'd
       // (or the intake may have been opened from the staff queue).
+      // A request-originated intake (the Requests tab) files the item for the
+      // REQUESTER only: `intake.addToCart` — "also add to {name}'s purchase
+      // list" — is that cart's sole decision, so the staff cart is not touched.
       if (gtin14) {
         const existing = await api("/items?barcode=" + encodeURIComponent(gtin14));
         if (existing.length) {
-          await this._intakeAddToCart(existing[0].id);
-          this.showToast({ key: "intake.already_filed", vars: { sku: existing[0].sku } });
+          if (!intake.resolveRequestId) {
+            await this._intakeAddToCart(existing[0].id);
+            this.showToast({ key: "intake.already_filed", vars: { sku: existing[0].sku } });
+          }
           await this._resolveIfRequested(intake, existing[0].id);
           this.closeIntake();
           return;
@@ -2493,8 +2498,10 @@ Vue.createApp({
           // Created concurrently: fetch the conflicting item and add that.
           const existing = await api("/items?barcode=" + encodeURIComponent(gtin14));
           if (existing.length) {
-            await this._intakeAddToCart(existing[0].id);
-            this.showToast({ key: "intake.already_filed", vars: { sku: existing[0].sku } });
+            if (!intake.resolveRequestId) {   // request-originated: requester's cart only
+              await this._intakeAddToCart(existing[0].id);
+              this.showToast({ key: "intake.already_filed", vars: { sku: existing[0].sku } });
+            }
             await this._resolveIfRequested(intake, existing[0].id);
             this.closeIntake();
             return;
@@ -2502,8 +2509,10 @@ Vue.createApp({
         }
         throw e;
       }
-      await this._intakeAddToCart(item.id);
-      this.showToast({ key: "intake.added", vars: { name: item.name } });
+      if (!intake.resolveRequestId) {   // request-originated: requester's cart only
+        await this._intakeAddToCart(item.id);
+        this.showToast({ key: "intake.added", vars: { name: item.name } });
+      }
       await this._resolveIfRequested(intake, item.id);
       this.closeIntake();
       if (this.currentView === "admin" || this.currentView === "table") {
