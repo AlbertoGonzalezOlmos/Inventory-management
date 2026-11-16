@@ -387,7 +387,11 @@ Inventory-management/
   bottom follows live prices. Checkout is a placeholder toast. Scans at the
   counter (M-10 USB-HID) add to it; own-badge scans arm a 60 s logoff
   countdown, another badge saves-and-switches accounts
-  (docs/opticon-m10.md §10).
+  (docs/opticon-m10.md §10). A request-originated intake for another
+  member does NOT touch this list: it files the item for the REQUESTER
+  (§9) — the staff member's own list is written only by a normal intake,
+  by resolving their own request (as the requester), or via the deferred
+  "Add that instead" corner (§9).
 - Table view: click/Shift/Ctrl selection of rows *and* columns, CSV export
   (UTF-8 BOM, formula-injection guard) and PDF export, stats panel
   (min/max/mean/median/σ, per-category breakdown).
@@ -593,6 +597,25 @@ CI-2 is enabled; W1-style hygiene PRs go first and alone.
 - **Keep the conftest monkey-patch style in mind** (§6 fragility note).
 - **PATCH semantics**: omit a field to leave it unchanged; `null` is a 422;
   unknown/typo'd fields are 422 (never silently ignored).
+- **Resolve-and-cart separation** (paid for in the intake bug): closing a
+  scan request (`POST /api/scan-requests/{id}/resolve`) writes at most the
+  REQUESTER's cart, and only via its `add_to_cart` flag — never a cart *on
+  account of the resolver role*. The one legitimate overlap: when the
+  resolver IS the requester (staff can file requests that sit in their own
+  queue), the line lands in their own cart as the REQUESTER and the client
+  re-reads the cart in that case so the purchase panel does not go stale
+  (server half pinned in `tests/test_scan_requests.py`, client half in
+  `tests/js/intake.test.mjs`). The stray staff-cart line that resolving a
+  member request used to produce was a client-side extra `POST /cart/items`,
+  not server behaviour: the client must skip that call whenever the intake
+  carries `resolveRequestId` (all three `submitIntakeStaff` call sites are
+  guarded; `tests/js/intake.test.mjs` and `tests/test_frontend_contract.py`
+  pin it). Known corner, deliberately deferred and pinned as today's
+  behaviour in `tests/js/intake.test.mjs`: the "Add that instead" suggestion
+  click (`addSuggestedItem()`) still adds to the caller's own cart — correct
+  for a normal intake, but from a request-originated modal it lands in the
+  staff cart and leaves the request open (a follow-up item decides whether
+  it should resolve the request instead).
 - **Tokens are stored hashed** — you can't read a usable token out of the DB;
   the raw token exists only in the login response/client localStorage.
 - **A migrated DB's changes may live only in the WAL** — copying `hcrm.db`

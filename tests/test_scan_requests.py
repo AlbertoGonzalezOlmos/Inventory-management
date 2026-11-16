@@ -3,7 +3,8 @@
 Pins the lifecycle end-to-end: filing (with server-side re-validation —
 badge 400, misread 422, already-catalogued 409, duplicate-open 409), /mine,
 the staff queue, resolve (link + optional add_to_cart via the race-free
-upsert; stock untouched), dismiss, non-open 409s, member deletion cleanup,
+upsert; stock untouched; the resolver's own cart is NEVER written), dismiss,
+non-open 409s, member deletion cleanup,
 and the weak-ref tolerance (a resolved request survives item deletion).
 """
 
@@ -195,6 +196,94 @@ def test_resolve_with_add_to_cart_closes_the_loop(client, admin_token):
     detail = client.get(f"/api/items/{item['id']}",
                         headers=auth(admin_token)).json()
     assert detail["stock"] == item["stock"]
+
+
+def test_resolve_never_writes_the_resolvers_cart(client, admin_token):
+    """Resolve writes AT MOST the REQUESTER's cart — never the staff actor's.
+
+    Server half of the intake-staff-cart invariant: the SPA bug added the
+    product to the staff member's own cart with a separate, client-issued
+    POST /api/cart/items; the API itself must never attribute a cart mutation
+    to resolution. The staff cart is pre-loaded with an unrelated line, so
+    this pins both "no new line injected" and "no quantity bump".
+    """
+    member, member_token = create_user(client, admin_token)
+    second, second_token = create_user(client, admin_token)
+    staff, staff_token = create_user(client, admin_token, role="staff")
+    decoy = _create_item(client, admin_token, "STAFF-OWN")
+    r = client.post("/api/cart/items", json={"item_id": decoy["id"], "qty": 1},
+                    headers=auth(staff_token))
+    assert r.status_code == 200, r.text
+    before = client.get("/api/cart", headers=auth(staff_token)).json()
+
+    with_cart = _file(client, member_token, "5901234123457").json()
+    without = _file(client, second_token, "4006381333931").json()
+    item1 = _create_item(client, admin_token, "RES-1", barcode="5901234123457")
+    item2 = _create_item(client, admin_token, "RES-2", barcode="4006381333931")
+
+    # add_to_cart=true: the REQUESTER's cart gains the line…
+    r = client.post(f"/api/scan-requests/{with_cart['id']}/resolve",
+                    json={"item_id": item1["id"], "add_to_cart": True},
+                    headers=auth(staff_token))
+    assert r.status_code == 200, r.text
+    cart = client.get("/api/cart", headers=auth(member_token)).json()
+    assert [line["item"]["id"] for line in cart["lines"]] == [item1["id"]]
+
+    # …and the default (false) leaves the second requester's cart empty.
+    r = client.post(f"/api/scan-requests/{without['id']}/resolve",
+                    json={"item_id": item2["id"]},
+                    headers=auth(staff_token))
+    assert r.status_code == 200, r.text
+    cart = client.get("/api/cart", headers=auth(second_token)).json()
+    assert cart["lines"] == []
+
+    # The resolver's own cart is byte-identical after both resolutions.
+    after = client.get("/api/cart", headers=auth(staff_token)).json()
+    assert after == before
+
+
+def test_self_resolve_add_to_cart_targets_the_actor_as_requester(client, admin_token):
+    """A staff member resolving their OWN request with add_to_cart gets the
+    line — written via requester_id (they ARE the requester), not as a
+    resolver side effect. Pins the legitimate self-service loop so the
+    "never the resolver's cart" rule cannot over-correct into breaking it.
+    """
+    staff, staff_token = create_user(client, admin_token, role="staff")
+    request = _file(client, staff_token, "5901234123457").json()
+    item = _create_item(client, admin_token, "SELF-1", barcode="5901234123457")
+
+    r = client.post(f"/api/scan-requests/{request['id']}/resolve",
+                    json={"item_id": item["id"], "add_to_cart": True},
+                    headers=auth(staff_token))
+    assert r.status_code == 200, r.text
+    assert r.json()["resolved_by"] == staff["id"]
+    cart = client.get("/api/cart", headers=auth(staff_token)).json()
+    assert [(line["item"]["id"], line["qty"]) for line in cart["lines"]] == \
+        [(item["id"], 1)]
+
+
+def test_resolve_add_to_cart_increments_an_existing_requester_line(client, admin_token):
+    """add_to_cart rides the same race-free upsert as the cart endpoints: an
+    item the requester already holds is INCREMENTED (one line, never a
+    duplicate) — and the resolver's cart stays untouched here too.
+    """
+    member, member_token = create_user(client, admin_token)
+    staff, staff_token = create_user(client, admin_token, role="staff")
+    request = _file(client, member_token, "5901234123457").json()
+    item = _create_item(client, admin_token, "UP-1", barcode="5901234123457")
+    r = client.post("/api/cart/items", json={"item_id": item["id"], "qty": 2},
+                    headers=auth(member_token))
+    assert r.status_code == 200, r.text
+
+    r = client.post(f"/api/scan-requests/{request['id']}/resolve",
+                    json={"item_id": item["id"], "add_to_cart": True},
+                    headers=auth(staff_token))
+    assert r.status_code == 200, r.text
+    cart = client.get("/api/cart", headers=auth(member_token)).json()
+    assert [(line["item"]["id"], line["qty"]) for line in cart["lines"]] == \
+        [(item["id"], 3)]
+    staff_cart = client.get("/api/cart", headers=auth(staff_token)).json()
+    assert staff_cart["lines"] == []
 
 
 def test_resolve_and_dismiss_error_cases(client, admin_token):
