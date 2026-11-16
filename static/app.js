@@ -2387,6 +2387,7 @@ Vue.createApp({
         resolveRequestId: null,
         addToCart: true,
         requesterName: null,
+        requesterId: null,
       };
     },
 
@@ -2533,6 +2534,18 @@ Vue.createApp({
             body: { item_id: itemId, add_to_cart: intake.addToCart },
           });
           this.showToast({ key: "intake.resolved" });
+          // The requester may BE this staff member (staff can file requests and
+          // they stay in their own queue): the server just wrote OUR cart via
+          // requester_id, and this branch deliberately skips the cart-refreshing
+          // _intakeAddToCart — so re-read it. Scoped to actor == requester: for
+          // anyone else's request our cart did not change. Best-effort: a failed
+          // re-read must never be reported as a failed resolve.
+          if (intake.addToCart && intake.requesterId != null
+              && intake.requesterId === (this.user && this.user.id)) {
+            try {
+              this.cart = await api("/cart");
+            } catch (_) { /* the cart re-render is not worth an error toast */ }
+          }
         } else {
           const open = await api("/scan-requests?status=open");
           const match = open.find(r => r.code === intake.code);
@@ -2807,6 +2820,9 @@ Vue.createApp({
         resolveRequestId: req.id,
         addToCart: true,
         requesterName: req.requester.name,
+        // Who filed it: resolving writes THEIR cart, so when that is us the
+        // resolve is also a cart change and _resolveIfRequested must re-read it.
+        requesterId: req.requester.id,
       };
     },
 
