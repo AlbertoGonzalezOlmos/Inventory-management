@@ -829,13 +829,31 @@ def test_staff_intake_cart_add_is_guarded_for_request_resolution():
     and protects the three branch tails while that guard is edited.
     """
     body = _method_body("async submitIntakeStaff(intake) {")
-    cart_calls = list(re.finditer(r"await this\._intakeAddToCart\(", body))
+    # Ignore comments (a quoted guard is not a guard), then brace-match each
+    # real `if` block: a regexp prefix alone can be spoofed by a later guard
+    # that does not actually contain the cart call.
+    code = re.sub(r"//[^\n]*", "", body)
+    cart_calls = list(re.finditer(r"await this\._intakeAddToCart\(", code))
     assert len(cart_calls) == 3, "pre-check, 409 fallback and new-item paths"
+    guard_spans = []
+    for guard in re.finditer(
+            r"if\s*\(\s*!intake\.resolveRequestId\s*\)\s*\{", code):
+        open_i = code.index("{", guard.start(), guard.end())
+        depth = 0
+        for i in range(open_i, len(code)):
+            if code[i] == "{":
+                depth += 1
+            elif code[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    guard_spans.append((open_i, i))
+                    break
+        else:
+            raise AssertionError("unbalanced request-resolution guard")
     for call in cart_calls:
-        prefix = body[:call.start()]
-        assert re.search(
-            r"if\s*\(\s*!intake\.resolveRequestId\s*\)\s*\{[^\n]*\n\s*$", prefix
-        ), "every staff-cart add must be skipped for request-originated intake"
+        assert any(start < call.start() < end for start, end in guard_spans), (
+            "every staff-cart add must be inside a request-resolution guard"
+        )
 
     assert body.count("await this._resolveIfRequested(intake,") == 3
     assert body.count("this.closeIntake();") == 3
