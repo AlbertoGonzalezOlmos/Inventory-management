@@ -324,6 +324,17 @@ import; `app/seed.py::backfill_embeddings()` repairs any NULL embedding at boot.
   names the dead controller, which physical jacks that means, and the
   recovery ladder (`docs/m10-unreachable-2026-10-10.md` is the dated
   evidence).
+- **Kiosk shows "no scanner" (401 `bad_pairing`) while a daemon is running?**
+  The pairing identity has gone stale three ways (DB terminal / daemon
+  config / offer file) — scans would land in a queue no browser on this host
+  can read. `uv run python scripts/scanner_daemon.py --find-scanner` reports
+  the mismatch read-only (and says plainly when a daemon already holds the
+  scanner's evdev node); the operator recovery runbook — with the steps that
+  ARE destructive clearly marked — is in `NOTES.md` §9.
+- **Journal spams `device descriptor read/64, error -71`, or the scanner
+  enumerates and then drops off the bus?** That is a physical-layer signature
+  (cable/connector/port), not the app: swap cable/port and run `uv run python
+  scripts/usb_host_check.py`; full triage in `docs/opticon-hardware.md` §5.
 - **OS-level grab daemon (round 4, "option 2")**: in USB-HID keyboard mode
   the M-10 "types" into whatever window has focus —
   `scripts/scanner_daemon.py` exclusively grabs its evdev node

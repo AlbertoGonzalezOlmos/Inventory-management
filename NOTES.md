@@ -634,6 +634,52 @@ CI-2 is enabled; W1-style hygiene PRs go first and alone.
 - **Don't open "the first serial port".** Two Opticon personalities can be
   attached at once and their line settings differ (9600 **8O1** for `0009`,
   9600 **8N1** for `A002`); select by VID:PID via `scripts/opticon_detect.py`.
+- **Scanner pairing: a stale three-way identity strands scans (2026-11-17
+  incident + recovery runbook)** — the DB `terminals` row, the daemon config
+  and the one-click offer file can drift apart: here the only row was
+  `pentacosiarca-ThinkPad-T14s-Gen-4` (paired 2026-11-03 on the old laptop,
+  owning the only browser read token), `data/scanner.json` still forwarded as
+  that foreign terminal, and `data/scanner-pairing.json` offered `hertha-shop`
+  — which the server does not know, so the kiosk pill's `/pair/auto` answers
+  401 `bad_pairing` while `--register` answers 409 `already_registered`, and
+  even a perfect scanner delivers into a queue no browser on this host can
+  read. On pairing failure the daemon's job is to look for the scanner
+  (`--find-scanner`) and keep only credentials the server accepts —
+  `save_config` never persists a credential the server has not accepted, and
+  a 409/401 registration failure prints ONE actionable recovery plan instead
+  of a raw error. Diagnose read-only first; every destructive step below is
+  an OPERATOR command — nothing in the repo runs against `./data`:
+  1. `uv run python scripts/scanner_daemon.py --find-scanner` — read-only:
+     device present/node, config terminal_id vs the server's, which other
+     terminals exist, offer-file consistency, and whether a daemon is already
+     running (stated in plain words — it holds the single-instance lock *and*
+     an exclusive EVIOCGRAB on the scanner's evdev node).
+  2. Stop that daemon (releases the lock and the grab):
+     `kill $(cat "$XDG_RUNTIME_DIR/hcrm-scanner-daemon.lock")` — DESTRUCTIVE
+     (kills the process), operator only.
+  3. Owner decision first — the foreign terminal may belong to a machine
+     still in use. Only then delete it:
+     `curl -X DELETE http://127.0.0.1:8000/api/scanner/terminals/<terminal-id>`
+     — DESTRUCTIVE (drops the terminal and its events), operator only;
+     loopback from the server host needs no token, elsewhere staff.
+  4. `mv data/scanner.json data/scanner.json.old-host` — DESTRUCTIVE (moves
+     the stale identity aside), operator only.
+  5. `./scripts/run.sh` — the daemon registers a fresh identity (hostname
+     default, e.g. `hertha-shop`) and writes a fresh single-use offer file.
+     (Identity reuse: a config whose secret still matches a terminal you
+     deliberately KEPT is reused as-is — `--register` only mints new.)
+  6. Click the "no scanner" pill in the kiosk browser ON THIS host — the read
+     token is minted to that browser; `scan_events` rows become visible there
+     from then on.
+- **The `-71`/dropout signature is a physical-layer bug — diagnose it loudly
+  (2026-11-17)** — repeated `device descriptor read/64, error -71` at
+  enumeration (17 across 5 plug sessions on ports `1-1` and `1-2` alike) plus
+  a spontaneous `USB disconnect` minutes after a clean attach. It presents as
+  "no scans" only because the device is absent half the time; an empty capture
+  while disconnected is not evidence about the software path. Signature and
+  triage order: `docs/opticon-hardware.md` §5; bus/identity preflight and the
+  recovery ladder: `scripts/usb_host_check.py`. Treat as cable/connector/port
+  until proven otherwise — never paper over it with retries.
 
 ---
 
