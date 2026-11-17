@@ -6,19 +6,27 @@ took its root hubs' ports with it, and every subsequent plug-in produced no
 kernel event. That is the exact failure this script exists to name.
 """
 
+import json
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 
 from scripts.usb_host_check import (
     MODULES,
+    _default_lockfile,
     _opticon_mm_ignore,
     analyze,
     dead_controllers,
     gather_bus_bdf,
+    gather_daemon_pid,
+    gather_device_present,
     gather_power_control,
+    gather_scanner_identity,
+    pairing_recovery_commands,
     parse_host_events,
+    parse_usb_flakiness,
     prevention_commands,
     prevention_permanent_rule,
     prevention_runtime_command,
@@ -58,7 +66,7 @@ def write_modules(root):
     return root
 
 
-def healthy_analyze(tmp_path, **overrides):
+def healthy_analyze(tmp_path, log=None, **overrides):
     rules = tmp_path / "99-opticon-scanner.rules"
     rules.write_text("# present\n")
     kwargs = dict(
@@ -70,7 +78,7 @@ def healthy_analyze(tmp_path, **overrides):
         modules=MODULES,
     )
     kwargs.update(overrides)
-    return analyze(NORMAL_BOOT_LOG, BUS_BDF, **kwargs)
+    return analyze(log or NORMAL_BOOT_LOG, BUS_BDF, **kwargs)
 
 
 # --- controller parsing ------------------------------------------------------
@@ -445,3 +453,344 @@ def test_gather_bus_bdf_maps_buses_to_pci_address(tmp_path):
     (root / "1-1").mkdir()  # non-usbN entries must be ignored
 
     assert gather_bus_bdf(str(root)) == {1: "0000:c3:00.3", 3: "0000:c3:00.4"}
+
+
+# --- USB link flakiness (-71 / enumerate-then-dropout) + scanner-stack identity
+# (glm, 2026-11-17: the real journal of the "enumerated but no scans" incident)
+
+SCANNER_DROPOUT_LOG = [
+    "[79000.000000] usb 1-1: new full-speed USB device number 13 using xhci_hcd",
+    "[79000.100000] usb 1-1: device descriptor read/64, error -71",
+    "[79000.200000] usb 1-1: device descriptor read/64, error -71",
+    "[79500.000000] usb 1-1: new full-speed USB device number 14 using xhci_hcd",
+    "[79500.100000] usb 1-1: device descriptor read/64, error -71",
+    "[79600.000000] usb 1-1: new full-speed USB device number 15 using xhci_hcd",
+    "[79600.100000] usb 1-1: device descriptor read/64, error -71",
+    "[79613.674279] usb 1-1: New USB device found, idVendor=065a, idProduct=a001, bcdDevice= 1.00",
+    "[79613.680000] usb 1-1: New USB device strings: Mfr=1, Product=2, SerialNumber=0",
+    "[79613.744546] hid-generic 0003:065A:A001.0004: input,hidraw3: USB HID v1.11 Keyboard",
+    "[79890.502382] usb 1-1: USB disconnect, device number 15",
+]
+
+LADDER_EXHAUSTED_LOG = [
+    "[80000.000000] usb 1-1: new full-speed USB device number 16 using xhci_hcd",
+    "[80000.100000] usb 1-1: device descriptor read/64, error -71",
+    "[80000.200000] usb 1-1: device descriptor read/64, error -71",
+    "[80000.300000] usb 1-1: device descriptor read/64, error -71",
+    "[80000.400000] usb usb1-port1: attempt power cycle",
+]
+
+FOREIGN_TERMINAL = "pentacosiarca-ThinkPad-T14s-Gen-4"
+SECRET = "S" * 43
+PAIRING_CODE = "ABCD2345"
+
+
+def build_identity_stack(tmp_path, *, config_terminal=FOREIGN_TERMINAL,
+                         offer_terminal="hertha-shop",
+                         registered=(FOREIGN_TERMINAL,),
+                         last_seen="2026-11-03 05:56:54.846862"):
+    """A scratch data dir shaped like the live one (bug A): config pairing
+    as one terminal, an offer naming another, an hcrm.db holding `registered`.
+    All files carry real secret/pairing-code values — the tripwire is that
+    NO finding ever echoes them."""
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "scanner.json").write_text(json.dumps(
+        {"terminal_id": config_terminal, "secret": SECRET}))
+    (data / "scanner-pairing.json").write_text(json.dumps(
+        {"terminal_id": offer_terminal, "pairing_code": PAIRING_CODE}))
+    db = data / "hcrm.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE terminals (terminal_id TEXT, secret_hash TEXT,"
+                 " pairing_code_hash TEXT, token_hash TEXT, last_seen_at TEXT)")
+    for tid in registered:
+        conn.execute("INSERT INTO terminals VALUES (?, 'h', 'h', 'tok', ?)",
+                     (tid, last_seen))
+    conn.commit()
+    conn.close()
+    return gather_scanner_identity(str(data))
+
+
+# --- parse_usb_flakiness -------------------------------------------------------
+
+def test_parse_usb_flakiness_flags_the_real_dropout():
+    out = parse_usb_flakiness(SCANNER_DROPOUT_LOG)
+    assert out["descriptor_errors"] == 4
+    assert out["proto_errors"] == 4
+    assert out["opticon_port"] == "1-1"
+    assert out["opticon_enumerated_at"] == 7
+    assert out["opticon_disconnected_at"] == 10
+    assert out["opticon_enumerated_at"] < out["opticon_disconnected_at"]
+
+
+def test_parse_usb_flakiness_a_replug_resets_the_dropout_counter():
+    """A disconnect followed by a NEW enumeration is a replug, not a
+    dropout — only a disconnect AFTER the last attach counts."""
+    lines = SCANNER_DROPOUT_LOG + [
+        "[90000.000000] usb 1-1: New USB device found, idVendor=065a, idProduct=a001",
+        "[90000.010000] input: Opticon Opticon USB Barcode Reader",
+    ]
+    out = parse_usb_flakiness(lines)
+    assert out["opticon_disconnected_at"] is None
+    assert out["opticon_enumerated_at"] > SCANNER_DROPOUT_LOG.index(
+        SCANNER_DROPOUT_LOG[-1])
+
+
+def test_parse_usb_flakiness_ignores_other_devices_disconnects():
+    lines = SCANNER_DROPOUT_LOG + [
+        "[90001.000000] usb 1-4: USB disconnect, device number 3",
+    ]
+    assert parse_usb_flakiness(lines)["opticon_disconnected_at"] == 10
+
+
+def test_parse_usb_flakiness_silent_on_healthy_log():
+    out = parse_usb_flakiness(NORMAL_BOOT_LOG)
+    assert out == {"descriptor_errors": 0, "proto_errors": 0,
+                   "opticon_port": None, "opticon_enumerated_at": None,
+                   "opticon_disconnected_at": None}
+
+
+# --- the flakiness findings ----------------------------------------------------
+
+def test_analyze_warns_on_enumerate_then_dropout(tmp_path):
+    findings = healthy_analyze(tmp_path, log=SCANNER_DROPOUT_LOG)
+    warn = [f for f in findings if "dropped off the USB bus" in f.title]
+    assert len(warn) == 1
+    assert "port 1-1" in warn[0].title
+    assert "NOT power" in warn[0].detail and "cable" in warn[0].detail
+    assert any("journalctl" in c for c in warn[0].fix)
+    assert any("known-good cable" in c for c in warn[0].fix)
+
+
+def test_analyze_warns_when_the_retry_ladder_exhausts(tmp_path):
+    findings = healthy_analyze(tmp_path, log=LADDER_EXHAUSTED_LOG,
+                               device_present=False)
+    warn = [f for f in findings if "retry-fragile" in f.title]
+    assert len(warn) == 1
+    assert "no successful scanner enumeration" in warn[0].title
+    # device_present True (attached) must NOT fire the "looks absent" finding
+    assert healthy_analyze(tmp_path, log=LADDER_EXHAUSTED_LOG,
+                           device_present=True) == []
+
+
+def test_analyze_ladder_exhausted_needs_three_errors(tmp_path):
+    two = LADDER_EXHAUSTED_LOG[:3]  # only 2 descriptor errors
+    assert healthy_analyze(tmp_path, log=two, device_present=False) == []
+
+
+# --- the identity findings -----------------------------------------------------
+
+def test_analyze_flags_the_foreign_terminal_with_the_delete_ladder(tmp_path):
+    identity = build_identity_stack(tmp_path)
+    findings = healthy_analyze(tmp_path, identity=identity,
+                               device_present=False, daemon_pid=234104,
+                               hostname="hertha-shop")
+    foreign = [f for f in findings if "ANOTHER host's terminal" in f.title]
+    assert len(foreign) == 1
+    assert FOREIGN_TERMINAL in foreign[0].title
+    assert "hertha-shop" in foreign[0].detail
+    assert "no browser on this host can poll" in foreign[0].detail
+    fix = foreign[0].fix
+    delete = [c for c in fix if c.startswith("curl -X DELETE")]
+    assert len(delete) == 1 and FOREIGN_TERMINAL in delete[0]
+    assert "DESTRUCTIVE" in delete[0]
+    # the ladder's order: stop the daemon, DELETE, move the config, register,
+    # then the pill — element indices, not substring indices (comments carry
+    # the same words; the existing recovery test's mutation-probed pattern)
+    def idx(pred):
+        hits = [i for i, c in enumerate(fix) if pred(c)]
+        assert hits
+        return hits[0]
+    assert idx(lambda c: c.startswith("kill ")) < \
+        idx(lambda c: c.startswith("curl -X DELETE")) < \
+        idx(lambda c: c.startswith("mv ")) < \
+        idx(lambda c: c.startswith("uv run python scripts/scanner_daemon")) < \
+        idx(lambda c: c.startswith("# then click")) < len(fix)
+
+
+def test_analyze_flags_the_stale_offer_file(tmp_path):
+    identity = build_identity_stack(tmp_path)
+    findings = healthy_analyze(tmp_path, identity=identity,
+                               device_present=False,
+                               hostname="hertha-shop")
+    offer = [f for f in findings if "pairing offer is stale" in f.title]
+    assert len(offer) == 1
+    assert "'hertha-shop'" in offer[0].title
+    assert "401 bad_pairing" in offer[0].detail
+    assert "409 already_registered" in offer[0].detail
+    assert "three-way" in offer[0].detail
+
+
+def test_analyze_flags_config_unknown_to_the_server(tmp_path):
+    identity = build_identity_stack(
+        tmp_path, config_terminal="ghost-terminal", registered=())
+    findings = healthy_analyze(tmp_path, identity=identity,
+                               device_present=True, hostname="hertha-shop")
+    unknown = [f for f in findings
+               if "terminal the server does not know" in f.title]
+    assert len(unknown) == 1
+    assert "ghost-terminal" in unknown[0].title
+    assert "401" in unknown[0].detail
+    # the config is NOT registered — the ladder must not print a DELETE
+    assert not any("DELETE" in c for c in unknown[0].fix)
+    # the offer names an (unregistered) terminal too: still one stale-offer
+    # finding, and its ladder equally has no DELETE (nothing to free)
+    offer = [f for f in findings if "pairing offer is stale" in f.title]
+    assert len(offer) == 1
+    assert not any("DELETE" in c for c in offer[0].fix)
+
+
+def test_analyze_flags_device_absent_when_the_stack_exists(tmp_path):
+    identity = build_identity_stack(
+        tmp_path, config_terminal="hertha-shop", offer_terminal="hertha-shop",
+        registered=("hertha-shop",))
+    findings = healthy_analyze(tmp_path, identity=identity,
+                               device_present=False, hostname="hertha-shop")
+    absent = [f for f in findings if "no Opticon device is on the USB bus"
+              in f.title]
+    assert len(absent) == 1
+    # consistent identity otherwise: exactly this one warning, nothing else
+    assert [f.severity for f in findings] == ["warning"]
+
+
+def test_analyze_daemon_running_is_info_and_names_the_pid(tmp_path):
+    identity = build_identity_stack(
+        tmp_path, config_terminal="hertha-shop", offer_terminal="hertha-shop",
+        registered=("hertha-shop",))
+    findings = healthy_analyze(tmp_path, identity=identity,
+                               device_present=True, daemon_pid=234104,
+                               hostname="hertha-shop")
+    info = [f for f in findings if f.severity == "info"]
+    assert len(info) == 1
+    assert "234104" in info[0].title and "scanner_daemon" in info[0].title
+    assert "EVIOCGRAB" in info[0].detail and "lock" in info[0].detail
+    assert any(c == "kill 234104  # only to capture or re-register — "
+                "the lock and the grab release instantly" for c in info[0].fix)
+    # a running daemon is normal operation: it must not affect the exit-code
+    # contract (info never counts as a problem)
+    assert not any(f.severity in ("error", "warning") for f in findings)
+
+
+def test_analyze_stays_silent_without_the_scanner_stack(tmp_path):
+    """Host-genericity: identity facts all absent (a host without the app
+    stack, or an unreadable one) produce NO findings — fail-silent, never a
+    false one."""
+    empty_identity = {"config_terminal_id": None, "offer_terminal_id": None,
+                      "terminals": None, "config_path": "/x", "offer_path": "/y"}
+    assert healthy_analyze(tmp_path, identity=empty_identity,
+                           device_present=False) == []
+    assert healthy_analyze(tmp_path, identity=None, device_present=None,
+                           daemon_pid=None, hostname=None) == []
+
+
+def test_identity_findings_never_leak_secrets(tmp_path):
+    """The doctrine tripwire: scanner.json holds the write secret, the offer
+    file the single-use pairing code — neither may appear in any finding."""
+    identity = build_identity_stack(tmp_path)
+    findings = healthy_analyze(tmp_path, log=SCANNER_DROPOUT_LOG,
+                               identity=identity, device_present=False,
+                               daemon_pid=234104, hostname="hertha-shop")
+    rendered = json.dumps([f.__dict__ for f in findings])
+    assert SECRET not in rendered
+    assert PAIRING_CODE not in rendered
+    assert "pairing_code" not in rendered and "secret" not in rendered
+
+
+# --- the read-only gathers -----------------------------------------------------
+
+def test_gather_scanner_identity_reads_a_scratch_data_dir(tmp_path):
+    identity = build_identity_stack(tmp_path)
+    assert identity["config_terminal_id"] == FOREIGN_TERMINAL
+    assert identity["offer_terminal_id"] == "hertha-shop"
+    assert identity["config_path"] == str(tmp_path / "data" / "scanner.json")
+    assert identity["terminals"] == [
+        {"terminal_id": FOREIGN_TERMINAL, "paired": True,
+         "last_seen": "2026-11-03 05:56:54.846862"}]
+
+
+def test_gather_scanner_identity_is_read_only(tmp_path):
+    """The ./data doctrine as a tripwire: the DB bytes are unchanged and no
+    journal/WAL sidecar is created by a read-only open (the sidecars that
+    exist on the live host belong to the running server, not to us)."""
+    identity = build_identity_stack(tmp_path)
+    db = tmp_path / "data" / "hcrm.db"
+    before = db.read_bytes()
+    assert identity["terminals"]  # the read really happened
+    assert db.read_bytes() == before
+    assert not list((tmp_path / "data").glob("hcrm.db-*"))
+
+
+def test_gather_scanner_identity_fail_silent(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    # empty dir: no config, no offer, no db
+    empty = gather_scanner_identity(str(data))
+    assert empty["config_terminal_id"] is None
+    assert empty["offer_terminal_id"] is None
+    assert empty["terminals"] is None
+    # garbage files: unreadable JSON and a non-sqlite hcrm.db
+    (data / "scanner.json").write_text("not json{")
+    (data / "scanner-pairing.json").write_text("")
+    (data / "hcrm.db").write_bytes(b"garbage not a database")
+    broken = gather_scanner_identity(str(data))
+    assert broken["config_terminal_id"] is None
+    assert broken["offer_terminal_id"] is None
+    assert broken["terminals"] is None
+
+
+def test_gather_daemon_pid_detects_live_stale_and_foreign_locks(
+        tmp_path, monkeypatch):
+    live = tmp_path / "live.lock"
+    live.write_text(f"{os.getpid()}\n")
+    assert gather_daemon_pid(str(live)) == os.getpid()
+    # stale residue: flock was released when the holder died
+    stale = tmp_path / "stale.lock"
+    stale.write_text("999999\n")
+    assert gather_daemon_pid(str(stale)) is None
+    # another user's daemon: PermissionError means alive, keep the pid
+    def refuse(pid, sig):
+        raise PermissionError(13, "permission denied")
+    monkeypatch.setattr("scripts.usb_host_check.os.kill", refuse)
+    assert gather_daemon_pid(str(live)) == os.getpid()
+    # absent / garbage lockfiles
+    assert gather_daemon_pid(str(tmp_path / "absent.lock")) is None
+    junk = tmp_path / "junk.lock"
+    junk.write_text("not a pid\n")
+    assert gather_daemon_pid(str(junk)) is None
+
+
+def test_default_lockfile_matches_the_daemon():
+    """The two-implementations-one-test pattern (same as the pairing file):
+    this tool's lock path must resolve exactly like the daemon's, or the
+    PID detection would read the wrong file."""
+    from scripts.scanner_daemon import _default_lockfile_path
+    assert _default_lockfile() == str(_default_lockfile_path())
+
+
+def test_gather_device_present_scans_an_injected_sysfs(tmp_path):
+    sysfs = tmp_path / "devices"
+    (sysfs / "1-1").mkdir(parents=True)
+    (sysfs / "1-1" / "idVendor").write_text("065a\n")
+    assert gather_device_present(str(sysfs)) is True
+    # case-insensitive hex, other devices ignored
+    (sysfs / "1-1" / "idVendor").write_text("065A\n")
+    assert gather_device_present(str(sysfs)) is True
+    (sysfs / "1-1" / "idVendor").write_text("8087\n")
+    assert gather_device_present(str(sysfs)) is False
+    # unreadable sysfs: None (fail-silent), never a false False
+    assert gather_device_present(str(tmp_path / "nope")) is None
+
+
+def test_recovery_ladder_omits_delete_without_a_registered_terminal():
+    cmds = pairing_recovery_commands(
+        None, config_path="/data/scanner.json",
+        daemon_pid=None, delete_terminal=True)
+    assert not any("DELETE" in c for c in cmds)
+    assert any(c.startswith("# stop the running daemon") for c in cmds)
+    assert any(c.startswith("mv ") for c in cmds)
+    assert any("--register --register-only" in c for c in cmds)
+    # without a config path the register step still names the conventional one
+    cmds = pairing_recovery_commands(
+        "some-terminal", config_path=None,
+        daemon_pid=None, delete_terminal=False)
+    assert any("<data>/scanner.json" in c for c in cmds)

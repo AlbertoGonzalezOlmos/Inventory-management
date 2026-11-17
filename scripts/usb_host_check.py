@@ -33,14 +33,34 @@ nothing happens":
    users); ``/dev/ttyACM*`` is usually ``root:dialout`` already.
 4. **Kernel modules** for each Opticon personality present on disk.
 5. **WSL USB passthrough**, delegated to ``scripts/opticon_detect.py``.
+6. **Scanner-stack pairing identity** (read-only): the daemon config's
+   ``terminal_id`` vs the server's ``terminals`` table vs the one-click
+   pairing offer file. A stale three-way mismatch — a config that forwards
+   as ANOTHER host's terminal, or an offer naming a terminal the server
+   does not know — lands scans in a queue no browser on this host can
+   read (the kiosk pill answers 401 ``bad_pairing``). The finding prints
+   the exact recovery commands; every destructive step (stop the daemon,
+   ``DELETE /api/scanner/terminalss/<id>``, move the config aside) is an
+   OPERATOR command — this tool never writes anything, and secrets or
+   pairing codes are never read out or printed.
+7. **USB link flakiness**: repeated ``device descriptor read/64, error
+   -71`` and enumerate-then-dropout in the kernel log — the physical-layer
+   signature (cable/connector; the port telemetry excludes power and dead
+   ports) behind both "the scanner looks absent" (retry-ladder exhaustion)
+   and "attached but silent" (dropout mid-session). Also reported: a
+   running ``scanner_daemon`` (it holds the single-instance lock and the
+   exclusive evdev grab — INFO, not a fault) and a configured stack with
+   no Opticon device currently on the bus.
 
 Usage::
 
     uv run python scripts/usb_host_check.py            # human-readable
     uv run python scripts/usb_host_check.py --json     # machine-readable
 
-Exit codes: 0 = no problems found, 1 = at least one problem found,
-2 = cannot inspect (not Linux, or dmesg unreadable).
+Exit codes: 0 = no problems found, 1 = at least one problem found
+(findings of severity error OR warning — the pairing-identity and
+link-flakiness findings are warnings), 2 = cannot inspect (not Linux, or
+dmesg unreadable).
 
 Everything decision-making is a pure function over injectable inputs
 (``tests/test_usb_host_check.py`` runs the real failure log from this
@@ -54,9 +74,15 @@ import glob
 import json
 import os
 import re
+import shlex
+import socket
+import sqlite3
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from urllib.parse import quote as _urlquote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -125,6 +151,60 @@ def parse_host_events(lines) -> tuple[dict, dict, list, dict]:
             # controller death that is followed by its devices detaching.
             last_enum[int(m.group(1))] = i
     return deaths, last_enum, precursors, last_alive
+
+
+# --- USB link flakiness (the -71 / enumerate-then-dropout signature) ---------
+
+#: Full-speed devices whose first descriptor reads keep failing with EPROTO
+#: (-71) never finish enumeration; the kernel retries address rounds and
+#: eventually gives up ("attempt power cycle") — the device then looks
+#: absent even though it is plugged in.
+_DESC_ERR_RE = re.compile(r"device descriptor read/\d+, error (-\d+)")
+
+#: The Opticon attach (idVendor 065a) — the one device this repo cares about.
+_ENUM_OPTICON_RE = re.compile(r"usb (\S+): New USB device found, idVendor=065a\b",
+                              re.I)
+
+_USB_DISCONNECT_RE = re.compile(r"usb (\S+): USB disconnect")
+
+
+def parse_usb_flakiness(lines) -> dict:
+    """Scan kernel lines for the scanner's link signature. Pure; no I/O.
+
+    Returns ``{"descriptor_errors": total descriptor-read errors,
+    "proto_errors": the EPROTO (-71) subset, "opticon_port": the port of
+    the LAST 065a enumeration, "opticon_enumerated_at": its line index,
+    "opticon_disconnected_at": line index of a disconnect on that port
+    AFTER the enumeration (None when the device is still attached, or was
+    never seen)}``. A disconnect BEFORE the latest enumeration is a replug,
+    not a dropout — the counter resets on every successful attach.
+    """
+    descriptor_errors = 0
+    proto_errors = 0
+    opticon_port = None
+    enumerated_at = None
+    disconnected_at = None
+    for i, line in enumerate(lines):
+        m = _DESC_ERR_RE.search(line)
+        if m:
+            descriptor_errors += 1
+            if m.group(1) == "-71":
+                proto_errors += 1
+            continue
+        m = _ENUM_OPTICON_RE.search(line)
+        if m:
+            opticon_port, enumerated_at = m.group(1), i
+            disconnected_at = None  # replug: only a LATER dropout counts
+            continue
+        m = _USB_DISCONNECT_RE.search(line)
+        if (m and opticon_port is not None and disconnected_at is None
+                and m.group(1) == opticon_port):
+            disconnected_at = i
+    return {"descriptor_errors": descriptor_errors,
+            "proto_errors": proto_errors,
+            "opticon_port": opticon_port,
+            "opticon_enumerated_at": enumerated_at,
+            "opticon_disconnected_at": disconnected_at}
 
 
 def dead_controllers(deaths: dict, last_enum: dict, bus_bdf: dict,
@@ -225,6 +305,158 @@ def recovery_commands(bdf: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# Scanner-stack identity (READ-ONLY: this tool never writes ./data, never
+# reads a secret out of the config, and never prints a pairing code)
+# --------------------------------------------------------------------------
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _default_data_dir() -> str:
+    """`$HCRM_DATA_DIR` or `<repo>/data` — the same resolution the daemon's
+    default pairing file and app.database.DATA_DIR use."""
+    return os.environ.get("HCRM_DATA_DIR", os.path.join(REPO_ROOT, "data"))
+
+
+def _read_terminals_read_only(db_path: str) -> list[dict] | None:
+    """The server's ``terminals`` table, opened strictly read-only.
+
+    ``file:…?mode=ro`` guarantees no journal/WAL sidecar is ever created —
+    the repo doctrine is that nothing runs against ``./data`` read-write.
+    Returns None (fail-silent) when the DB is absent, unreadable, or has a
+    different schema: a host without the app stack must produce no finding,
+    never a false one.
+    """
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{_urlquote(db_path)}?mode=ro",
+                               uri=True, timeout=2.0)
+        try:
+            rows = conn.execute(
+                "SELECT terminal_id, token_hash, last_seen_at FROM terminals "
+                "ORDER BY terminal_id").fetchall()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return None
+    return [{"terminal_id": row[0], "paired": row[1] is not None,
+             "last_seen": str(row[2]) if row[2] is not None else None}
+            for row in rows]
+
+
+def gather_scanner_identity(data_dir: str | None = None) -> dict:
+    """Config/offer/server identity facts, all read-only, fail-silent.
+
+    ``{config_path, config_terminal_id, offer_path, offer_terminal_id,
+    terminals}`` where ``terminals`` is None when no readable DB exists.
+    Only ``terminal_id`` is extracted from the JSON files — the secret and
+    the pairing code are deliberately never read out (nothing downstream
+    may print them)."""
+    base = str(Path(data_dir) if data_dir is not None else Path(_default_data_dir()))
+    out: dict = {
+        "config_path": os.path.join(base, "scanner.json"),
+        "config_terminal_id": None,
+        "offer_path": os.path.join(base, "scanner-pairing.json"),
+        "offer_terminal_id": None,
+        "terminals": None,
+    }
+    for key, name in (("config_terminal_id", "scanner.json"),
+                      ("offer_terminal_id", "scanner-pairing.json")):
+        try:
+            with open(os.path.join(base, name), encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        terminal_id = doc.get("terminal_id") if isinstance(doc, dict) else None
+        if isinstance(terminal_id, str) and terminal_id:
+            out[key] = terminal_id
+    out["terminals"] = _read_terminals_read_only(
+        os.path.join(base, "hcrm.db"))
+    return out
+
+
+def _default_lockfile() -> str:
+    """The daemon's DaemonLock path (`scanner_daemon._default_lockfile_path`
+    parity — read-only here: this tool NEVER flocks, so a running daemon is
+    never disturbed)."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    return os.path.join(base, "hcrm-scanner-daemon.lock")
+
+
+def gather_daemon_pid(lock_path: str | None = None) -> int | None:
+    """The running daemon's PID from its lockfile, or None.
+
+    flock is released by the kernel when the holder dies, so a leftover
+    file with a dead PID is stale residue, not a running daemon."""
+    try:
+        with open(lock_path or _default_lockfile(), encoding="ascii") as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        return pid  # alive, just another user's daemon
+    except OSError:
+        return None
+    return pid
+
+
+def gather_device_present(sysfs_root: str = "/sys/bus/usb/devices") -> bool | None:
+    """Any 065a device on the bus right now (None = sysfs unreadable)."""
+    try:
+        names = os.listdir(sysfs_root)
+    except OSError:
+        return None
+    for name in names:
+        try:
+            with open(os.path.join(sysfs_root, name, "idVendor"),
+                      encoding="ascii") as fh:
+                if fh.read().strip().lower() == "065a":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def pairing_recovery_commands(config_terminal_id, *, config_path,
+                              daemon_pid, delete_terminal) -> list[str]:
+    """ONE recovery ladder for the stale-identity findings — the same shape
+    README documents for the lost-browser-token recovery, so the daemon's
+    advice, the docs and this tool cannot drift apart. Every destructive
+    step is an OPERATOR command; the DELETE appears only when the config
+    names a REGISTERED terminal (freeing it is the point), and it is flagged
+    as the owner decision it is — the terminal may belong to a machine
+    still in use."""
+    cmds: list[str] = []
+    if daemon_pid:
+        cmds.append(f"kill {daemon_pid}  # stop the running daemon — "
+                    "releases the single-instance lock AND the evdev grab")
+    else:
+        cmds.append("# stop the running daemon first (it holds the lock and "
+                    "the evdev grab): kill <pid>")
+    if delete_terminal and config_terminal_id:
+        cmds.append(
+            f"curl -X DELETE http://127.0.0.1:8000/api/scanner/terminals/"
+            f"{config_terminal_id}  # DESTRUCTIVE, owner decision first (the "
+            "terminal may be a machine in use); loopback, or a staff "
+            "session's bearer token")
+    cfg = shlex.quote(config_path) if config_path else "<data>/scanner.json"
+    if config_path:
+        cmds.append(f"mv {cfg} {cfg}.old-host  # set the stale identity aside "
+                    "so --register mints THIS host's")
+    cmds.append(f"uv run python scripts/scanner_daemon.py --config {cfg} "
+                "--register --register-only  # re-register (writes the "
+                "config + the one-click offer, 0600)")
+    cmds.append("# then click the 'no scanner' pill in the kiosk browser ON "
+                "THIS host — the read token is minted to that browser")
+    return cmds
+
+
+# --------------------------------------------------------------------------
 # Findings
 # --------------------------------------------------------------------------
 
@@ -250,8 +482,18 @@ def analyze(dmesg_lines, bus_bdf: dict, *, udev_rules: str,
             modemmanager_active: bool, opticon_ignore_rule: bool,
             brltty_active: bool, modules_root: str | None,
             modules: dict[str, str] | None = None,
-            power_control: dict[str, str] | None = None) -> list[Finding]:
-    """Turn host facts into a ranked list of findings. Pure; no I/O."""
+            power_control: dict[str, str] | None = None,
+            identity: dict | None = None,
+            device_present: bool | None = None,
+            daemon_pid: int | None = None,
+            hostname: str | None = None) -> list[Finding]:
+    """Turn host facts into a ranked list of findings. Pure; no I/O.
+
+    The scanner-stack kwargs (``identity``/``device_present``/
+    ``daemon_pid``/``hostname``, all default None) are optional on purpose:
+    a host without the app stack must produce no identity findings — the
+    tool stays host-generic. The -71 flakiness signature is parsed from
+    ``dmesg_lines`` unconditionally."""
     findings: list[Finding] = []
 
     deaths, last_enum, precursors, last_alive = parse_host_events(dmesg_lines)
@@ -364,6 +606,157 @@ def analyze(dmesg_lines, bus_bdf: dict, *, udev_rules: str,
                 fix=["install the matching linux-modules package, or use "
                      "the raw-USB backend (scripts/opn2001.py --backend usb)"],
             ))
+
+    # --- USB link flakiness: the -71 / enumerate-then-dropout signature ---
+    flaky = parse_usb_flakiness(dmesg_lines)
+    errors_seen = flaky["proto_errors"] or flaky["descriptor_errors"]
+    if flaky["opticon_disconnected_at"] is not None:
+        findings.append(Finding(
+            severity="warning",
+            title=f"the scanner enumerated, then dropped off the USB bus "
+                  f"(port {flaky['opticon_port']})",
+            detail=f"{errors_seen} descriptor-read error(s) this boot, one "
+                   "successful attach, then a USB disconnect — the "
+                   "physical-layer signature (cable/connector). NOT power "
+                   "and NOT a dead port: over_current_count stays 0 and the "
+                   "same signature shows on every port tried. A flaky link "
+                   "explains both 'the scanner looks absent' (retry-ladder "
+                   "exhaustion on plug) and 'attached but silent' (dropout "
+                   "mid-session).",
+            fix=[
+                "journalctl -k | grep -E 'error -71|USB disconnect'  # the "
+                "signature",
+                "re-plug until the node appears: ls /sys/class/hidraw/",
+                "try the other USB port, then a known-good cable (the device "
+                "works on another host — the host side is the suspect)",
+                "re-run: uv run python scripts/usb_host_check.py",
+            ],
+        ))
+    elif (flaky["descriptor_errors"] >= 3
+          and flaky["opticon_enumerated_at"] is None
+          and device_present is not True):
+        findings.append(Finding(
+            severity="warning",
+            title=f"USB enumeration is retry-fragile: "
+                  f"{errors_seen} descriptor-read errors, no successful "
+                  "scanner enumeration this boot",
+            detail="Each plug burns kernel address rounds; when the retry "
+                   "ladder exhausts (journal: 'attempt power cycle'), the "
+                   "device stays ABSENT — it looks like a dead scanner or a "
+                   "charge-only cable. The signature is physical-layer "
+                   "(cable/connector), not power (over_current_count is 0) "
+                   "and not a dead port.",
+            fix=[
+                "journalctl -k | grep -E 'error -71|new full-speed'  # the "
+                "retry ladder at work",
+                "re-plug until /dev/hidraw* appears "
+                "(scripts/opticon_detect.py says which node)",
+                "try the other USB port, then a known-good cable",
+            ],
+        ))
+
+    # --- a running daemon: plain words, INFO (normal operation, but it
+    # explains why capture tools on the input path see nothing and why a
+    # second daemon refuses to start with a lock error)
+    if daemon_pid:
+        findings.append(Finding(
+            severity="info",
+            title=f"a scanner_daemon is running (PID {daemon_pid})",
+            detail="It holds the single-instance lock AND the exclusive "
+                   "EVIOCGRAB on the scanner's evdev node: capture tools "
+                   "reading the input path see nothing BY DESIGN while it "
+                   "runs (hidraw still receives — it taps below the input "
+                   "layer), and a second daemon will refuse to start with "
+                   "a lock error. The daemon's console owns the scan "
+                   "output.",
+            fix=[f"kill {daemon_pid}  # only to capture or re-register — "
+                  "the lock and the grab release instantly"],
+        ))
+
+    # --- scanner-stack identity (only when the caller gathered facts) ---
+    if identity is not None:
+        config_terminal = identity.get("config_terminal_id")
+        offer_terminal = identity.get("offer_terminal_id")
+        terminals = identity.get("terminals")
+        known = ({t["terminal_id"] for t in terminals}
+                 if terminals is not None else None)
+        stack_present = bool(config_terminal or offer_terminal)
+
+        if device_present is False and stack_present:
+            findings.append(Finding(
+                severity="warning",
+                title="no Opticon device is on the USB bus right now, but a "
+                      "scanner stack is configured on this host",
+                detail="The daemon/bridge has nothing to grab; if the device "
+                       "was attached earlier this boot, the journal shows "
+                       "where it went (see the flakiness finding above, if "
+                       "present).",
+                fix=[
+                    "lsusb | grep -i 065a  # confirm absence",
+                    "re-plug the scanner and re-run "
+                    "uv run python scripts/usb_host_check.py",
+                ],
+            ))
+
+        registered_row = next((t for t in terminals or []
+                               if t["terminal_id"] == config_terminal), None)
+        if (config_terminal and known is not None
+                and registered_row is not None
+                and hostname and config_terminal != hostname):
+            last_seen = registered_row.get("last_seen") or "never"
+            findings.append(Finding(
+                severity="warning",
+                title=f"the daemon config is ANOTHER host's terminal "
+                      f"('{config_terminal}')",
+                detail=f"'{config_terminal}' is registered on the server "
+                       f"(last seen {last_seen}) but this host is "
+                       f"'{hostname}'. The browser read token for that queue "
+                       "was minted on the OLD machine — scans forwarded here "
+                       "land in a queue no browser on this host can poll. "
+                       "This alone makes the kiosk show 'no scanner' even "
+                       "with a perfectly healthy device.",
+                fix=pairing_recovery_commands(
+                    config_terminal,
+                    config_path=identity.get("config_path"),
+                    daemon_pid=daemon_pid, delete_terminal=True),
+            ))
+        elif (config_terminal and known is not None
+              and registered_row is None):
+            findings.append(Finding(
+                severity="warning",
+                title=f"the daemon config names a terminal the server does "
+                      f"not know ('{config_terminal}')",
+                detail="Ingest will answer 401: the terminal was deleted "
+                       "server-side, or the config was copied from a host "
+                       "whose registration no longer exists.",
+                fix=pairing_recovery_commands(
+                    config_terminal,
+                    config_path=identity.get("config_path"),
+                    daemon_pid=daemon_pid, delete_terminal=False),
+            ))
+
+        if (offer_terminal and known is not None
+                and offer_terminal not in known):
+            divergence = ""
+            if config_terminal and offer_terminal != config_terminal:
+                divergence = (" It also disagrees with the config's terminal "
+                              f"'{config_terminal}' — a three-way "
+                              "config/offer/server mismatch.")
+            findings.append(Finding(
+                severity="warning",
+                title=f"the one-click pairing offer is stale: terminal "
+                      f"'{offer_terminal}' is not registered on the server",
+                detail="Clicking the kiosk's 'no scanner' pill will answer "
+                       "401 bad_pairing, and re-running --register on the "
+                       "stale config would 409 already_registered. The "
+                       "offer file is overwritten atomically by the next "
+                       "successful --register." + divergence,
+                fix=pairing_recovery_commands(
+                    config_terminal,
+                    config_path=identity.get("config_path"),
+                    daemon_pid=daemon_pid,
+                    delete_terminal=registered_row is not None),
+            ))
     return findings
 
 
@@ -429,7 +822,6 @@ def _opticon_mm_ignore(udev_dirs=("/etc/udev/rules.d", "/usr/lib/udev/rules.d",
     return False
 
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UDEV_RULES = "/etc/udev/rules.d/99-opticon-scanner.rules"
 
 #: Modules each Opticon personality needs on disk (see docs/opticon-hardware.md).
@@ -478,6 +870,13 @@ def gather() -> dict:
         "modules_root": modules_root,
         "modules": MODULES,
         "uname": uname,
+        # scanner-stack facts — all read-only, fail-silent (a host without
+        # the app stack yields identity with terminal ids None + terminals
+        # None, which produces no findings)
+        "identity": gather_scanner_identity(),
+        "device_present": gather_device_present(),
+        "daemon_pid": gather_daemon_pid(),
+        "hostname": socket.gethostname(),
     }
 
 
@@ -510,7 +909,11 @@ def main(argv=None) -> int:
         opticon_ignore_rule=facts["opticon_ignore_rule"],
         brltty_active=facts["brltty_active"],
         modules_root=facts["modules_root"], modules=facts["modules"],
-        power_control=facts.get("power_control"))
+        power_control=facts.get("power_control"),
+        identity=facts.get("identity"),
+        device_present=facts.get("device_present"),
+        daemon_pid=facts.get("daemon_pid"),
+        hostname=facts.get("hostname"))
 
     if args.json:
         print(json.dumps({"kernel": facts["uname"],
