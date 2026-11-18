@@ -33,6 +33,7 @@ from scripts.scanner_daemon import (
     discover_event_device,
     discover_event_devices,
     event_size,
+    identity_findings,
     main,
     parse_input_event,
     read_scans,
@@ -405,7 +406,9 @@ def _unpack(stream, tv_size=16):
 # tests/test_scanner_daemon_forward.py): fake sysfs tree, recording grab
 # triple, a recording post stub, and a reader that stops the daemon the way
 # SIGINT does. Each finding prints one `scanner_daemon: MARKER: text` line
-# and is non-fatal — unless the --require-host-identity gate is on.
+# and is non-fatal — unless the --require-host-identity gate sees a
+# DELIVERY-breaking finding (a config that forwards as an identity this host
+# does not own); offer-file drift is loud but never fatal.
 
 SECRET = "S" * 43
 PAIRING_CODE = "7Q2MB4XW"  # the 8-char Crockford shape the API mints
@@ -420,6 +423,8 @@ class RecordingPost:
 
     def __call__(self, url, headers, body):
         self.calls.append({"url": url, "body": dict(body)})
+        if url.endswith("/api/scanner/terminals"):
+            return {"pairing_code": PAIRING_CODE}
         return {}
 
     def codes(self):
@@ -498,8 +503,9 @@ def test_main_identity_warn_is_suppressed_by_explicit_terminal_id(tmp_path,
 def test_main_require_host_identity_exits_nonzero(tmp_path, monkeypatch,
                                                   capsys):
     """The gate (--require-host-identity or the env, truthy per
-    app.security._env_flag) exits 1 on any finding BEFORE register or grab:
-    no fd opened, nothing POSTed. A non-truthy value keeps the default."""
+    app.security._env_flag) exits 1 on the DELIVERY-breaking finding (a
+    foreign host identity) BEFORE register or grab: no fd opened, nothing
+    POSTed. A non-truthy value keeps the default."""
     cfg = _identity_config(tmp_path, "copied-from-old-laptop")
     for argv, env in [(["--require-host-identity"], None)] + [
             ([], value) for value in ("1", "true", "yes", "on")]:
@@ -549,3 +555,163 @@ def test_startup_identity_warn_never_prints_the_secret(tmp_path, capsys):
     assert SECRET not in captured.err + captured.out
     assert PAIRING_CODE not in captured.err + captured.out
     assert code == 0
+
+
+# --- the narrowed gate, the case-insensitive host match and the malformed-
+# --- offer contract (review fixes, 688eab4) -----------------------------------
+# The gate refuses ONLY on the delivery-breaking finding: a config that
+# forwards as an identity this host does not own. Offer-file drift stays
+# loud (FAIL) but is never fatal. terminal_id vs hostname compares
+# case-insensitively (the server accepts mixed case, so 'Hertha-Shop' and
+# 'hertha-shop' are the SAME identity). An explicit --terminal-id suppresses
+# the check only when it AGREES with the loaded config: a differing one
+# cannot change what is forwarded and must not silence the warning.
+
+
+def test_main_hostname_match_is_case_insensitive_and_the_gate_stays_quiet(
+        tmp_path, capsys):
+    """'Hertha-Shop' == 'hertha-shop': no WARN at all, and the gate must NOT
+    refuse (exit 0). A true mismatch (different words, not just case) still
+    warns."""
+    cfg = _identity_config(tmp_path, "hertha-shop")
+    save_pairing_file(tmp_path / "offer.json", "hertha-shop", PAIRING_CODE)
+    code, _fake, post = _run_startup(
+        tmp_path, cfg, hostname="Hertha-Shop",
+        argv_extra=["--require-host-identity"])
+    err = capsys.readouterr().err
+    assert "WARN" not in err and "refusing" not in err
+    assert code == 0 and post.codes() == ["8412345678905"]
+    # the true mismatch still warns (and the WARN names the real host)
+    cfg2 = _identity_config(tmp_path, "copied-from-old-laptop")
+    save_pairing_file(tmp_path / "offer.json", "copied-from-old-laptop",
+                      PAIRING_CODE)
+    code, _fake, post = _run_startup(tmp_path, cfg2, hostname="Hertha-Shop")
+    err = capsys.readouterr().err
+    assert ("scanner_daemon: WARN: config identity 'copied-from-old-laptop' "
+            "is NOT this host ('Hertha-Shop')") in err
+    assert code == 0 and post.codes() == ["8412345678905"]
+
+
+def test_main_offer_drift_is_loud_but_never_fatal_under_the_gate(
+        tmp_path, monkeypatch, capsys):
+    """(b) a stale offer file is pairing paperwork: its FAIL is printed, but
+    even the env-armed gate must NOT refuse — only a foreign host identity
+    is delivery-breaking."""
+    monkeypatch.setenv(GATE_ENV, "1")
+    cfg = _identity_config(tmp_path, "counter-1")
+    save_pairing_file(tmp_path / "offer.json", "other-terminal", PAIRING_CODE)
+    code, fake, post = _run_startup(tmp_path, cfg, hostname="counter-1")
+    err = capsys.readouterr().err
+    assert ("scanner_daemon: FAIL: offer file names terminal 'other-terminal' "
+            "but the daemon config is 'counter-1'") in err
+    assert "refusing" not in err
+    assert code == 0 and post.codes() == ["8412345678905"]
+
+
+def test_main_differing_terminal_id_does_not_disarm_the_check(tmp_path,
+                                                              capsys):
+    """(c) --terminal-id cannot change what is forwarded (the config does),
+    so a DIFFERING one must not suppress the check: the foreign config still
+    warns and still refuses under the gate."""
+    cfg = _identity_config(tmp_path, "copied-from-old-laptop")
+    save_pairing_file(tmp_path / "offer.json", "copied-from-old-laptop",
+                      PAIRING_CODE)
+    code, fake, post = _run_startup(
+        tmp_path, cfg, hostname="hertha-shop",
+        argv_extra=["--terminal-id", "counter-1", "--require-host-identity"])
+    err = capsys.readouterr().err
+    assert "scanner_daemon: WARN: config identity 'copied-from-old-laptop'" in err
+    assert "require-host-identity: refusing to run" in err
+    assert code == 1 and fake.opened == [] and post.calls == []
+
+
+def test_main_agreeing_terminal_id_suppresses_the_check_and_the_gate(
+        tmp_path, capsys):
+    """(c) an explicit --terminal-id that AGREES with the config is the
+    operator's acknowledgment — the whole startup check (and with it the
+    gate) stays silent."""
+    cfg = _identity_config(tmp_path, "copied-from-old-laptop")
+    save_pairing_file(tmp_path / "offer.json", "copied-from-old-laptop",
+                      PAIRING_CODE)
+    code, _fake, post = _run_startup(
+        tmp_path, cfg, hostname="hertha-shop",
+        argv_extra=["--terminal-id", "copied-from-old-laptop",
+                    "--require-host-identity"])
+    err = capsys.readouterr().err
+    assert "WARN: config identity" not in err and "refusing" not in err
+    assert code == 0 and post.codes() == ["8412345678905"]
+
+
+@pytest.mark.parametrize(("blob", "offer_tid"), [
+    ("[1, 2]", None),
+    ("{}", None),
+    ('{"terminal_id": 42}', 42),
+    ('{"terminal_id": ""}', ""),
+])
+def test_identity_findings_malformed_offer_keeps_todays_finding(blob,
+                                                                offer_tid):
+    """(d) D6: a PARSED-but-malformed offer still names what it holds — the
+    same A finding the pre-refactor code printed — and is never confused
+    with an absent offer (which has nothing to say: [])."""
+    config = {"terminal_id": "counter-1", "secret": SECRET}
+    parsed = json.loads(blob)
+    assert identity_findings(config, parsed, "counter-1") == [
+        ("FAIL", f"offer file names terminal {offer_tid!r} but the daemon "
+                 "config is 'counter-1' — the pill would pair an identity "
+                 "this daemon does not hold")]
+    assert identity_findings(config, None, "counter-1") == []
+
+
+@pytest.mark.parametrize(("blob", "offer_tid"), [
+    ("[1, 2]", None),
+    ("{}", None),
+    ('{"terminal_id": 42}', 42),
+    ('{"terminal_id": ""}', ""),
+])
+def test_main_malformed_offer_stays_loud_at_startup(tmp_path, blob, offer_tid,
+                                                    capsys):
+    """(d) the same contract on the startup surface: the malformed offer's
+    FAIL is printed (non-fatal), never swallowed as if no offer existed."""
+    cfg = _identity_config(tmp_path, "counter-1")
+    (tmp_path / "offer.json").write_text(blob)
+    code, _fake, post = _run_startup(tmp_path, cfg, hostname="counter-1")
+    err = capsys.readouterr().err
+    assert (f"scanner_daemon: FAIL: offer file names terminal {offer_tid!r} "
+            "but the daemon config is 'counter-1'") in err
+    assert code == 0 and post.codes() == ["8412345678905"]
+
+
+def test_main_healthy_identity_with_the_gate_runs_and_prints_nothing(
+        tmp_path, capsys):
+    """(e) the missing positive case: everything agrees → the check prints
+    NOTHING, the gate stays quiet, and the daemon forwards normally."""
+    cfg = _identity_config(tmp_path, "hertha-shop")
+    save_pairing_file(tmp_path / "offer.json", "hertha-shop", PAIRING_CODE)
+    code, _fake, post = _run_startup(tmp_path, cfg, hostname="hertha-shop",
+                                     argv_extra=["--require-host-identity"])
+    err = capsys.readouterr().err
+    assert "WARN" not in err and "FAIL" not in err and "refusing" not in err
+    assert code == 0 and post.codes() == ["8412345678905"]
+
+
+def test_main_register_modes_do_not_run_the_startup_check(tmp_path, capsys):
+    """(f) --register / --register-only are registration modes: a stale
+    config is INPUT, not a finding — the check is skipped even where it
+    would warn and refuse."""
+    for extra in (["--register"], ["--register-only"]):
+        cfg = _identity_config(tmp_path, "copied-from-old-laptop")
+        save_pairing_file(tmp_path / "offer.json", "copied-from-old-laptop",
+                          PAIRING_CODE)
+        code, fake, post = _run_startup(
+            tmp_path, cfg, hostname="hertha-shop",
+            argv_extra=[*extra, "--require-host-identity"])
+        err = capsys.readouterr().err
+        assert "WARN: config identity" not in err and "refusing" not in err
+        assert code == 0
+        if extra == ["--register"]:
+            assert any(c["url"].endswith("/api/scanner/terminals")
+                       for c in post.calls), extra
+        else:
+            # --register-only with an existing config exits before anything
+            # else happens: no grab, no POST — and still no identity check
+            assert fake.opened == [] and post.calls == [], extra

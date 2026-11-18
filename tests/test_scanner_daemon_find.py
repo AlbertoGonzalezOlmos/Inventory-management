@@ -375,3 +375,34 @@ def test_main_find_scanner_needs_no_device_and_takes_no_lock(tmp_path,
     # the held lock must never surface as a lock ERROR in this mode
     assert "instance is already running" not in captured.err
     assert captured.err == ""
+
+
+# --- malformed offer files keep today's findings (D6, review fix) -----------
+# A PARSED-but-malformed offer (a list, an empty object, a non-string or
+# empty terminal_id) keeps the two FAIL findings the pre-refactor code
+# printed — loud, never swallowed, never mistaken for an absent file.
+
+@pytest.mark.parametrize(("blob", "offer_tid"), [
+    ("[1, 2]", None),
+    ("{}", None),
+    ('{"terminal_id": 42}', 42),
+    ('{"terminal_id": ""}', ""),
+])
+def test_find_scanner_malformed_offer_keeps_todays_findings(
+        tmp_path, scanner_sysfs, blob, offer_tid):
+    cfg = write_config(tmp_path)
+    db = make_db(tmp_path, [(LOCAL, SECRET, True, None)])
+    offer = tmp_path / "scanner-pairing.json"
+    offer.write_text(blob)
+    text, code = find(tmp_path, cfg=cfg, offer=offer, db=db,
+                      sysfs=scanner_sysfs)
+    assert (f"FAIL offer file names terminal {offer_tid!r} but the daemon "
+            f"config is '{LOCAL}'") in text
+    assert (f"FAIL offer file names {offer_tid!r}, which the server does NOT "
+            "know") in text
+    assert code == 1
+    # an absent offer is a different, quieter thing — never the same finding
+    text2, _ = find(tmp_path, cfg=cfg, offer=tmp_path / "absent.json",
+                    db=db, sysfs=scanner_sysfs)
+    assert "FAIL offer file names" not in text2
+    assert "no offer file at" in text2
