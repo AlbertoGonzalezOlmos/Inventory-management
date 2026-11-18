@@ -11,6 +11,11 @@ without hardware (``find_linux_usb_devices`` takes an injectable sysfs root).
     uv run python scripts/opticon_detect.py            # human-readable survey
     uv run python scripts/opticon_detect.py --json     # machine-readable
 
+Exit codes: 0 = at least one usable Opticon node was found;
+3 = no Opticon device was visible to the survey; 4 = Opticon device(s)
+were visible but none had a usable node. The library survey() is
+independent of these CLI statuses.
+
 Consumers:
 
 * ``scripts/scanner_hid.py`` — receives from the USB-HID personality.
@@ -366,6 +371,19 @@ def survey() -> dict:
     return report
 
 
+EXIT_OK = 0
+EXIT_NO_DEVICE = 3
+EXIT_NO_USABLE_NODE = 4
+
+
+def _cli_exit_code(report: dict) -> int:
+    if not report["devices"]:
+        return EXIT_NO_DEVICE
+    if any(dev.get("usable") for dev in report["devices"]):
+        return EXIT_OK
+    return EXIT_NO_USABLE_NODE
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
@@ -376,9 +394,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     report = survey()
+    exit_code = _cli_exit_code(report)
     if args.json:
         print(json.dumps(report, indent=2, default=str))
-        return 0
+        return exit_code
 
     print(f"platform: {report['platform']}"
           + (" (WSL2)" if report["wsl"] else ""))
@@ -396,7 +415,7 @@ def main(argv=None) -> int:
             print(f"    note:     {info['evidence']}")
     for line in report["guidance"]:
         print(f"- {line}")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

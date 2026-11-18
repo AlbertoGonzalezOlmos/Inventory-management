@@ -23,6 +23,7 @@ import tempfile
 import pytest
 
 from scripts.scanner_daemon import (
+    DaemonLock,
     EVIOCGRAB,
     Forwarder,
     PostError,
@@ -613,3 +614,111 @@ def test_spool_is_bounded_and_file_is_0600(tmp_path):
         spool.remove_oldest()
     assert spool.pending() == []
     assert not path.exists()                       # empty → no file
+
+
+# --- pairing fallback: register failures print ONE recovery plan -----------------
+# (the 2026-11-17 incident: a raw "POST failed (409)" left the operator with a
+# trap — re-register 409s, the pill 401s, and a daemon holds the lock. Every
+# permanent register failure must answer with the exact operator commands.)
+
+CONFLICT_409 = ('{"detail":{"status":"already_registered","message":'
+                '"Terminal \'counter-1\' is already registered"}}')
+
+
+def test_register_409_already_registered_prints_one_recovery_plan(
+        tmp_path, scanner_sysfs, capsys):
+    cfg = tmp_path / "scanner.json"
+    post = PostScript([PostError(409, CONFLICT_409)])
+    code = run(["--config", str(cfg), "--register", "--terminal-id", "counter-1"],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "registration failed" in err and "409" in err   # still exactly as loud
+    assert "recovery plan" in err
+    assert ("curl -X DELETE http://127.0.0.1:8000/api/scanner/terminals/counter-1"
+            in err)
+    assert "--find-scanner" in err
+    assert "--register" in err and "pill" in err
+    assert "Traceback" not in err
+    assert not cfg.exists()      # save_config honesty: nothing persisted on failure
+
+
+def test_register_409_secret_in_use_plan_moves_the_copied_config(
+        tmp_path, scanner_sysfs, capsys):
+    cfg = write_config(tmp_path)
+    post = PostScript([PostError(409, '{"detail":{"status":"secret_in_use",'
+                                      '"message":"secret already used"}}')])
+    code = run(["--config", str(cfg), "--register"],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "belongs to ANOTHER terminal" in err
+    assert f"mv {cfg} {cfg}.old-host" in err
+    assert "--register" in err and "Traceback" not in err
+    # the pre-existing config is NOT touched by the failed run (read-only diag)
+    assert cfg.read_text()
+
+
+def test_register_401_plan_recovers_via_delete_and_register(
+        tmp_path, scanner_sysfs, capsys):
+    cfg = tmp_path / "scanner.json"
+    post = PostScript([PostError(401, '{"detail":"unauthorized"}')])
+    code = run(["--config", str(cfg), "--register", "--terminal-id", "counter-1"],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "rejected the credentials" in err
+    assert "curl -X DELETE" in err and "--register" in err
+    assert not cfg.exists()
+
+
+def test_register_unreachable_plan_points_at_run_sh(tmp_path, scanner_sysfs,
+                                                    capsys):
+    cfg = tmp_path / "scanner.json"
+    post = PostScript([PostError(0, "Connection refused")])
+    code = run(["--config", str(cfg), "--register", "--terminal-id", "counter-1"],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "unreachable" in err and "run.sh" in err
+    assert "server-ACCEPTED credential" in err   # the honesty promise, stated
+    assert not cfg.exists()
+
+
+def test_register_loopback_403_plan_names_the_env_switch(tmp_path,
+                                                         scanner_sysfs, capsys):
+    cfg = tmp_path / "scanner.json"
+    post = PostScript([PostError(403, '{"detail":{"status":"loopback_only"}}')])
+    code = run(["--config", str(cfg), "--register", "--terminal-id", "counter-1"],
+               post, reader_yielding(), scanner_sysfs)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "loopback-gated" in err and "HCRM_SCANNER_REGISTER_ANY=1" in err
+
+
+def test_register_blocked_by_running_daemon_names_pid_and_find_scanner(
+        tmp_path, scanner_sysfs, capsys):
+    """The B2 trap: a live daemon holds the lock, so even --register-only died
+    with a bare lock error. The message must now name the holder PID, point at
+    --find-scanner (which never takes the lock) and give the kill command."""
+    cfg = write_config(tmp_path)
+    lock_path = tmp_path / "daemon.lock"
+    lock = DaemonLock(lock_path)
+    lock.acquire()
+    fake = FakeGrab()
+    try:
+        code = main(["--config", str(cfg), "--register-only"],
+                    post=PostScript([]), opener=fake.opener, ioctl=fake.ioctl,
+                    closer=fake.closer, scan_reader=reader_yielding(),
+                    lock_path=str(lock_path), sysfs_root=scanner_sysfs)
+    finally:
+        lock.release()
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "already running" in err               # the historical pin, kept
+    assert str(os.getpid()) in err                # holder PID named
+    assert "EXCLUSIVE evdev grab" in err
+    assert "--find-scanner" in err
+    assert f"kill {os.getpid()}" in err
+    assert "Traceback" not in err
+    assert not fake.opened                        # never touched a device

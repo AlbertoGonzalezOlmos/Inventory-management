@@ -222,6 +222,20 @@ uv run --with hid python scripts/scanner_hid.py
   handling, rollover tolerance) is stdlib and offline-tested in
   `tests/test_scanner_hid.py`.
 
+Two kernel facts make the raw capture trustworthy: the HID core feeds
+open `/dev/hidraw*` readers the raw reports *and* the evdev node the
+parsed keystrokes at the same time (one `hid-generic` claim wires both —
+verified on attach: `input,hidraw3: USB HID v1.11 Keyboard`), and hidraw
+has **no buffering** — start the reader before the scan or the report is
+gone. And before trusting empty capture output, check `journalctl -k`
+for a `USB disconnect` line: an absent device produces empty captures
+too. Repeated `device descriptor read/64, error -71` followed by
+spontaneous disconnects is a physical-layer signature (§5) — swap
+cable/port before debugging software. The tooling reports rather than
+crashes: `scripts/scanner_hid.py` prints a plain message that distinguishes
+"no node", "node vanished mid-capture (ENODEV)" and "attached but silent"
+(exit 3 vs exit 4), and announces the report frame shape it discovered.
+
 The **bidirectional** channel (host → scanner: suffix/menu configuration,
 command/ACK framing) does not exist in HID mode. To get it, scan the device's
 *USB COM Port* configuration sheet: it re-enumerates as `065A:A002` (CDC-ACM)
@@ -271,6 +285,8 @@ Ubuntu/Debian WSL images (the default user is already a member; verify with
 | Symptom | Cause → fix |
 |---|---|
 | **Linux: plugged in, nothing at all — no kernel event, no node, the survey says "nothing attached"** | A **dead xHCI host controller** looks exactly like a charge-only cable (§2 native): the root hubs stay registered so the bus still lists. Run `scripts/usb_host_check.py` — it names the dead BDF, the buses, and the recovery ladder. Full evidence: `docs/m10-unreachable-2026-10-10.md`. |
+| Linux: journal spams `device descriptor read/64, error -71`; the node appears only after several re-plugs — or the device enumerates and then drops off the bus minutes later | **Physical-layer signature** — bad signalling on the cable/connector/port, not power and not the app (2026-11-17, `065A:A001`: 17 `-71` descriptor failures across 5 plug sessions on ports `1-1` *and* `1-2`, `over_current_count=0`; one clean attach vanished with `usb 1-1: USB disconnect` 4 min 37 s later). Swap for a known-good **data** cable, try the other jack, and run `scripts/usb_host_check.py` (it reports the `-71`/dropout history and the pairing preflight). Distinct from the dead-xHCI row (that one logs no kernel events at all) and from "attached but silent" (next row). |
+| Device attached (node exists) but a capture hears nothing | Triage in this order: (1) `journalctl -k` first — a `USB disconnect` before your scans means the device was gone; an empty capture is not evidence about the software path; (2) the reader must already be running before the scan — hidraw does not buffer (§3); (3) a scanner configured for memory/batch upload stores scans instead of typing them — scan the *USB Keyboard* configuration sheet (§1/§6) to return it to streaming; (4) beep but nothing on `/dev/hidraw*` *or* the evdev node → capture with `scripts/scanner_hid.py` (it says which of "no node"/"vanished"/"attached but silent" you hit) and keep its frame dump as evidence. |
 | Linux: ModemManager holds/AT-probes the new `/dev/ttyACM*` | Install the repo udev rule (§4 — it carries both MM-ignore forms) or `systemctl stop ModemManager` while scanning. |
 | Linux: timestamps look days off in `dmesg -T` | `dmesg -T` is suspend-skewed on this host (~+7 days, 2026-10-10) — diagnose from plain `dmesg` or the journal. |
 | Windows: **"Unknown USB Device (Device Descriptor Request Failed)"** (problem 43) | The device never enumerated — it is *not talking to the host at all*. Almost always power/cable: deeply-discharged battery (leave on the cable ≥ 30 min; steady red LED = charging) or a **charge-only cable** (swap for a known-good data cable). Re-plug; Windows re-enumerates automatically. |

@@ -135,6 +135,57 @@ trap shutdown EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# --- scanner bring-up: the read-only verdict, never fatal (C3) -------------
+# The daemon below forwards under this host's resolved identity; the preflight
+# echoes --find-scanner's FAIL/WARN/verdict lines onto this same console so a
+# stale identity or an absent device is loud at boot, not only in an opt-in
+# tool. It runs BEFORE the daemon spawns, so the report never describes our
+# own lock/grab, and a non-zero verdict NEVER aborts the boot — degraded-but-up
+# is the existing contract.
+_scanner_wait_server() {  # $1 = forward URL; 0 once it accepts connections
+    # One bounded stdlib poll: no curl dependency, and the URL is parsed by
+    # urllib, so `http://[::1]:PORT` needs no shell surgery (bash /dev/tcp
+    # cannot parse the IPv6 bracket form). Without this wait a cold boot
+    # races uvicorn's bind and the report prints a false `server UNREACHABLE`
+    # FAIL from inside the script that is starting the server.
+    uv run python -c '
+import socket, sys, time
+from urllib.parse import urlsplit
+url = urlsplit(sys.argv[1])
+host, port = url.hostname, url.port or 80
+if not host:
+    sys.exit(1)
+deadline = time.monotonic() + 10.0
+while time.monotonic() < deadline:
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+        sys.exit(0)
+    except OSError:
+        time.sleep(0.2)
+sys.exit(1)' "$1" 2>/dev/null
+}
+
+_server_alive() {  # zombie-safe: `jobs -pr` lists LIVE children only
+    # `kill -0` cannot be trusted here: a child that exited but was not reaped
+    # yet still answers it, and bash only reaps on SIGCHLD. The same idiom the
+    # reap helper uses is the truth.
+    jobs -pr | grep -qx "$SERVER_PID"
+}
+
+_scanner_verdict() {  # $1 config, $2 pairing file, $3 forward URL
+    # Bounded when timeout(1) exists (Linux/CI); stock macOS ships no
+    # timeout, and then the tool's own 5 s HTTP timeout is the only bound.
+    # --kill-after covers the uv -> python child: a survivor holding the
+    # pipe would otherwise outlive the bound inside $( ).
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k 5 30 uv run python scripts/scanner_daemon.py --find-scanner \
+            --config "$1" --pairing-file "$2" --forward "$3" 2>&1
+    else
+        uv run python scripts/scanner_daemon.py --find-scanner \
+            --config "$1" --pairing-file "$2" --forward "$3" 2>&1
+    fi
+}
+
 uv run uvicorn app.main:app --host "$HOST" --port "$PORT" &
 SERVER_PID=$!
 
@@ -159,10 +210,53 @@ else
     esac
     if [ -n "$SCANNER_FORWARD" ]; then
         SCANNER_CONFIG="$RESOLVED_DATA_DIR/scanner.json"
+        SCANNER_PAIRING_FILE="${HCRM_SCANNER_PAIRING_FILE:-$RESOLVED_DATA_DIR/scanner-pairing.json}"
+        # Skipped on a first boot (no config yet — the daemon is registering
+        # right now, so the report could only say "no config"). rc 0/1 is a
+        # completed report (1 = blocking findings, the point); rc >= 2 means
+        # it did not complete (e.g. 124 from timeout) and is said in words.
+        if [ -f "$SCANNER_CONFIG" ]; then
+            # Our own uvicorn first: a bare TCP connect can be answered by a
+            # FOREIGN listener on this port (a leftover server from another
+            # checkout), and the verdict would then describe that process
+            # while reading OUR database. Checked again right before the
+            # report runs, so a server that died during the wait is never
+            # mistaken for a healthy one. Never fatal either way.
+            if ! _server_alive; then
+                echo "scanner:   preflight skipped — our uvicorn is not running"
+            elif ! _scanner_wait_server "$SCANNER_FORWARD"; then
+                echo "scanner:   preflight skipped — $SCANNER_FORWARD not accepting connections within 10 s; run: uv run python scripts/scanner_daemon.py --find-scanner"
+            elif ! _server_alive; then
+                echo "scanner:   preflight skipped — our uvicorn is not running"
+            else
+                SCANNER_RC=0
+                SCANNER_REPORT="$(_scanner_verdict "$SCANNER_CONFIG" \
+                    "$SCANNER_PAIRING_FILE" "$SCANNER_FORWARD")" || SCANNER_RC=$?
+                # rc 0/1 are completed reports (1 = blocking findings, the
+                # point). rc 1 WITHOUT a verdict line is a crash (a Python
+                # traceback exits 1) and rc >= 2 did not complete — both are
+                # said in words, with the head of the output, and never fatal.
+                if [ "$SCANNER_RC" -gt 1 ]; then
+                    echo "scanner:   preflight did not complete (rc=$SCANNER_RC) — run: uv run python scripts/scanner_daemon.py --find-scanner"
+                    printf '%s\n' "$SCANNER_REPORT" | head -3 \
+                        | sed 's/^/scanner:   | /' || true
+                elif ! printf '%s\n' "$SCANNER_REPORT" | grep -q 'verdict:'; then
+                    echo "scanner:   preflight produced no verdict (rc=$SCANNER_RC) — run: uv run python scripts/scanner_daemon.py --find-scanner"
+                    printf '%s\n' "$SCANNER_REPORT" | head -3 \
+                        | sed 's/^/scanner:   | /' || true
+                else
+                    # Only FAIL/WARN/verdict: the diagnosis, not the INFO
+                    # chatter and not the printed recovery ladder.
+                    printf '%s\n' "$SCANNER_REPORT" \
+                        | grep -E '^(FAIL|WARN) |verdict:' \
+                        | sed 's/^/scanner:   /' || true
+                fi
+            fi
+        fi
         uv run python scripts/scanner_daemon.py \
             --config "$SCANNER_CONFIG" \
             --forward "$SCANNER_FORWARD" \
-            --pairing-file "${HCRM_SCANNER_PAIRING_FILE:-$RESOLVED_DATA_DIR/scanner-pairing.json}" \
+            --pairing-file "$SCANNER_PAIRING_FILE" \
             --register-wait "${HCRM_SCANNER_REGISTER_WAIT:-300}" &
         DAEMON_PID=$!
         echo "scanner:   daemon pid $DAEMON_PID (config $SCANNER_CONFIG)"

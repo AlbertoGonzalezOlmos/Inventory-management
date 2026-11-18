@@ -17,6 +17,22 @@ whatever window has OS focus. Round 4 grabs the scanner at the OS level:
   stops the grab and never drops a scan), redaction on every print path,
   and SIGTERM/SIGINT clean exit.
 
+**The pairing fallback (``--find-scanner``).** A stale three-way identity
+mismatch — config secret of a FOREIGN terminal, offer file naming an
+UNREGISTERED one, kiosk pill answering 401 while ``--register`` answers
+409 — strands every scan in a queue no local browser can read
+(2026-11-17 incident). ``--find-scanner`` is the read-only diagnosis for
+that class: device/node present? grab held? another daemon running (said
+in plain words, never a lock error)? does the config terminal exist
+server-side, which OTHER terminals do, and does the config secret belong
+to one of them? offer file consistent? It writes NOTHING, never takes the
+single-instance lock or keeps a grab, and ends in exactly ONE actionable
+recovery ladder (exact operator commands, printed — never executed).
+Registration failures get the same treatment: :func:`_registration_recovery`
+turns a 409/401/403/unreachable :class:`PostError` into one ladder instead
+of a raw error dump. ``save_config`` stays honest by construction: it is
+only ever reached after the server ACCEPTED the registration.
+
 **The reuse bridge (do not duplicate the assembler).** evdev delivers Linux
 keycodes (``KEY_A`` = 30), not HID usages ('a' = 4) — and the keycode space
 is not an offset of the usage space (``KEY_A``=30 is HID '1'=30; letters
@@ -66,12 +82,14 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
 import json
 import math
 import os
 import secrets
 import signal
 import socket
+import sqlite3
 import struct
 import sys
 import tempfile
@@ -850,6 +868,70 @@ def save_pairing_file(path, terminal_id: str, code: str) -> None:
         raise
 
 
+def load_pairing_file(path):
+    """Read the one-click offer file, or None when it cannot be read at all.
+
+    Returns whatever JSON the file holds (a dict in every healthy case): a
+    malformed-but-parseable offer — a list, an int, an object without
+    ``terminal_id`` — must still be REPORTED by :func:`identity_findings`,
+    never silently mistaken for an absent file (D6: the malformed path keeps
+    the output it had before the refactor). None means absent / unreadable /
+    not JSON, the same tolerance as the inline read this replaces. The
+    pairing code inside is never printed.
+    """
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _is_foreign_identity(config, hostname) -> bool:
+    """True when the config forwards as an identity this host does not own.
+
+    Compared verbatim, because the server resolves terminals with a
+    case-sensitive equality (app/routers/scanner.py: register, pair and ingest
+    all match ``Terminal.terminal_id`` with ``==``; app/schemas.py only
+    constrains the pattern), so a case-only difference is a DIFFERENT terminal
+    and is delivery-breaking. Absent or empty values never count as a mismatch
+    (there is nothing to compare).
+    """
+    if not isinstance(config, dict):
+        return False
+    terminal_id = config.get("terminal_id")
+    if not isinstance(terminal_id, str) or not terminal_id or not hostname:
+        return False
+    return terminal_id != hostname
+
+
+def _id_is_known(terminal_id, terminal_ids) -> bool:
+    """``terminal_id in terminal_ids`` that tolerates unhashable JSON values
+    (a list/dict inside a malformed offer): those are never a known id."""
+    try:
+        return terminal_id in terminal_ids
+    except TypeError:
+        return False
+
+
+#: Env override for --require-host-identity. Same convention as
+#: app/security.py::_env_flag (1/true/yes/on, case- and whitespace-
+#: insensitive; empty or unknown => default) — a local copy on purpose:
+#: this script is standalone stdlib and must not import app.*.
+_REQUIRE_HOST_IDENTITY_ENV = "HCRM_SCANNER_REQUIRE_HOST_IDENTITY"
+
+#: The fatal-path line printed once, right before the gated exit 1.
+_REFUSE_HOST_IDENTITY = (
+    "require-host-identity: refusing to run — fix the identity above (the "
+    "recovery ladder is: scripts/scanner_daemon.py --find-scanner)")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """app.security._env_flag's contract, read at CALL time (never import)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def register_terminal(post, base_url: str, terminal_id: str, secret: str) -> str:
     """POST /api/scanner/terminals → the single-use pairing code.
 
@@ -902,6 +984,538 @@ def register_with_retry(post, base_url, terminal_id, secret, *,
             attempt += 1
 
 
+# --- pairing fallback: the read-only --find-scanner report ----------------------
+#
+# Doctrine (the 2026-11-17 stale-identity incident): diagnose read-only, print
+# the exact operator command for anything destructive, and say "a daemon is
+# running and holds the grab" in plain words instead of failing with a lock
+# error or silently reading nothing. No app.* imports (standalone kiosk
+# script): the DB probe re-implements app.security.token_hash's algorithm
+# (sha256 hexdigest) locally and opens sqlite with a mode=ro URI, so it can
+# never create or write the live database.
+
+def default_config_file() -> Path:
+    """The daemon config's conventional path: <HCRM_DATA_DIR or <repo>/data>/
+    scanner.json — the file the live daemon runs with, so ``--find-scanner``
+    works bare. Mirrors default_pairing_file()'s resolution."""
+    data_dir = os.environ.get(
+        "HCRM_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data"))
+    return Path(os.path.join(data_dir, "scanner.json"))
+
+
+def default_db_file() -> Path:
+    """The server's sqlite file, resolved like app.database (DATABASE_URL's
+    sqlite:/// form wins, else <HCRM_DATA_DIR or <repo>/data>/hcrm.db).
+    Only ever opened mode=ro by :func:`inspect_terminals_db`."""
+    url = os.environ.get("DATABASE_URL", "")
+    if url.startswith("sqlite:///"):
+        return Path(url[len("sqlite:///"):])
+    data_dir = os.environ.get(
+        "HCRM_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data"))
+    return Path(os.path.join(data_dir, "hcrm.db"))
+
+
+def _http_get(url, timeout=5.0) -> int:
+    """GET `url` → the HTTP status, or 0 on any transport failure.
+
+    The liveness probe for --find-scanner: GET /api/scanner/events WITHOUT a
+    browser token always answers 401 on a healthy server (terminal-token
+    auth), so 401 means "up". Stdlib-only, lazily imported (the --dry-run
+    zero-HTTP doctrine), and it never raises — a dead server is a finding,
+    not a traceback.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return int(response.status)
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return 0
+
+
+def probe_daemon_lock(lock_path=None) -> dict:
+    """NON-acquiring single-instance probe → {"path", "running", "pid"}.
+
+    The flock is the truth, the PID content is diagnostics: try
+    LOCK_EX|LOCK_NB and release immediately. The lockfile is never created
+    (no O_CREAT — a probe must not leave artifacts on a healthy host) and
+    never left held, so --find-scanner works WHILE a daemon runs (that is
+    its whole point: the running daemon is a finding, not a lock error).
+    """
+    path = Path(lock_path) if lock_path is not None else _default_lockfile_path()
+    result = {"path": path, "running": False, "pid": None}
+    try:
+        raw = path.read_text().strip()
+        result["pid"] = int(raw.splitlines()[0]) if raw else None
+    except (OSError, ValueError):
+        pass  # absent/unparseable PID content — the flock below decides
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return result  # no lockfile → no daemon
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        result["running"] = True
+        return result
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+    return result
+
+
+def probe_grab(node, *, opener=None, ioctl=None, closer=None) -> str:
+    """Transient EVIOCGRAB probe of `node` → "free"|"held"|"no-permission"|
+    "absent"|"error (…)" — ALWAYS released before returning.
+
+    EBUSY is the only reliable "another process (the running daemon, evtest,
+    a remapper) holds the EXCLUSIVE grab" signal, and a held grab means every
+    other evdev reader observes NOTHING by kernel design — the plain-words
+    finding the coordinator's capture silently lacked. A successful probe
+    un-grabs and closes immediately (try/finally): the report never keeps
+    what it probed.
+    """
+    open_ = _open_readonly if opener is None else opener
+    io = fcntl.ioctl if ioctl is None else ioctl
+    close = os.close if closer is None else closer
+    fd = None
+    try:
+        fd = open_(node)
+        try:
+            io(fd, EVIOCGRAB, 1)
+        except OSError as exc:
+            if exc.errno == errno.EBUSY:
+                return "held"
+            if exc.errno in (errno.EACCES, errno.EPERM):
+                return "no-permission"
+            if exc.errno in _LOST_ERRNOS:
+                return "absent"
+            return f"error ({exc})"
+        try:
+            io(fd, EVIOCGRAB, 0)
+        except OSError:
+            pass  # the close below releases the grab regardless
+        return "free"
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            return "no-permission"
+        if exc.errno in _LOST_ERRNOS:
+            return "absent"
+        return f"error ({exc})"
+    finally:
+        if fd is not None:
+            try:
+                close(fd)
+            except OSError:
+                pass
+
+
+def inspect_terminals_db(db_path, secret: str | None = None) -> list[dict] | None:
+    """READ-ONLY enumeration of the server's terminals table, or None.
+
+    No list-terminal API exists, and every HTTP existence probe can WRITE (a
+    successful register creates state), so the server-side identity facts for
+    --find-scanner come from the local sqlite file opened with a mode=ro URI
+    (never created, never written). Per row: terminal_id, paired (a browser
+    token exists), last_seen_at, and secret_matches — whether `secret`'s
+    sha256 equals the stored secret_hash (the app.security.token_hash
+    algorithm; only the bool leaves this function, never a hash or secret).
+    Unreadable (split-host server, permissions, WAL state) → None: the report
+    degrades to "UNVERIFIED", it never crashes.
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT terminal_id, secret_hash, token_hash IS NOT NULL, "
+                "last_seen_at FROM terminals").fetchall()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    want = hashlib.sha256(secret.encode()).hexdigest() if secret else None
+    return [{"terminal_id": tid,
+             "paired": bool(paired),
+             "last_seen_at": seen,
+             "secret_matches": (None if want is None else shash == want)}
+            for tid, shash, paired, seen in rows]
+
+
+def identity_findings(config, offer, hostname,
+                      *, terminal_ids=None) -> list[tuple[str, str]]:
+    """PURE identity/offer consistency findings → [(marker, text), ...].
+
+    Read-only by construction: no I/O, no network, no DB, no writes, and
+    nothing secret in the output (both terminal ids are already printed by
+    the report; the secret and the pairing code never are).
+
+    The two call sites share it so they can never drift:
+      * ``main()`` at daemon start-up — config + offer + hostname, with
+        ``terminal_ids=None`` (no server knowledge at boot: an HTTP round
+        trip before the grab would only delay the device).
+      * ``find_scanner()`` — the same, plus the ids the local DB knows.
+
+    Stable order (pinned): A offer-vs-config FAIL, C offer-unknown-to-server
+    FAIL, D config-vs-host WARN. Every FAIL returned here is OFFER-family and
+    find_scanner appends that failure key; the server row-level findings
+    (config identity unknown, secret mismatch, FOREIGN IDENTITY,
+    already-paired) stay in ``find_scanner``, which owns the facts
+    (``paired``/``secret_matches``/``owner``) this helper deliberately lacks.
+
+    Only D is DELIVERY-breaking (the daemon forwards as an identity this host
+    does not own); A and C break the pairing paperwork only. A malformed but
+    readable offer (a list, ``{}``, a non-string or empty ``terminal_id``)
+    still names what it holds — the guard is the pre-refactor one, so those
+    shapes keep the findings they always had.
+    """
+    findings: list[tuple[str, str]] = []
+    terminal_id = config.get("terminal_id") if isinstance(config, dict) else None
+    offer_tid = offer.get("terminal_id") if isinstance(offer, dict) else None
+    # A/C — offer vs config and offer identity vs the server. `offer is None`
+    # means the file is absent/unreadable/`null` (find_scanner has its own
+    # "no offer file" finding for that, and main() has nothing to say); any
+    # PARSED value counts, so a malformed-but-readable offer (a list, {}, a
+    # non-string or empty terminal_id) keeps the findings it always had.
+    if offer is not None:
+        if terminal_id is not None and offer_tid != terminal_id:
+            findings.append(("FAIL",
+                f"offer file names terminal {offer_tid!r} but the daemon "
+                f"config is {terminal_id!r} — the pill would pair an "
+                "identity this daemon does not hold"))
+        if terminal_ids is not None and not _id_is_known(offer_tid, terminal_ids):
+            findings.append(("FAIL",
+                f"offer file names {offer_tid!r}, which the server does NOT "
+                "know — clicking the pill returns 401 bad_pairing (a stale "
+                "offer; --register overwrites it atomically)"))
+    # D — the config forwards as an identity this host does not own.
+    if _is_foreign_identity(config, hostname):
+        findings.append(("WARN",
+            f"config identity {terminal_id!r} is NOT this host "
+            f"({hostname!r}) — this daemon forwards as an identity this "
+            "host does not own, and no browser here is necessarily "
+            "paired to it; run scripts/scanner_daemon.py --find-scanner "
+            "for the one recovery ladder"))
+    return findings
+
+
+def find_scanner(*, config_path=None, pairing_path=None,
+                 base_url: str = "http://127.0.0.1:8000", db_path=None,
+                 sysfs_root: str | Path = _SYSFS_INPUT_CLASS, lock_path=None,
+                 vid_pid: tuple[int, int] = DEFAULT_VID_PID,
+                 opener=None, ioctl=None, closer=None,
+                 http_get=None, hostname=None) -> tuple[list[str], int]:
+    """The read-only pairing-fallback report → ``(lines, exit_code)``.
+
+    Answers, in order: device present? node grabbed/held by whom? another
+    daemon running (plain words, with its PID)? server up? does the config
+    terminal exist server-side and which OTHER terminals do? does the config
+    secret belong to a FOREIGN terminal? offer file consistent? Ends in ONE
+    actionable recovery ladder (exact commands, printed — never executed;
+    destructive steps stay the operator's call). Writes nothing, takes no
+    lock, keeps no grab. Exit 0 only when the whole delivery chain verifies
+    usable (or is contradiction-free with the DB unverifiable), else 1 —
+    the loud half of "diagnose loudly, never hide it".
+    """
+    get = _http_get if http_get is None else http_get
+    report: list[str] = []
+    failures: list[str] = []
+
+    def say(marker: str, text: str) -> None:
+        report.append(f"{marker:<4} {text}")
+
+    report.append("scanner_daemon --find-scanner: READ-ONLY report — nothing "
+                  "below was written, locked or kept grabbed")
+    vid, pid = vid_pid
+
+    # 1. the daemon's identity file (read-only).
+    cfg_path = Path(config_path) if config_path else default_config_file()
+    config = load_config(cfg_path)
+    terminal_id = secret = None
+    if config is None:
+        say("FAIL", f"no usable terminal config at {cfg_path} — the daemon has "
+                    "no identity; --register mints one (config + offer, 0600)")
+        failures.append("no-config")
+    else:
+        terminal_id, secret = config["terminal_id"], config["secret"]
+        say("OK", f"config {cfg_path}: terminal_id={terminal_id!r}, secret "
+                  f"present ({len(secret)} chars — never printed)")
+
+    # 2. device + node, and who holds the exclusive grab.
+    nodes = discover_event_devices(vid_pid, sysfs_root)
+    grab_state = None
+    if not nodes:
+        say("FAIL", f"scanner {vid:04x}:{pid:04x} NOT ATTACHED — no "
+                    "/dev/input/eventN matches in sysfs. Hardware/cable until "
+                    "proven otherwise: re-plug, then scripts/usb_host_check.py "
+                    "and journalctl -k | grep -E 'error -71|USB disconnect' "
+                    "(the -71-then-dropout signature, docs/opticon-hardware.md §5)")
+        failures.append("device-absent")
+    else:
+        say("OK", f"device attached: {', '.join(nodes)}")
+        grab_state = probe_grab(nodes[0], opener=opener, ioctl=ioctl,
+                                closer=closer)
+        if grab_state == "held":
+            say("WARN", f"{nodes[0]}: the EXCLUSIVE grab (EVIOCGRAB) is held by "
+                        "another process (a running scanner_daemon, evtest, a "
+                        "remapper) — every OTHER evdev reader sees NOTHING "
+                        "while it is held, by kernel design")
+        elif grab_state == "no-permission":
+            say("WARN", f"{nodes[0]}: no permission to open/grab — install the "
+                        "udev rule (scripts/udev/99-opticon-scanner.rules) or "
+                        "join the input group")
+        elif grab_state == "free":
+            say("OK", f"{nodes[0]}: free — no other process holds the grab "
+                      "(the probe released it immediately)")
+        else:
+            say("WARN", f"{nodes[0]}: grab probe: {grab_state}")
+
+    # 3. the single-instance lock: a running daemon is a FINDING, not an error.
+    lock = probe_daemon_lock(lock_path)
+    if lock["running"]:
+        say("INFO", f"another scanner_daemon IS RUNNING (lockfile {lock['path']}, "
+                    f"PID {lock['pid'] if lock['pid'] is not None else '?'}) — it "
+                    "holds the single-instance lock and (device attached) the "
+                    "exclusive grab; --register refuses until it is stopped")
+    else:
+        stale = (f" (stale PID {lock['pid']} in the file — the flock is the "
+                 "truth, and it is free)") if lock["pid"] is not None else ""
+        say("INFO", f"no other daemon holds the lockfile {lock['path']}{stale}")
+
+    # 4. server liveness: an unauthenticated GET /events must answer 401.
+    events_url = base_url.rstrip("/") + "/api/scanner/events"
+    status = get(events_url)
+    if status == 0:
+        say("FAIL", f"server UNREACHABLE at {base_url} (GET {events_url}) — "
+                    "start it (./scripts/run.sh) or fix --forward")
+        failures.append("server-unreachable")
+    elif status == 401:
+        say("OK", f"server up at {base_url} (GET /api/scanner/events → 401 "
+                  "without a browser token, the expected liveness answer)")
+    else:
+        say("WARN", f"server at {base_url} answered GET /api/scanner/events "
+                    f"with {status} (expected 401 without a token)")
+
+    # 5. server-side identity: config vs the terminals table (read-only).
+    db = Path(db_path) if db_path is not None else default_db_file()
+    terminals = inspect_terminals_db(db, secret)
+    mine = owner = None
+    identity_verified = False
+    if terminals is None:
+        say("WARN", f"cannot inspect the server database read-only at {db} "
+                    "(split-host server or permissions) — server-side identity "
+                    "UNVERIFIED; the HTTP liveness probe is all this host sees")
+    else:
+        if not terminals:
+            say("INFO", f"server database {db}: the terminals table is EMPTY — "
+                        "nothing is registered")
+        for row in terminals:
+            marks = []
+            if row["terminal_id"] == terminal_id:
+                marks.append("this config's terminal_id")
+            if row["secret_matches"]:
+                marks.append("owns THIS config's secret")
+            marks.append("paired: a browser holds the read token" if row["paired"]
+                         else "UNPAIRED: no browser can read its queue")
+            say("INFO", f"server terminal {row['terminal_id']!r} (last_seen "
+                        f"{row['last_seen_at'] or 'never'}) ← {'; '.join(marks)}")
+        mine = next((r for r in terminals
+                     if r["terminal_id"] == terminal_id), None)
+        owner = next((r for r in terminals if r["secret_matches"]), None)
+        if terminal_id is not None:
+            if mine is None:
+                say("FAIL", f"config terminal {terminal_id!r} is UNKNOWN to the "
+                            "server — every forward would 401 and the pill would "
+                            "answer 401 bad_pairing")
+                failures.append("identity")
+            elif mine["secret_matches"] is False:
+                say("FAIL", f"config terminal {terminal_id!r} exists but its "
+                            "server-side secret does NOT match this config — "
+                            "forwards would 401")
+                failures.append("identity")
+            else:
+                identity_verified = True
+                if mine["paired"]:
+                    say("OK", f"identity verified: {terminal_id!r} exists, the "
+                              "secret matches, and a read token is minted")
+                    say("WARN", "it is already PAIRED: the read token went to "
+                                "WHICHEVER browser paired first — if that was "
+                                "another host (a decommissioned laptop), no "
+                                "browser HERE can read this queue; recovery is "
+                                "the ladder below (DELETE + re-register + pair "
+                                "from THIS host)")
+                else:
+                    say("WARN", f"identity verified but {terminal_id!r} is "
+                                "UNPAIRED — the kiosk pill must complete pairing "
+                                "(offer file checked below)")
+            if owner is not None and owner["terminal_id"] != terminal_id:
+                say("FAIL", f"FOREIGN IDENTITY: this config's secret belongs to "
+                            f"terminal {owner['terminal_id']!r} — scans would "
+                            "land in a queue only ITS paired browser can read "
+                            "(a config copied from another host?)")
+                failures.append("identity")
+
+    # 6. the one-click offer file vs config vs server.
+    offer_path = Path(pairing_path) if pairing_path else default_pairing_file()
+    offer = load_pairing_file(offer_path)   # same tolerance, never prints it
+    offer_tid = offer.get("terminal_id") if isinstance(offer, dict) else None
+    offer_row = None
+    # 6a. host-vs-config and offer-vs-config: the PURE helper main() also
+    # runs at start-up, so the two surfaces can never drift. Row-level
+    # findings (config unknown, secret/owner/paired) stay in section 5:
+    # they need facts terminal_ids deliberately does not carry.
+    host = socket.gethostname() if hostname is None else hostname
+    for marker, text in identity_findings(
+            config, offer, host,
+            terminal_ids=None if terminals is None
+            else {r["terminal_id"] for r in terminals}):
+        say(marker, text)
+        if marker == "FAIL":
+            failures.append("offer")   # every helper FAIL is offer-family
+    if offer is None:
+        if identity_verified and mine is not None and not mine["paired"]:
+            say("FAIL", f"no offer file at {offer_path} and {terminal_id!r} is "
+                        "unpaired — the pill has nothing to consume; re-run "
+                        "with --register to mint a fresh single-use code")
+            failures.append("offer")
+        else:
+            say("INFO", f"no offer file at {offer_path} — only the one-click "
+                        "pill of an UNPAIRED terminal needs it (--register "
+                        "writes it)")
+    elif terminals is not None:
+        offer_row = next((r for r in terminals
+                          if r["terminal_id"] == offer_tid), None)
+        if offer_row is not None:   # an unknown one already FAILed in 6a
+            if offer_row["paired"]:
+                say("WARN", f"offer file for {offer_tid!r} is STALE — that "
+                            "terminal is already paired; the pill would answer "
+                            "409 already_paired")
+            else:
+                say("OK", f"offer file consistent: {offer_tid!r} is registered "
+                          "and unpaired — the pill will mint the browser token")
+    else:
+        say("WARN", "offer file present, but its server-side consistency is "
+                    "UNVERIFIED (no readable local DB)")
+
+    # 7. verdict + exactly ONE recovery ladder.
+    if not failures:
+        say("OK", "verdict: the delivery chain is consistent — if scans still "
+                  "do not arrive, the DEVICE is silent: capture with "
+                  "scripts/scanner_hid.py (it distinguishes no-node / vanished "
+                  "/ attached-but-silent)")
+        return report, 0
+
+    say("FAIL", f"verdict: scans CANNOT reliably reach a browser on this host "
+                f"({len(failures)} blocking finding(s): "
+                f"{', '.join(dict.fromkeys(failures))})")
+    identity_family = {"identity", "offer", "no-config"} & set(failures)
+    delete_target = None
+    if terminals and identity_family:
+        delete_target = (owner or mine or offer_row
+                         or next(iter(terminals)))["terminal_id"]
+    plan = []
+    if lock["running"] and identity_family:
+        plan.append("stop the daemon that holds the stale identity (it also "
+                    "holds the lock and the exclusive grab): kill "
+                    + (str(lock["pid"]) if lock["pid"] is not None
+                       else f"$(cat {lock['path']})"))
+    if "server-unreachable" in failures:
+        plan.append(f"start the server: ./scripts/run.sh  (then re-check: "
+                    f"curl -s -o /dev/null -w '%{{http_code}}' {events_url} "
+                    f"→ expect 401)")
+    if delete_target is not None:
+        plan.append("delete the stale server-side terminal — VERIFY FIRST that "
+                    f"it belongs to a decommissioned host: curl -X DELETE "
+                    f"{base_url.rstrip('/')}/api/scanner/terminals/{delete_target}")
+    if identity_family and config is not None:
+        plan.append(f"move the stale config aside: mv {cfg_path} {cfg_path}.old-host")
+    if identity_family:
+        plan.append("re-register (writes config + one-click offer, both 0600): "
+                    f"uv run python scripts/scanner_daemon.py --config {cfg_path} "
+                    f"--register --forward {base_url.rstrip('/')}")
+        plan.append("in the kiosk browser ON THIS HOST, click the 'no scanner' "
+                    "pill — that mints THIS host's read token")
+    if "device-absent" in failures:
+        plan.append("hardware: the scanner is off the bus — re-plug it (a "
+                    "known-good data cable, another jack), then run "
+                    "scripts/usb_host_check.py and inspect journalctl -k for "
+                    "the -71/dropout signature")
+    report.append("")
+    report.append("recovery plan (ONE ladder — printed for the operator, "
+                  "NOTHING here is executed):")
+    report.extend(f"  {i}. {step}" for i, step in enumerate(plan, 1))
+    return report, 1
+
+
+def _registration_recovery(exc: "PostError", terminal_id: str | None,
+                           base_url: str, config_path) -> list[str]:
+    """ONE actionable ladder for a failed registration (never a raw dump).
+
+    The first line is the historical loud one ("registration failed: POST
+    failed (…)" — pinned by tests); what follows is the single recovery plan
+    for that status, with the exact operator commands (printed, never
+    executed). 409 already_registered / secret_in_use, 401, 403
+    loopback-only and transport failures each get their own ladder; anything
+    else points at --find-scanner.
+    """
+    base = base_url.rstrip("/")
+    text = str(exc)
+    diagnose = ("diagnose read-only first: uv run python "
+                "scripts/scanner_daemon.py --find-scanner")
+    delete_cmd = (f"curl -X DELETE {base}/api/scanner/terminals/{terminal_id}"
+                  if terminal_id else "curl -X DELETE "
+                  f"{base}/api/scanner/terminals/<terminal-id>")
+    register_cmd = ("re-run with --register: uv run python "
+                    f"scripts/scanner_daemon.py --config {config_path} "
+                    f"--register --forward {base}")
+    pill = ("in the kiosk browser ON THIS HOST, click the 'no scanner' pill "
+            "— that mints this host's read token")
+    if exc.status == 409 and "secret_in_use" in text:
+        steps = [diagnose,
+                 "this config's secret belongs to ANOTHER terminal (a copied "
+                 f"config) — move it aside: mv {config_path} {config_path}.old-host",
+                 register_cmd,
+                 pill]
+    elif exc.status == 409:
+        steps = [diagnose,
+                 f"the server already knows terminal {terminal_id!r}. If THIS "
+                 "config's secret still matches it, simply drop --register "
+                 "(the daemon reuses the stored identity).",
+                 "if it is a stale/foreign registration (e.g. an old host), "
+                 f"delete it — VERIFY FIRST: {delete_cmd}",
+                 register_cmd,
+                 pill]
+    elif exc.status == 401:
+        steps = [diagnose,
+                 "the server rejected the credentials (terminal deleted "
+                 "server-side or secret rotated).",
+                 f"delete any leftover registration: {delete_cmd}",
+                 register_cmd,
+                 pill]
+    elif exc.status == 403 or "loopback_only" in text:
+        steps = ["registration is loopback-gated: run this ON the server host, "
+                 "or (trusted-LAN deployments only) start the server with "
+                 "HCRM_SCANNER_REGISTER_ANY=1"]
+    elif exc.status == 0:
+        steps = [f"the server at {base_url} is unreachable — start it "
+                 "(./scripts/run.sh) or fix --forward, then re-run with "
+                 "--register (nothing was written; save_config only persists "
+                 "a server-ACCEPTED credential)"]
+    else:
+        steps = [diagnose,
+                 f"unexpected server answer ({text}) — check the server log"]
+    return ([f"scanner_daemon: registration failed: {exc}",
+             "scanner_daemon: recovery plan (ONE ladder — nothing is "
+             "executed for you):"]
+            + [f"  {i}. {step}" for i, step in enumerate(steps, 1)])
+
+
 class _Stopped(Exception):
     """Raised by the SIGTERM handler: unwinds the with-blocks (fd closes →
     the grab auto-releases) for a clean exit 0."""
@@ -928,7 +1542,8 @@ def _nonnegative_seconds(text: str) -> float:
 
 def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
          closer=None, scan_reader=None, lock_path=None,
-         sysfs_root=None, clock=None) -> int:
+         sysfs_root=None, clock=None, db_path=None, http_get=None,
+         hostname=None) -> int:
     """The daemon entrypoint (round 4, T5).
 
     Modes:
@@ -944,10 +1559,22 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
         FATAL: the code would be unrecoverable. Then run.
         Run: lock → grab (T3) → decode (T2) → forward each scan to
         POST /api/scanner/events, spooled and retried so a server outage
-        never stops the grab and never drops a scan.
+        never stops the grab and never drops a scan. Before the grab, a
+        start-up identity check names a config identity that is not this host
+        (WARN) and an offer file that disagrees with the config
+        (FAIL). ``--require-host-identity`` makes the HOST mismatch fatal
+        (exit 1) before register/grab; offer-file drift stays loud but is
+        never fatal — a stale paperwork file must not take a healthy kiosk
+        down.
       scanner_daemon --dry-run [--node N]
         Decode and print (redacted), ZERO HTTP — the hardware-checklist
         mode; no config, no lock, no network import.
+      scanner_daemon --find-scanner [--config PATH] [--forward URL]
+        The read-only pairing-fallback report (see find_scanner): the
+        three-way identity check (config vs server DB vs offer file), the
+        running-daemon/held-grab findings in plain words, and exactly ONE
+        recovery ladder of printed operator commands. Never takes the lock,
+        writes nothing; exit 0 iff the delivery chain verifies usable.
 
     Everything device/network-touching is injectable (``post``, the grab
     triple, ``scan_reader``, ``sleep``, ``lock_path``) so the test suite
@@ -993,6 +1620,20 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
     parser.add_argument("--register-only", action="store_true",
                         help="register, write the config + the one-click offer "
                              "file, then exit 0 without grabbing a device")
+    parser.add_argument("--find-scanner", action="store_true",
+                        help="read-only pairing-fallback report: device/node, "
+                             "who holds the exclusive grab, whether another "
+                             "daemon is running (PID), config vs server vs "
+                             "offer-file identity, and ONE recovery plan with "
+                             "exact commands. Writes nothing, never takes the "
+                             "lock; exit 0 only when the chain verifies usable")
+    parser.add_argument("--require-host-identity", action="store_true",
+                        help="make the start-up identity check fatal when the "
+                             "config's terminal_id is not this host: exit 1 "
+                             "before registering or grabbing (default: warn "
+                             "and keep running). One-click offer-file drift "
+                             "is reported but never fatal, gate or not. Also "
+                             "HCRM_SCANNER_REQUIRE_HOST_IDENTITY=1")
     args = parser.parse_args(argv)
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep
@@ -1026,9 +1667,29 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 pass
             return 0
 
-        if not args.config:
-            parser.error("--config is required (or pass --dry-run)")
+        if args.find_scanner:
+            # BEFORE the lock and the --config requirement on purpose: the
+            # whole point is diagnosing a host where a daemon already holds
+            # the lock and the grab. Read-only; destructive steps are PRINTED.
+            find_kwargs = {"config_path": args.config or default_config_file(),
+                           "pairing_path": args.pairing_file or default_pairing_file(),
+                           "base_url": args.forward,
+                           "db_path": db_path,
+                           "lock_path": lock_path,
+                           "opener": opener, "ioctl": ioctl, "closer": closer,
+                           "http_get": http_get}
+            if sysfs_root is not None:
+                find_kwargs["sysfs_root"] = sysfs_root
+            lines, code = find_scanner(**find_kwargs)
+            for line in lines:
+                print(line, flush=True)
+            return code
 
+        if not args.config:
+            parser.error("--config is required (or pass --dry-run / "
+                         "--find-scanner)")
+
+        terminal_hint = args.terminal_id
         with DaemonLock(lock_path):
             config = load_config(args.config)
             if config is None:
@@ -1036,6 +1697,34 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 secret = secrets.token_urlsafe(32)
             else:
                 terminal_id, secret = config["terminal_id"], config["secret"]
+            terminal_hint = terminal_id
+            # C2: the loud bring-up. A config copied from another host makes
+            # the daemon forward under THAT host's identity while the server
+            # answers 200 — the silent half of the 2026-11-17 incident. Warn
+            # (or refuse, with --require-host-identity) before register/grab.
+            # Suppressed only when an explicit --terminal-id AGREES with the
+            # loaded config identity (a differing one cannot change what is
+            # forwarded, so it must not silence the check).
+            if config is not None and not args.register \
+                    and not args.register_only \
+                    and args.terminal_id != terminal_id:
+                offer_path = (Path(args.pairing_file) if args.pairing_file
+                              else default_pairing_file())
+                host = (hostname if hostname is not None
+                        else socket.gethostname())
+                findings = identity_findings(
+                    config, load_pairing_file(offer_path), host)
+                for marker, text in findings:
+                    _log(f"{marker}: {text}")
+                # The gate is DELIVERY-breaking only: a config that forwards
+                # as another host's identity refuses to run when asked to; a
+                # stale one-click offer is pairing paperwork and must never
+                # take a healthy kiosk down (it is still reported above).
+                if _is_foreign_identity(config, host) and (
+                        args.require_host_identity
+                        or _env_flag(_REQUIRE_HOST_IDENTITY_ENV)):
+                    _log(_REFUSE_HOST_IDENTITY)
+                    return 1
             if args.register or config is None:
                 try:
                     code = register_with_retry(
@@ -1090,9 +1779,24 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
         # The loud operator problems (EBUSY/EACCES/wrong device/409): one
         # clear line, exit non-zero — never a traceback, never a wedge.
         print(f"scanner_daemon: {exc}", file=sys.stderr)
+        if isinstance(exc, InstanceAlreadyRunning):
+            # Plain words for the trap the 2026-11-17 incident set: the
+            # holder ALSO has the exclusive grab, diagnosis still works, and
+            # re-registering needs it stopped first.
+            held = probe_daemon_lock(lock_path)
+            who = f" (PID {held['pid']})" if held["pid"] is not None else ""
+            print("scanner_daemon: the running daemon holds the single-instance "
+                  f"lock AND the EXCLUSIVE evdev grab{who} — diagnosis still "
+                  "works: re-run with --find-scanner (it never takes the "
+                  "lock). To re-register, stop it first: kill "
+                  + (str(held["pid"]) if held["pid"] is not None
+                     else f"$(cat {held['path']})"), file=sys.stderr)
         return 1
     except PostError as exc:
-        print(f"scanner_daemon: registration failed: {exc}", file=sys.stderr)
+        for line in _registration_recovery(
+                exc, terminal_hint or socket.gethostname(), args.forward,
+                args.config):
+            print(line, file=sys.stderr)
         return 1
     finally:
         for signum in installed:
