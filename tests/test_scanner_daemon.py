@@ -557,39 +557,46 @@ def test_startup_identity_warn_never_prints_the_secret(tmp_path, capsys):
     assert code == 0
 
 
-# --- the narrowed gate, the case-insensitive host match and the malformed-
-# --- offer contract (review fixes, 688eab4) -----------------------------------
+# --- the narrowed gate, the VERBATIM host match and the malformed-
+# --- offer contract (review fixes, 688eab4; F5 pin flipped per coordinator) ---
 # The gate refuses ONLY on the delivery-breaking finding: a config that
 # forwards as an identity this host does not own. Offer-file drift stays
 # loud (FAIL) but is never fatal. terminal_id vs hostname compares
-# case-insensitively (the server accepts mixed case, so 'Hertha-Shop' and
-# 'hertha-shop' are the SAME identity). An explicit --terminal-id suppresses
-# the check only when it AGREES with the loaded config: a differing one
-# cannot change what is forwarded and must not silence the warning.
+# VERBATIM: the server matches terminal_id case-sensitively (a plain ==),
+# so 'Hertha-Shop' and 'hertha-shop' are DIFFERENT terminals — a case-only
+# difference must warn and must refuse under the gate. An explicit
+# --terminal-id suppresses the check only when it AGREES with the loaded
+# config: a differing one cannot change what is forwarded and must not
+# silence the warning.
 
 
-def test_main_hostname_match_is_case_insensitive_and_the_gate_stays_quiet(
+def test_main_case_only_hostname_difference_still_warns(tmp_path, capsys):
+    """A case-only difference is a REAL identity difference: the server
+    matches terminal_id case-sensitively, so config 'Hertha-Shop' on host
+    'hertha-shop' forwards as a terminal this host does not own — the WARN
+    prints (loud, non-fatal by default)."""
+    cfg = _identity_config(tmp_path, "Hertha-Shop")
+    save_pairing_file(tmp_path / "offer.json", "Hertha-Shop", PAIRING_CODE)
+    code, _fake, post = _run_startup(tmp_path, cfg, hostname="hertha-shop")
+    err = capsys.readouterr().err
+    assert ("scanner_daemon: WARN: config identity 'Hertha-Shop' "
+            "is NOT this host ('hertha-shop')") in err
+    assert code == 0 and post.codes() == ["8412345678905"]
+
+
+def test_main_case_only_hostname_difference_is_refused_under_the_gate(
         tmp_path, capsys):
-    """'Hertha-Shop' == 'hertha-shop': no WARN at all, and the gate must NOT
-    refuse (exit 0). A true mismatch (different words, not just case) still
-    warns."""
-    cfg = _identity_config(tmp_path, "hertha-shop")
-    save_pairing_file(tmp_path / "offer.json", "hertha-shop", PAIRING_CODE)
-    code, _fake, post = _run_startup(
-        tmp_path, cfg, hostname="Hertha-Shop",
+    """The same case-only difference is delivery-breaking: under
+    --require-host-identity the daemon exits 1 BEFORE register or grab."""
+    cfg = _identity_config(tmp_path, "Hertha-Shop")
+    save_pairing_file(tmp_path / "offer.json", "Hertha-Shop", PAIRING_CODE)
+    code, fake, post = _run_startup(
+        tmp_path, cfg, hostname="hertha-shop",
         argv_extra=["--require-host-identity"])
     err = capsys.readouterr().err
-    assert "WARN" not in err and "refusing" not in err
-    assert code == 0 and post.codes() == ["8412345678905"]
-    # the true mismatch still warns (and the WARN names the real host)
-    cfg2 = _identity_config(tmp_path, "copied-from-old-laptop")
-    save_pairing_file(tmp_path / "offer.json", "copied-from-old-laptop",
-                      PAIRING_CODE)
-    code, _fake, post = _run_startup(tmp_path, cfg2, hostname="Hertha-Shop")
-    err = capsys.readouterr().err
-    assert ("scanner_daemon: WARN: config identity 'copied-from-old-laptop' "
-            "is NOT this host ('Hertha-Shop')") in err
-    assert code == 0 and post.codes() == ["8412345678905"]
+    assert "scanner_daemon: WARN: config identity 'Hertha-Shop'" in err
+    assert "require-host-identity: refusing to run" in err
+    assert code == 1 and fake.opened == [] and post.calls == []
 
 
 def test_main_offer_drift_is_loud_but_never_fatal_under_the_gate(
