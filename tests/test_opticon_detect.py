@@ -13,6 +13,8 @@ device re-enumerate as ``A002``) and a deliberate edit of this test — not a
 quiet wording change in a doc.
 """
 
+import json
+
 import pytest
 
 from scripts.opticon_detect import (
@@ -21,6 +23,7 @@ from scripts.opticon_detect import (
     describe,
     find_linux_usb_devices,
     find_windows_ports,
+    main,
     survey,
 )
 
@@ -163,6 +166,51 @@ def test_survey_names_the_reception_tool_for_a_device_it_finds(monkeypatch, tmp_
     assert any("scripts/scanner_hid.py" in g for g in report["guidance"])
     # …and nothing in the report may point at a git branch:
     assert "feature/" not in str(report["guidance"])
+
+
+def _main_report(device_states):
+    devices = []
+    for usable in device_states:
+        devices.append({
+            "pid": 0xA001,
+            "nodes": ["/dev/hidraw0"] if usable else [],
+            "usable": usable,
+            "personality": describe(0xA001),
+        })
+    return {
+        "platform": "linux",
+        "wsl": False,
+        "usbipd_attached": None,
+        "devices": devices,
+        "windows_pnp": None,
+        "guidance": [],
+    }
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+@pytest.mark.parametrize(("device_states", "expected"), [
+    ([], 3),
+    ([False], 4),
+    ([True], 0),
+    ([False, True], 0),
+], ids=["absent", "unusable", "usable", "mixed"])
+def test_main_exit_codes_in_both_formats(
+        monkeypatch, capsys, device_states, expected, json_output):
+    report = _main_report(device_states)
+    monkeypatch.setattr("scripts.opticon_detect.survey", lambda: report)
+
+    assert main(["--json"] if json_output else []) == expected
+    out = capsys.readouterr().out
+    if json_output:
+        payload = json.loads(out)
+        assert payload["devices"] == report["devices"]
+        assert set(payload) == set(report)  # no added exit-status field
+    elif not device_states:
+        assert "no Opticon device found" in out
+    elif device_states == [False]:
+        assert "(no node bound)" in out
+    else:
+        assert "/dev/hidraw0" in out
 
 
 def test_find_windows_ports_without_pyserial_is_empty_not_fatal(monkeypatch):

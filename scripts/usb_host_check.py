@@ -44,11 +44,12 @@ nothing happens":
    OPERATOR command — this tool never writes anything, and secrets or
    pairing codes are never read out or printed.
 7. **USB link flakiness**: repeated ``device descriptor read/64, error
-   -71`` and enumerate-then-dropout in the kernel log — the physical-layer
-   signature (cable/connector; the port telemetry excludes power and dead
-   ports) behind both "the scanner looks absent" (retry-ladder exhaustion)
-   and "attached but silent" (dropout mid-session). Also reported: a
-   running ``scanner_daemon`` (it holds the single-instance lock and the
+   -71`` and enumerate-then-dropout in the kernel log — physical-layer
+   evidence (cable/connector/port/device), not proof of which component
+   failed or that power/port faults are excluded. It can explain both
+   "the scanner looks absent" (retry-ladder exhaustion) and "attached
+   but silent" (dropout mid-session). Also reported: a running
+   ``scanner_daemon`` (it holds the single-instance lock and the
    exclusive evdev grab — INFO, not a fault) and a configured stack with
    no Opticon device currently on the bus.
 
@@ -616,19 +617,18 @@ def analyze(dmesg_lines, bus_bdf: dict, *, udev_rules: str,
             title=f"the scanner enumerated, then dropped off the USB bus "
                   f"(port {flaky['opticon_port']})",
             detail=f"{errors_seen} descriptor-read error(s) this boot, one "
-                   "successful attach, then a USB disconnect — the "
-                   "physical-layer signature (cable/connector). NOT power "
-                   "and NOT a dead port: over_current_count stays 0 and the "
-                   "same signature shows on every port tried. A flaky link "
-                   "explains both 'the scanner looks absent' (retry-ladder "
-                   "exhaustion on plug) and 'attached but silent' (dropout "
-                   "mid-session).",
+                   "successful Opticon attach, then a USB disconnect — "
+                   "physical-layer evidence (cable/connector/port/device); it "
+                   "does not identify the failing component or rule out power/port "
+                   "faults. A flaky link explains both 'the scanner looks absent' "
+                   "(retry-ladder exhaustion on plug) and 'attached but silent' "
+                   "(dropout mid-session).",
             fix=[
                 "journalctl -k | grep -E 'error -71|USB disconnect'  # the "
                 "signature",
                 "re-plug until the node appears: ls /sys/class/hidraw/",
-                "try the other USB port, then a known-good cable (the device "
-                "works on another host — the host side is the suspect)",
+                "try one known-good data cable, then another direct USB port "
+                "(one change at a time)",
                 "re-run: uv run python scripts/usb_host_check.py",
             ],
         ))
@@ -643,15 +643,17 @@ def analyze(dmesg_lines, bus_bdf: dict, *, udev_rules: str,
             detail="Each plug burns kernel address rounds; when the retry "
                    "ladder exhausts (journal: 'attempt power cycle'), the "
                    "device stays ABSENT — it looks like a dead scanner or a "
-                   "charge-only cable. The signature is physical-layer "
-                   "(cable/connector), not power (over_current_count is 0) "
-                   "and not a dead port.",
+                   "charge-only cable. Repeated descriptor-read failures are "
+                   "physical-layer evidence (cable/connector/port/device); they "
+                   "do not identify the failing component or rule out power/port "
+                   "faults.",
             fix=[
                 "journalctl -k | grep -E 'error -71|new full-speed'  # the "
                 "retry ladder at work",
                 "re-plug until /dev/hidraw* appears "
                 "(scripts/opticon_detect.py says which node)",
-                "try the other USB port, then a known-good cable",
+                "try one known-good data cable, then another direct USB port "
+                "(one change at a time)",
             ],
         ))
 
@@ -933,6 +935,8 @@ def main(argv=None) -> int:
         warns = sum(1 for f in findings if f.severity == "warning")
         print(f"\n{errors} error(s), {warns} warning(s), "
               f"{len(findings) - errors - warns} info")
+    if facts["dmesg"] is None:
+        return 2
     return 1 if any(f.severity in ("error", "warning") for f in findings) else 0
 
 

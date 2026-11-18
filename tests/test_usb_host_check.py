@@ -13,6 +13,9 @@ import shutil
 import sqlite3
 import tempfile
 
+import pytest
+
+import scripts.usb_host_check as host_check
 from scripts.usb_host_check import (
     MODULES,
     _default_lockfile,
@@ -557,9 +560,17 @@ def test_analyze_warns_on_enumerate_then_dropout(tmp_path):
     warn = [f for f in findings if "dropped off the USB bus" in f.title]
     assert len(warn) == 1
     assert "port 1-1" in warn[0].title
-    assert "NOT power" in warn[0].detail and "cable" in warn[0].detail
+    assert warn[0].detail == (
+        "4 descriptor-read error(s) this boot, one successful Opticon attach, "
+        "then a USB disconnect — physical-layer evidence "
+        "(cable/connector/port/device); it does not identify the failing "
+        "component or rule out power/port faults. A flaky link explains both "
+        "'the scanner looks absent' (retry-ladder exhaustion on plug) and "
+        "'attached but silent' (dropout mid-session).")
     assert any("journalctl" in c for c in warn[0].fix)
-    assert any("known-good cable" in c for c in warn[0].fix)
+    assert warn[0].fix[2] == (
+        "try one known-good data cable, then another direct USB port "
+        "(one change at a time)")
 
 
 def test_analyze_warns_when_the_retry_ladder_exhausts(tmp_path):
@@ -568,9 +579,35 @@ def test_analyze_warns_when_the_retry_ladder_exhausts(tmp_path):
     warn = [f for f in findings if "retry-fragile" in f.title]
     assert len(warn) == 1
     assert "no successful scanner enumeration" in warn[0].title
+    assert warn[0].detail == (
+        "Each plug burns kernel address rounds; when the retry ladder exhausts "
+        "(journal: 'attempt power cycle'), the device stays ABSENT — it looks "
+        "like a dead scanner or a charge-only cable. Repeated descriptor-read "
+        "failures are physical-layer evidence (cable/connector/port/device); "
+        "they do not identify the failing component or rule out power/port "
+        "faults.")
+    assert warn[0].fix[2] == (
+        "try one known-good data cable, then another direct USB port "
+        "(one change at a time)")
     # device_present True (attached) must NOT fire the "looks absent" finding
     assert healthy_analyze(tmp_path, log=LADDER_EXHAUSTED_LOG,
                            device_present=True) == []
+
+
+@pytest.mark.parametrize(("log", "title_fragment"), [
+    (SCANNER_DROPOUT_LOG, "dropped off the USB bus"),
+    (LADDER_EXHAUSTED_LOG, "retry-fragile"),
+])
+def test_flakiness_findings_do_not_claim_uncollected_measurements(
+        tmp_path, log, title_fragment):
+    findings = healthy_analyze(tmp_path, log=log, device_present=False)
+    finding = next(f for f in findings if title_fragment in f.title)
+    rendered = finding.detail + "\n" + "\n".join(finding.fix)
+    for needle in ("NOT power", "NOT a dead port", "over_current_count",
+                   "every port tried", "works on another host"):
+        assert needle not in rendered
+    assert "physical-layer evidence" in finding.detail
+    assert "rule out power/port faults" in finding.detail
 
 
 def test_analyze_ladder_exhausted_needs_three_errors(tmp_path):
@@ -794,3 +831,67 @@ def test_recovery_ladder_omits_delete_without_a_registered_terminal():
         "some-terminal", config_path=None,
         daemon_pid=None, delete_terminal=False)
     assert any("<data>/scanner.json" in c for c in cmds)
+
+
+# --- CLI verdicts -------------------------------------------------------------
+
+
+def _stub_main_environment(monkeypatch, dmesg, findings):
+    facts = {
+        "dmesg": dmesg,
+        "bus_bdf": {},
+        "power_control": {},
+        "udev_rules": host_check.UDEV_RULES,
+        "modemmanager_active": False,
+        "opticon_ignore_rule": True,
+        "brltty_active": False,
+        "modules_root": None,
+        "modules": host_check.MODULES,
+        "uname": "test-kernel",
+        "identity": None,
+        "device_present": None,
+        "daemon_pid": None,
+        "hostname": "test-host",
+    }
+    monkeypatch.setattr(host_check.sys, "platform", "linux")
+    monkeypatch.setattr(host_check, "gather", lambda: facts)
+    monkeypatch.setattr(host_check, "analyze", lambda *a, **kw: findings)
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_main_dmesg_unavailable_returns_2_in_both_formats(
+        monkeypatch, capsys, json_output):
+    findings = [host_check.Finding(
+        severity="warning", title="synthetic warning", detail="detail")]
+    _stub_main_environment(monkeypatch, None, findings)
+
+    assert host_check.main(["--json"] if json_output else []) == 2
+    captured = capsys.readouterr()
+    assert "cannot read dmesg" in captured.err
+    if json_output:
+        payload = json.loads(captured.out)
+        assert set(payload) == {"kernel", "findings"}
+        assert payload["findings"][0]["severity"] == "warning"
+    else:
+        assert "[WARN] synthetic warning" in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+@pytest.mark.parametrize(("severity", "expected"), [
+    ("info", 0), ("warning", 1), ("error", 1),
+])
+def test_main_dmesg_available_preserves_verdict_in_both_formats(
+        monkeypatch, capsys, severity, expected, json_output):
+    findings = [host_check.Finding(
+        severity=severity, title="synthetic finding", detail="detail")]
+    _stub_main_environment(monkeypatch, [], findings)
+
+    assert host_check.main(["--json"] if json_output else []) == expected
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if json_output:
+        payload = json.loads(captured.out)
+        assert payload["findings"][0]["severity"] == severity
+    else:
+        label = {"error": "ERROR", "warning": "WARN", "info": "INFO"}[severity]
+        assert f"[{label}] synthetic finding" in captured.out
