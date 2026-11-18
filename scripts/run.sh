@@ -165,6 +165,13 @@ while time.monotonic() < deadline:
 sys.exit(1)' "$1" 2>/dev/null
 }
 
+_server_alive() {  # zombie-safe: `jobs -pr` lists LIVE children only
+    # `kill -0` cannot be trusted here: a child that exited but was not reaped
+    # yet still answers it, and bash only reaps on SIGCHLD. The same idiom the
+    # reap helper uses is the truth.
+    jobs -pr | grep -qx "$SERVER_PID"
+}
+
 _scanner_verdict() {  # $1 config, $2 pairing file, $3 forward URL
     # Bounded when timeout(1) exists (Linux/CI); stock macOS ships no
     # timeout, and then the tool's own 5 s HTTP timeout is the only bound.
@@ -209,12 +216,34 @@ else
         # completed report (1 = blocking findings, the point); rc >= 2 means
         # it did not complete (e.g. 124 from timeout) and is said in words.
         if [ -f "$SCANNER_CONFIG" ]; then
-            if _scanner_wait_server "$SCANNER_FORWARD"; then
+            # Our own uvicorn first: a bare TCP connect can be answered by a
+            # FOREIGN listener on this port (a leftover server from another
+            # checkout), and the verdict would then describe that process
+            # while reading OUR database. Checked again right before the
+            # report runs, so a server that died during the wait is never
+            # mistaken for a healthy one. Never fatal either way.
+            if ! _server_alive; then
+                echo "scanner:   preflight skipped — our uvicorn is not running"
+            elif ! _scanner_wait_server "$SCANNER_FORWARD"; then
+                echo "scanner:   preflight skipped — $SCANNER_FORWARD not accepting connections within 10 s; run: uv run python scripts/scanner_daemon.py --find-scanner"
+            elif ! _server_alive; then
+                echo "scanner:   preflight skipped — our uvicorn is not running"
+            else
                 SCANNER_RC=0
                 SCANNER_REPORT="$(_scanner_verdict "$SCANNER_CONFIG" \
                     "$SCANNER_PAIRING_FILE" "$SCANNER_FORWARD")" || SCANNER_RC=$?
+                # rc 0/1 are completed reports (1 = blocking findings, the
+                # point). rc 1 WITHOUT a verdict line is a crash (a Python
+                # traceback exits 1) and rc >= 2 did not complete — both are
+                # said in words, with the head of the output, and never fatal.
                 if [ "$SCANNER_RC" -gt 1 ]; then
                     echo "scanner:   preflight did not complete (rc=$SCANNER_RC) — run: uv run python scripts/scanner_daemon.py --find-scanner"
+                    printf '%s\n' "$SCANNER_REPORT" | head -3 \
+                        | sed 's/^/scanner:   | /' || true
+                elif ! printf '%s\n' "$SCANNER_REPORT" | grep -q 'verdict:'; then
+                    echo "scanner:   preflight produced no verdict (rc=$SCANNER_RC) — run: uv run python scripts/scanner_daemon.py --find-scanner"
+                    printf '%s\n' "$SCANNER_REPORT" | head -3 \
+                        | sed 's/^/scanner:   | /' || true
                 else
                     # Only FAIL/WARN/verdict: the diagnosis, not the INFO
                     # chatter and not the printed recovery ladder.
@@ -222,8 +251,6 @@ else
                         | grep -E '^(FAIL|WARN) |verdict:' \
                         | sed 's/^/scanner:   /' || true
                 fi
-            else
-                echo "scanner:   preflight skipped — $SCANNER_FORWARD not accepting connections within 10 s; run: uv run python scripts/scanner_daemon.py --find-scanner"
             fi
         fi
         uv run python scripts/scanner_daemon.py \
