@@ -888,19 +888,19 @@ def load_pairing_file(path):
 def _is_foreign_identity(config, hostname) -> bool:
     """True when the config forwards as an identity this host does not own.
 
-    Case-insensitive on purpose: the server accepts mixed case and dots in a
-    terminal id (app/schemas.py TerminalRegisterIn), so a host registered as
-    ``Hertha-Shop`` whose ``hostname`` returns ``hertha-shop`` is the SAME
-    identity — comparing verbatim would warn on every boot and, under
-    ``--require-host-identity``, refuse to start a healthy kiosk. Absent or
-    empty values never count as a mismatch (there is nothing to compare).
+    Compared verbatim, because the server resolves terminals with a
+    case-sensitive equality (app/routers/scanner.py: register, pair and ingest
+    all match ``Terminal.terminal_id`` with ``==``; app/schemas.py only
+    constrains the pattern), so a case-only difference is a DIFFERENT terminal
+    and is delivery-breaking. Absent or empty values never count as a mismatch
+    (there is nothing to compare).
     """
     if not isinstance(config, dict):
         return False
     terminal_id = config.get("terminal_id")
     if not isinstance(terminal_id, str) or not terminal_id or not hostname:
         return False
-    return terminal_id.casefold() != hostname.casefold()
+    return terminal_id != hostname
 
 
 def _id_is_known(terminal_id, terminal_ids) -> bool:
