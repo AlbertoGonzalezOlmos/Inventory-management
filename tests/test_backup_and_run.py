@@ -113,7 +113,8 @@ def test_backup_db_refuses_when_there_is_no_database():
 
 def _uv_shim(dirpath: str, log: str, uvicorn_exit: int | None = None, *,
              find_exit: int = 0, find_text: str | None = None,
-             ready_exit: int = 0) -> str:
+             ready_exit: int = 0, uvicorn_sleep: float = 0.3,
+             ready_sleep: float = 0) -> str:
     """A fake `uv` that records the HCRM_DATA_DIR it was invoked with.
 
     ``uvicorn_exit`` makes shimmed *uvicorn* invocations exit with that code
@@ -124,12 +125,15 @@ def _uv_shim(dirpath: str, log: str, uvicorn_exit: int | None = None, *,
     line races that TERM (and loses ~half the time) — no assertion on the
     daemon's argv would be deterministic.
 
-    The boot verdict (run.sh's read-only preflight) needs two more knobs:
+    The boot verdict (run.sh's read-only preflight) needs more knobs:
     ``find_text`` is canned `--find-scanner` stdout and ``find_exit`` its
     status (0/1 are completed reports), and ``ready_exit`` fails the
     server-readiness poll so the "not ready → skip" path is testable. Both
     branches are matched BEFORE the generic exit 0, and the readiness probe
-    is the only `python -c` run.sh makes.
+    is the only `python -c` run.sh makes. ``uvicorn_sleep=0`` makes the child
+    exit at once and ``ready_sleep`` delays the poll, so the crash guard that
+    requires OUR uvicorn to be alive (run.sh `_server_alive`) is observable
+    without racing bash's SIGCHLD reaping.
     """
     shim = os.path.join(dirpath, "uv")
     find_file = os.path.join(dirpath, "find-scanner.out")
@@ -141,10 +145,10 @@ def _uv_shim(dirpath: str, log: str, uvicorn_exit: int | None = None, *,
         fh.write("#!/usr/bin/env bash\n"
                  f'echo "DATA_DIR=$HCRM_DATA_DIR ARGS=$*" >> "{log}"\n'
                  'case "$*" in\n'
-                 f'  *uvicorn*) sleep 0.3; {uv_exit} ;;\n'
+                 f'  *uvicorn*) sleep {uvicorn_sleep}; {uv_exit} ;;\n'
                  f'  *--find-scanner*) [ -f "{find_file}" ] && cat "{find_file}"; '
                  f'exit {find_exit} ;;\n'
-                 f'  *"import socket"*) exit {ready_exit} ;;\n'
+                 f'  *"import socket"*) sleep {ready_sleep}; exit {ready_exit} ;;\n'
                  "esac\n"
                  "exit 0\n")
     os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -229,11 +233,13 @@ _STRIP_ENV = ("HCRM_DATA_DIR", "DATABASE_URL", "HCRM_SCRATCH",
 
 
 def _run_sh_with_shim(td, log, *, uvicorn_exit=None, find_exit=0,
-                      find_text=None, ready_exit=0, **extra_env):
+                      find_text=None, ready_exit=0, uvicorn_sleep=0.3,
+                      ready_sleep=0, **extra_env):
     """Run scripts/run.sh against the uv shim; return (proc, calls)."""
     shim_dir = _uv_shim(td, log, uvicorn_exit=uvicorn_exit,
                         find_exit=find_exit, find_text=find_text,
-                        ready_exit=ready_exit)
+                        ready_exit=ready_exit, uvicorn_sleep=uvicorn_sleep,
+                        ready_sleep=ready_sleep)
     env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
     env.update({"PATH": shim_dir + os.pathsep + env["PATH"],
                 "HCRM_PORT": "8199"})
@@ -608,6 +614,105 @@ def test_run_sh_parses_the_forward_url_without_shell_colon_surgery():
                 encoding="utf-8").read()
     assert "urlsplit" in text, "the readiness probe must parse the URL"
     assert "SCANNER_FORWARD%%:" not in text and "SCANNER_FORWARD%:" not in text
+
+
+def test_run_sh_preflight_crash_without_a_verdict_is_loud_but_not_fatal():
+    """F2: a Python traceback exits 1, the same status as "findings found".
+
+    The boot console must not stay silent about it: rc 1 *without* a verdict
+    line means the report crashed, so run.sh says so and shows the head of the
+    output (`scanner:   | …`), then boots on — a broken diagnostic is never a
+    boot failure.
+    """
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-crash-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        crash = ("Traceback (most recent call last):\n"
+                 "  File \"scanner_daemon.py\", line 1, in <module>\n"
+                 "RuntimeError: boom\n"
+                 "THE-FOURTH-LINE-MUST-NOT-PRINT\n")
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            find_exit=1, find_text=crash)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert ("scanner:   preflight produced no verdict (rc=1) — run: "
+                "uv run python scripts/scanner_daemon.py --find-scanner"
+                in proc.stdout), proc.stdout
+        for line in ("scanner:   | Traceback (most recent call last):",
+                     "scanner:   |   File \"scanner_daemon.py\", line 1, in <module>",
+                     "scanner:   | RuntimeError: boom"):
+            assert line in proc.stdout, (line, proc.stdout)
+        assert "THE-FOURTH-LINE-MUST-NOT-PRINT" not in proc.stdout, proc.stdout
+        # still never fatal, and the daemon was still spawned
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
+        assert len(_daemon_calls(calls)) == 1, calls
+
+
+def test_run_sh_preflight_that_could_not_run_shows_the_first_lines():
+    """F7: rc>1 (timeout 124, argparse 2, missing uv 127) is not a verdict —
+    the actionable part is the tool's own output, so its head is printed."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-incomplete-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        usage = ("usage: scanner_daemon.py [-h] [--config PATH]\n"
+                 "scanner_daemon.py: error: unrecognized arguments: "
+                 "--find-scanner\n"
+                 "Try 'scanner_daemon.py -h' for help.\n"
+                 "THE-FOURTH-LINE-MUST-NOT-PRINT\n")
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            find_exit=2, find_text=usage)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert ("scanner:   preflight did not complete (rc=2) — run: "
+                "uv run python scripts/scanner_daemon.py --find-scanner"
+                in proc.stdout), proc.stdout
+        assert "scanner:   | usage: scanner_daemon.py [-h] [--config PATH]" in proc.stdout, proc.stdout
+        assert "scanner:   | scanner_daemon.py: error: unrecognized" in proc.stdout, proc.stdout
+        assert "scanner:   | Try 'scanner_daemon.py -h' for help." in proc.stdout, proc.stdout
+        assert "THE-FOURTH-LINE-MUST-NOT-PRINT" not in proc.stdout, proc.stdout
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
+        assert len(_daemon_calls(calls)) == 1, calls
+
+
+def test_run_sh_preflight_skipped_when_our_own_uvicorn_died():
+    """F6: readiness must never be trusted when OUR server is not alive.
+
+    A bare TCP connect can be answered by a foreign listener on the port, so
+    run.sh requires its own child (`jobs -pr`, zombie-safe) to be alive — once
+    before the wait and once right before the report. Here uvicorn exits at
+    once and the readiness poll takes long enough for the child to be gone, so
+    the guard is deterministic; the boot still continues and uvicorn's status
+    still propagates.
+    """
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-deadserver-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            uvicorn_exit=5, uvicorn_sleep=0, ready_sleep=0.3,
+            find_exit=1, find_text=_blocking_report(data))
+        assert proc.returncode == 5, (proc.returncode, proc.stdout, proc.stderr)
+        assert ("scanner:   preflight skipped — our uvicorn is not running"
+                in proc.stdout), proc.stdout
+        # no verdict from a server we cannot see, and no FAIL either
+        assert "verdict:" not in proc.stdout, proc.stdout
+        assert "scanner:   FAIL" not in proc.stdout, proc.stdout
+        assert _preflight_calls(calls) == [], calls
+        # degraded, not fatal: the daemon was still spawned
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
+
+
+def test_run_sh_preflight_is_silently_skipped_on_a_first_boot():
+    """No config yet — the daemon is registering right now, so there is
+    nothing to compare and the report could only say "no config"."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-firstboot-") as td:
+        data = os.path.join(td, "data")
+        os.makedirs(data, exist_ok=True)   # no scanner.json on purpose
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            find_exit=1, find_text=_blocking_report(data))
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert _preflight_calls(calls) == [], calls
+        assert "scanner:   FAIL" not in proc.stdout, proc.stdout
+        assert "preflight skipped" not in proc.stdout, proc.stdout
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
 
 
 def test_python_scripts_are_syntactically_valid():
