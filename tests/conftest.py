@@ -93,6 +93,15 @@ app.embeddings.embed_text_blob = _fake_embed_text_blob
 app.main.warm_up = lambda: None
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_identity_gate(monkeypatch):
+    """A developer's ambient export must never arm the daemon's fatal
+    identity gate (scripts/scanner_daemon.py --require-host-identity /
+    HCRM_SCANNER_REQUIRE_HOST_IDENTITY, ITEM-01): the suite pins the
+    warn-and-continue default; the gate tests set the variable themselves."""
+    monkeypatch.delenv("HCRM_SCANNER_REQUIRE_HOST_IDENTITY", raising=False)
+
+
 @pytest.fixture(scope="session")
 def _client():
     """A single TestClient, no lifespan: each test seeds its own database."""
