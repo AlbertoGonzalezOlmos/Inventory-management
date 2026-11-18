@@ -868,6 +868,41 @@ def save_pairing_file(path, terminal_id: str, code: str) -> None:
         raise
 
 
+def load_pairing_file(path) -> dict | None:
+    """Read the one-click offer {terminal_id, pairing_code}, or None.
+
+    Tolerant mirror of :func:`load_config` — absent, unreadable, non-UTF-8
+    or non-object content is None. The start-up consistency check must never
+    turn a half-written offer file into a traceback, and the pairing code is
+    never printed by anything that calls this.
+    """
+    try:
+        offer = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    return offer if isinstance(offer, dict) else None
+
+
+#: Env override for --require-host-identity. Same convention as
+#: app/security.py::_env_flag (1/true/yes/on, case- and whitespace-
+#: insensitive; empty or unknown => default) — a local copy on purpose:
+#: this script is standalone stdlib and must not import app.*.
+_REQUIRE_HOST_IDENTITY_ENV = "HCRM_SCANNER_REQUIRE_HOST_IDENTITY"
+
+#: The fatal-path line printed once, right before the gated exit 1.
+_REFUSE_HOST_IDENTITY = (
+    "require-host-identity: refusing to run — fix the identity above (the "
+    "recovery ladder is: scripts/scanner_daemon.py --find-scanner)")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """app.security._env_flag's contract, read at CALL time (never import)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def register_terminal(post, base_url: str, terminal_id: str, secret: str) -> str:
     """POST /api/scanner/terminals → the single-use pairing code.
 
@@ -1084,12 +1119,58 @@ def inspect_terminals_db(db_path, secret: str | None = None) -> list[dict] | Non
             for tid, shash, paired, seen in rows]
 
 
+def identity_findings(config, offer, hostname,
+                      *, terminal_ids=None) -> list[tuple[str, str]]:
+    """PURE identity/offer consistency findings → [(marker, text), ...].
+
+    Read-only by construction: no I/O, no network, no DB, no writes, and
+    nothing secret in the output (both terminal ids are already printed by
+    the report; the secret and the pairing code never are).
+
+    The two call sites share it so they can never drift:
+      * ``main()`` at daemon start-up — config + offer + hostname, with
+        ``terminal_ids=None`` (no server knowledge at boot: an HTTP round
+        trip before the grab would only delay the device).
+      * ``find_scanner()`` — the same, plus the ids the local DB knows.
+
+    Stable order (pinned): A offer-vs-config FAIL, C offer-unknown-to-server
+    FAIL, D config-vs-host WARN. Every FAIL returned here is OFFER-family and
+    find_scanner appends that failure key; the server row-level findings
+    (config identity unknown, secret mismatch, FOREIGN IDENTITY,
+    already-paired) stay in ``find_scanner``, which owns the facts
+    (``paired``/``secret_matches``/``owner``) this helper deliberately lacks.
+    """
+    findings: list[tuple[str, str]] = []
+    terminal_id = config.get("terminal_id") if isinstance(config, dict) else None
+    if not isinstance(terminal_id, str) or not terminal_id:
+        terminal_id = None
+    offer_tid = offer.get("terminal_id") if isinstance(offer, dict) else None
+    if isinstance(offer_tid, str) and offer_tid:
+        if terminal_id and offer_tid != terminal_id:
+            findings.append(("FAIL",
+                f"offer file names terminal {offer_tid!r} but the daemon "
+                f"config is {terminal_id!r} — the pill would pair an "
+                "identity this daemon does not hold"))
+        if terminal_ids is not None and offer_tid not in terminal_ids:
+            findings.append(("FAIL",
+                f"offer file names {offer_tid!r}, which the server does NOT "
+                "know — clicking the pill returns 401 bad_pairing (a stale "
+                "offer; --register overwrites it atomically)"))
+    if terminal_id and hostname and terminal_id != hostname:
+        findings.append(("WARN",
+            f"config identity {terminal_id!r} is NOT this host "
+            f"({hostname!r}) — scans will forward to a queue no browser "
+            "here can read; run scripts/scanner_daemon.py --find-scanner "
+            "for the one recovery ladder"))
+    return findings
+
+
 def find_scanner(*, config_path=None, pairing_path=None,
                  base_url: str = "http://127.0.0.1:8000", db_path=None,
                  sysfs_root: str | Path = _SYSFS_INPUT_CLASS, lock_path=None,
                  vid_pid: tuple[int, int] = DEFAULT_VID_PID,
                  opener=None, ioctl=None, closer=None,
-                 http_get=None) -> tuple[list[str], int]:
+                 http_get=None, hostname=None) -> tuple[list[str], int]:
     """The read-only pairing-fallback report → ``(lines, exit_code)``.
 
     Answers, in order: device present? node grabbed/held by whom? another
@@ -1242,12 +1323,21 @@ def find_scanner(*, config_path=None, pairing_path=None,
 
     # 6. the one-click offer file vs config vs server.
     offer_path = Path(pairing_path) if pairing_path else default_pairing_file()
+    offer = load_pairing_file(offer_path)   # same tolerance, never prints it
+    offer_tid = offer.get("terminal_id") if offer else None
     offer_row = None
-    try:
-        offer = json.loads(offer_path.read_text())
-        offer_tid = offer.get("terminal_id") if isinstance(offer, dict) else None
-    except (OSError, ValueError):
-        offer, offer_tid = None, None
+    # 6a. host-vs-config and offer-vs-config: the PURE helper main() also
+    # runs at start-up, so the two surfaces can never drift. Row-level
+    # findings (config unknown, secret/owner/paired) stay in section 5:
+    # they need facts terminal_ids deliberately does not carry.
+    host = socket.gethostname() if hostname is None else hostname
+    for marker, text in identity_findings(
+            config, offer, host,
+            terminal_ids=None if terminals is None
+            else {r["terminal_id"] for r in terminals}):
+        say(marker, text)
+        if marker == "FAIL":
+            failures.append("offer")   # every helper FAIL is offer-family
     if offer is None:
         if identity_verified and mine is not None and not mine["paired"]:
             say("FAIL", f"no offer file at {offer_path} and {terminal_id!r} is "
@@ -1258,32 +1348,20 @@ def find_scanner(*, config_path=None, pairing_path=None,
             say("INFO", f"no offer file at {offer_path} — only the one-click "
                         "pill of an UNPAIRED terminal needs it (--register "
                         "writes it)")
-    else:
-        # The pairing code inside is single-use: never printed.
-        if terminal_id is not None and offer_tid != terminal_id:
-            say("FAIL", f"offer file names terminal {offer_tid!r} but the "
-                        f"daemon config is {terminal_id!r} — the pill would "
-                        "pair an identity this daemon does not hold")
-            failures.append("offer")
-        if terminals is not None:
-            offer_row = next((r for r in terminals
-                              if r["terminal_id"] == offer_tid), None)
-            if offer_row is None:
-                say("FAIL", f"offer file names {offer_tid!r}, which the server "
-                            "does NOT know — clicking the pill returns 401 "
-                            "bad_pairing (a stale offer; --register overwrites "
-                            "it atomically)")
-                failures.append("offer")
-            elif offer_row["paired"]:
+    elif terminals is not None:
+        offer_row = next((r for r in terminals
+                          if r["terminal_id"] == offer_tid), None)
+        if offer_row is not None:   # an unknown one already FAILed in 6a
+            if offer_row["paired"]:
                 say("WARN", f"offer file for {offer_tid!r} is STALE — that "
                             "terminal is already paired; the pill would answer "
                             "409 already_paired")
             else:
                 say("OK", f"offer file consistent: {offer_tid!r} is registered "
                           "and unpaired — the pill will mint the browser token")
-        else:
-            say("WARN", "offer file present, but its server-side consistency is "
-                        "UNVERIFIED (no readable local DB)")
+    else:
+        say("WARN", "offer file present, but its server-side consistency is "
+                    "UNVERIFIED (no readable local DB)")
 
     # 7. verdict + exactly ONE recovery ladder.
     if not failures:
@@ -1424,7 +1502,8 @@ def _nonnegative_seconds(text: str) -> float:
 
 def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
          closer=None, scan_reader=None, lock_path=None,
-         sysfs_root=None, clock=None, db_path=None, http_get=None) -> int:
+         sysfs_root=None, clock=None, db_path=None, http_get=None,
+         hostname=None) -> int:
     """The daemon entrypoint (round 4, T5).
 
     Modes:
@@ -1440,7 +1519,10 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
         FATAL: the code would be unrecoverable. Then run.
         Run: lock → grab (T3) → decode (T2) → forward each scan to
         POST /api/scanner/events, spooled and retried so a server outage
-        never stops the grab and never drops a scan.
+        never stops the grab and never drops a scan. Before the grab, a
+        start-up identity check compares the config's terminal_id with this
+        host and the offer file with the config; ``--require-host-identity``
+        makes that check fatal (exit 1) instead of a warning.
       scanner_daemon --dry-run [--node N]
         Decode and print (redacted), ZERO HTTP — the hardware-checklist
         mode; no config, no lock, no network import.
@@ -1502,6 +1584,13 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                              "offer-file identity, and ONE recovery plan with "
                              "exact commands. Writes nothing, never takes the "
                              "lock; exit 0 only when the chain verifies usable")
+    parser.add_argument("--require-host-identity", action="store_true",
+                        help="make the start-up identity check fatal: if the "
+                             "config's terminal_id is not this host, or the "
+                             "one-click offer file names a different identity, "
+                             "exit 1 before registering or grabbing (default: "
+                             "warn and keep running). Also "
+                             "HCRM_SCANNER_REQUIRE_HOST_IDENTITY=1")
     args = parser.parse_args(argv)
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep
@@ -1566,6 +1655,24 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
             else:
                 terminal_id, secret = config["terminal_id"], config["secret"]
             terminal_hint = terminal_id
+            # C2: the loud bring-up. A config copied from another host makes
+            # the daemon forward under THAT host's identity while the server
+            # answers 200 — the silent half of the 2026-11-17 incident. Warn
+            # (or refuse, with --require-host-identity) before register/grab.
+            # Suppressed for register modes and an explicit --terminal-id.
+            if config is not None and not args.register \
+                    and not args.register_only and not args.terminal_id:
+                offer_path = (Path(args.pairing_file) if args.pairing_file
+                              else default_pairing_file())
+                findings = identity_findings(
+                    config, load_pairing_file(offer_path),
+                    hostname if hostname is not None else socket.gethostname())
+                for marker, text in findings:
+                    _log(f"{marker}: {text}")
+                if findings and (args.require_host_identity
+                                 or _env_flag(_REQUIRE_HOST_IDENTITY_ENV)):
+                    _log(_REFUSE_HOST_IDENTITY)
+                    return 1
             if args.register or config is None:
                 try:
                     code = register_with_retry(

@@ -111,7 +111,9 @@ def test_backup_db_refuses_when_there_is_no_database():
         assert "nothing to back up" in proc.stderr
 
 
-def _uv_shim(dirpath: str, log: str, uvicorn_exit: int | None = None) -> str:
+def _uv_shim(dirpath: str, log: str, uvicorn_exit: int | None = None, *,
+             find_exit: int = 0, find_text: str | None = None,
+             ready_exit: int = 0) -> str:
     """A fake `uv` that records the HCRM_DATA_DIR it was invoked with.
 
     ``uvicorn_exit`` makes shimmed *uvicorn* invocations exit with that code
@@ -121,13 +123,29 @@ def _uv_shim(dirpath: str, log: str, uvicorn_exit: int | None = None) -> str:
     down once uvicorn exits, so without the grace period the daemon's log
     line races that TERM (and loses ~half the time) — no assertion on the
     daemon's argv would be deterministic.
+
+    The boot verdict (run.sh's read-only preflight) needs two more knobs:
+    ``find_text`` is canned `--find-scanner` stdout and ``find_exit`` its
+    status (0/1 are completed reports), and ``ready_exit`` fails the
+    server-readiness poll so the "not ready → skip" path is testable. Both
+    branches are matched BEFORE the generic exit 0, and the readiness probe
+    is the only `python -c` run.sh makes.
     """
     shim = os.path.join(dirpath, "uv")
+    find_file = os.path.join(dirpath, "find-scanner.out")
+    if find_text is not None:
+        with open(find_file, "w", encoding="utf-8") as fh:
+            fh.write(find_text)
     uv_exit = f"exit {uvicorn_exit}" if uvicorn_exit is not None else ":"
     with open(shim, "w", encoding="utf-8") as fh:
         fh.write("#!/usr/bin/env bash\n"
                  f'echo "DATA_DIR=$HCRM_DATA_DIR ARGS=$*" >> "{log}"\n'
-                 f'case "$*" in *uvicorn*) sleep 0.3; {uv_exit};; esac\n'
+                 'case "$*" in\n'
+                 f'  *uvicorn*) sleep 0.3; {uv_exit} ;;\n'
+                 f'  *--find-scanner*) [ -f "{find_file}" ] && cat "{find_file}"; '
+                 f'exit {find_exit} ;;\n'
+                 f'  *"import socket"*) exit {ready_exit} ;;\n'
+                 "esac\n"
                  "exit 0\n")
     os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return os.path.dirname(shim)
@@ -206,12 +224,16 @@ _STRIP_ENV = ("HCRM_DATA_DIR", "DATABASE_URL", "HCRM_SCRATCH",
               "HCRM_CATALOGUE_IMAGES_DIR",
               "HCRM_SCANNER_DAEMON", "HCRM_SCANNER_PAIRING_FILE",
               "HCRM_SCANNER_REGISTER_WAIT", "HCRM_SCANNER_CONFIG",
+              "HCRM_SCANNER_REQUIRE_HOST_IDENTITY",
               "HCRM_ALLOW_INSECURE_BIND")
 
 
-def _run_sh_with_shim(td, log, *, uvicorn_exit=None, **extra_env):
+def _run_sh_with_shim(td, log, *, uvicorn_exit=None, find_exit=0,
+                      find_text=None, ready_exit=0, **extra_env):
     """Run scripts/run.sh against the uv shim; return (proc, calls)."""
-    shim_dir = _uv_shim(td, log, uvicorn_exit=uvicorn_exit)
+    shim_dir = _uv_shim(td, log, uvicorn_exit=uvicorn_exit,
+                        find_exit=find_exit, find_text=find_text,
+                        ready_exit=ready_exit)
     env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
     env.update({"PATH": shim_dir + os.pathsep + env["PATH"],
                 "HCRM_PORT": "8199"})
@@ -335,6 +357,11 @@ def _uv_hold_shim(dirpath: str, log: str) -> str:
         fh.write("#!/usr/bin/env bash\n"
                  f'echo "DATA_DIR=$HCRM_DATA_DIR ARGS=$*" >> "{log}"\n'
                  'case "$*" in\n'
+                 # The boot preflight and the readiness poll are FOREGROUND
+                 # calls: holding either would defer run.sh's signal trap and
+                 # hang the signal test inside $( ) — they must never match the
+                 # exec-sleep branches below.
+                 '  *--find-scanner*|"*import socket"*) exit 0 ;;\n'
                  f'  *uvicorn*) echo $$ > "{dirpath}/server.pid"; exec sleep 30 ;;\n'
                  f'  *scanner_daemon.py*) echo $$ > "{dirpath}/daemon.pid"; exec sleep 30 ;;\n'
                  "esac\n"
@@ -391,6 +418,196 @@ def test_run_sh_signal_reaps_both_children_and_preserves_signal_status(sig, expe
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+
+# --- the boot verdict (C3): a read-only preflight, never fatal ----------------
+#
+# run.sh prints --find-scanner's FAIL/WARN/verdict lines on the boot console
+# BEFORE it spawns the daemon (so the report never describes our own lock/grab).
+# The uv shim owns that verdict: a boot-verdict test must not need a real
+# server, a real DB or a device.
+
+
+def _scanner_data_dir(td):
+    """A data dir with the identity files a real kiosk boot already has.
+
+    Their presence is what makes the preflight run at all (a first boot has
+    no config yet — the daemon is registering right then), so every verdict
+    test creates them, and asserts afterwards that the boot left them alone.
+    """
+    data = os.path.join(td, "data")
+    os.makedirs(data, exist_ok=True)
+    cfg = os.path.join(data, "scanner.json")
+    offer = os.path.join(data, "scanner-pairing.json")
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write('{"terminal_id": "hertha-shop", "secret": "SECRETMARK"}')
+    with open(offer, "w", encoding="utf-8") as fh:
+        fh.write('{"terminal_id": "hertha-shop", "pairing_code": "CODE1234"}')
+    return data, cfg, offer
+
+
+def _blocking_report(data):
+    """Canned `--find-scanner` output: realistic markers, padding, em-dashes."""
+    return "\n".join([
+        "scanner_daemon --find-scanner: READ-ONLY report — nothing below was "
+        "written, locked or kept grabbed",
+        f"OK   config {data}/scanner.json: terminal_id='hertha-shop', secret "
+        "present (43 chars — never printed)",
+        "FAIL scanner 065a:a001 NOT ATTACHED — no /dev/input/eventN matches in sysfs.",
+        "INFO another scanner_daemon IS RUNNING (lockfile /run/user/1000/x.lock, PID 4242)",
+        "OK   server up at http://127.0.0.1:8199 (GET /api/scanner/events → 401)",
+        "WARN it is already PAIRED: the read token went to WHICHEVER browser paired first",
+        "FAIL offer file names terminal 'a' but the daemon config is 'b' — the pill "
+        "would pair an identity this daemon does not hold",
+        "FAIL verdict: scans CANNOT reliably reach a browser on this host "
+        "(2 blocking finding(s): device-absent, offer)",
+        "",
+        "recovery plan (ONE ladder — printed for the operator, NOTHING here is executed):",
+        "  1. hardware: the scanner is off the bus — re-plug it",
+    ]) + "\n"
+
+
+def _daemon_calls(calls):
+    """The real daemon spawn(s) — never the preflight, which shares the path."""
+    return [c for c in calls if "scanner_daemon.py" in c and "--find-scanner" not in c]
+
+
+def _preflight_calls(calls):
+    return [c for c in calls if "--find-scanner" in c]
+
+
+def test_run_sh_prints_the_preflight_verdict_before_the_daemon_spawns():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-verdict-") as td:
+        data, cfg, offer = _scanner_data_dir(td)
+        report = _blocking_report(data)
+        before = (open(cfg, encoding="utf-8").read(),
+                  open(offer, encoding="utf-8").read())
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            find_exit=1, find_text=report)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        # (1) the diagnosis, prefixed, on the operator's console
+        assert "scanner:   FAIL scanner 065a:a001 NOT ATTACHED" in proc.stdout, proc.stdout
+        assert "scanner:   WARN it is already PAIRED" in proc.stdout, proc.stdout
+        assert ("scanner:   FAIL verdict: scans CANNOT reliably reach a browser"
+                in proc.stdout), proc.stdout
+        # …and ONLY FAIL/WARN/verdict: no header, no INFO, no ladder, no
+        # OK chatter — and never key material from the report
+        for excluded in ("READ-ONLY report", "INFO another scanner_daemon",
+                         "recovery plan", "OK   config ", "OK   server up",
+                         "SECRETMARK", "CODE1234"):
+            assert excluded not in proc.stdout, (excluded, proc.stdout)
+        # (5) preflight BEFORE the spawn, reusing the daemon's resolution
+        daemons, preflights = _daemon_calls(calls), _preflight_calls(calls)
+        assert len(daemons) == 1 and len(preflights) == 1, calls
+        assert calls.index(preflights[0]) < calls.index(daemons[0]), calls
+        for flag in ("--find-scanner", f"--config {cfg}",
+                     f"--pairing-file {offer}",
+                     "--forward http://127.0.0.1:8199"):
+            assert flag in preflights[0], preflights[0]
+        for forbidden in ("--register", "--print-code", "--dry-run"):
+            assert forbidden not in preflights[0], preflights[0]
+        # (4) the daemon argv is unchanged by the preflight
+        assert f"--config {data}/scanner.json" in daemons[0], daemons[0]
+        assert f"--pairing-file {data}/scanner-pairing.json" in daemons[0], daemons[0]
+        assert "--register-wait 300" in daemons[0], daemons[0]
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
+        # read-only: the boot left both identity files byte-identical
+        assert (open(cfg, encoding="utf-8").read(),
+                open(offer, encoding="utf-8").read()) == before
+
+
+def test_run_sh_boot_survives_a_blocking_preflight_verdict():
+    """(2) a non-zero verdict is the POINT, not a boot failure."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-nonfatal-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            find_exit=1, find_text=_blocking_report(data))
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
+        assert len(_daemon_calls(calls)) == 1, calls
+
+
+def test_run_sh_preflight_does_not_mask_the_uvicorn_exit_code():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-verdict-rc-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        proc, _calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            uvicorn_exit=3, find_exit=1, find_text=_blocking_report(data))
+        assert proc.returncode == 3, (proc.returncode, proc.stdout, proc.stderr)
+
+
+@pytest.mark.parametrize(("extra_env", "banner"), [
+    ({"HCRM_SCRATCH": "1"}, "daemon skipped"),
+    # the strong case: a config EXISTS in the data dir, so only the opt-out
+    # can keep the preflight from running
+    ({"HCRM_SCANNER_DAEMON": "0"}, "daemon disabled"),
+    ({"HCRM_HOST": "192.168.1.5", "HCRM_DEV_ADMIN": "0"},
+     "no 127.0.0.1/[::1] listener"),
+])
+def test_run_sh_skips_the_preflight_when_the_daemon_is_skipped(extra_env, banner):
+    """(3) scratch / opt-out / unforwardable bind: no preflight call, no FAIL."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-nopre-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            find_exit=1, find_text=_blocking_report(data), **extra_env)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert _preflight_calls(calls) == [], calls
+        assert banner in proc.stdout, proc.stdout
+        assert "scanner:   FAIL" not in proc.stdout, proc.stdout
+
+
+def test_run_sh_unreachable_server_skips_the_preflight_without_a_false_fail():
+    """(6) a cold server must produce the bounded skip, never a FAIL."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-notch-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            ready_exit=1, find_exit=1, find_text=_blocking_report(data))
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert _preflight_calls(calls) == [], calls
+        assert "not accepting connections within 10 s" in proc.stdout, proc.stdout
+        # never a false FAIL from inside the script that starts the server,
+        # and the boot still proceeded to the daemon
+        assert "scanner:   FAIL" not in proc.stdout, proc.stdout
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
+
+
+def test_run_sh_preflight_with_no_output_does_not_abort_the_boot():
+    """The filter must survive grep's no-match exit under `pipefail`."""
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-silent-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            find_exit=0, find_text=None)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert len(_preflight_calls(calls)) == 1, calls
+        assert _preflight_calls(calls)[0].endswith(" --find-scanner --config "
+            + f"{data}/scanner.json --pairing-file {data}/scanner-pairing.json "
+            "--forward http://127.0.0.1:8199"), _preflight_calls(calls)[0]
+        assert "scanner:   daemon pid " in proc.stdout, proc.stdout
+
+
+def test_run_sh_preflight_forwards_the_ipv6_loopback_bracketed():
+    with tempfile.TemporaryDirectory(prefix="hcrm-runsh-pre6-") as td:
+        data, _cfg, _offer = _scanner_data_dir(td)
+        proc, calls = _run_sh_with_shim(
+            td, os.path.join(td, "calls.log"), HCRM_DATA_DIR=data,
+            HCRM_HOST="::1", find_exit=1, find_text=_blocking_report(data))
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        preflights = _preflight_calls(calls)
+        assert preflights, calls
+        assert "--forward http://[::1]:8199" in preflights[0], preflights[0]
+
+
+def test_run_sh_parses_the_forward_url_without_shell_colon_surgery():
+    """`${X%%:*}` mangles `http://[::1]:8000`; the probe must use urllib."""
+    text = open(os.path.join(REPO_ROOT, "scripts", "run.sh"),
+                encoding="utf-8").read()
+    assert "urlsplit" in text, "the readiness probe must parse the URL"
+    assert "SCANNER_FORWARD%%:" not in text and "SCANNER_FORWARD%:" not in text
 
 
 def test_python_scripts_are_syntactically_valid():
