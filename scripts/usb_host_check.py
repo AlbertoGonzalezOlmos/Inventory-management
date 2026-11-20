@@ -51,7 +51,9 @@ nothing happens":
    but silent" (dropout mid-session). Also reported: a running
    ``scanner_daemon`` (it holds the single-instance lock and the
    exclusive evdev grab — INFO, not a fault) and a configured stack with
-   no Opticon device currently on the bus.
+   no Opticon device currently on the bus. A read-only sysfs hotplug port
+   table (state/connect_type per port) prints before the findings and rides
+   in ``--json`` as ``port_states`` — report context, never a finding.
 
 Usage::
 
@@ -710,6 +712,74 @@ def gather_device_present(sysfs_root: str = "/sys/bus/usb/devices") -> bool | No
     return False
 
 
+#: Hotplug port state dirs come in two sysfs layouts: nested under the root
+#: hub's interface device (``1-0:1.0/usb1-port2`` — this host's kernel) or
+#: flat under the devices root (``usb1-port2`` — older kernels).
+_PORT_DIR_RE = re.compile(r"usb(\d+)-port(\d+)")
+_HUB_IFACE_RE = re.compile(r"\d+-0:1\.0")
+
+
+def _port_attr(path: str, attr: str) -> str | None:
+    """One sysfs port attribute, stripped; None when absent/unreadable/empty."""
+    try:
+        with open(os.path.join(path, attr), encoding="ascii",
+                  errors="replace") as fh:
+            value = fh.read().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def gather_port_states(sysfs_root: str = "/sys/bus/usb/devices") -> list[dict]:
+    """Hotplug port state — the cheapest no-root "is anything attached" oracle.
+
+    One row per port dir in EITHER layout (nested ``<bus>-0:1.0/usbN-portM``
+    or flat ``usbN-portM``), sorted by (bus, port) number::
+
+        {"port": "usb1-port2", "state": str|None, "connect_type": str|None,
+         "over_current_count": int|None, "disable": int|None}
+
+    ``[]`` when the root is absent/unreadable. FAIL-SILENT per file (the
+    ``gather_power_control`` convention): a missing/unreadable attribute is
+    None, never a guess; a partial sysfs never raises. This is report
+    context, not a fault signal — it never becomes a finding.
+    """
+    try:
+        names = os.listdir(sysfs_root)
+    except OSError:
+        return []
+    found: dict[str, tuple[tuple[int, int], str]] = {}
+    for name in names:
+        m = _PORT_DIR_RE.fullmatch(name)
+        if m:
+            found[name] = ((int(m.group(1)), int(m.group(2))),
+                           os.path.join(sysfs_root, name))
+        elif _HUB_IFACE_RE.fullmatch(name):
+            hub = os.path.join(sysfs_root, name)
+            try:
+                children = os.listdir(hub)
+            except OSError:
+                continue
+            for child in children:
+                m = _PORT_DIR_RE.fullmatch(child)
+                if m and child not in found:
+                    found[child] = ((int(m.group(1)), int(m.group(2))),
+                                    os.path.join(hub, child))
+    rows = []
+    for port, (_key, path) in sorted(found.items(), key=lambda kv: kv[1][0]):
+        row: dict = {"port": port,
+                     "state": _port_attr(path, "state"),
+                     "connect_type": _port_attr(path, "connect_type")}
+        for attr in ("over_current_count", "disable"):
+            value = _port_attr(path, attr)
+            try:
+                row[attr] = int(value) if value is not None else None
+            except ValueError:
+                row[attr] = None
+        rows.append(row)
+    return rows
+
+
 def pairing_recovery_commands(config_terminal_id, *, config_path,
                               daemon_pid, delete_terminal) -> list[str]:
     """ONE recovery ladder for the stale-identity findings — the same shape
@@ -1123,6 +1193,7 @@ def gather() -> dict:
         # None, which produces no findings)
         "identity": gather_scanner_identity(),
         "device_present": gather_device_present(),
+        "port_states": gather_port_states(),
         "daemon_pid": gather_daemon_pid(),
         "hostname": socket.gethostname(),
     }
@@ -1165,9 +1236,24 @@ def main(argv=None) -> int:
 
     if args.json:
         print(json.dumps({"kernel": facts["uname"],
-                          "findings": [asdict(f) for f in findings]}, indent=2))
+                          "findings": [asdict(f) for f in findings],
+                          "port_states": facts.get("port_states", [])},
+                         indent=2))
     else:
         print(f"host preflight — kernel {facts['uname']}")
+        # R2: compact hotplug port table BEFORE the findings — context only,
+        # never a Finding; findings list, counts line and exit code untouched.
+        # Rows arrive (bus, port)-sorted, so insertion order keeps bus order.
+        ports = facts.get("port_states", [])
+        if ports:
+            by_bus: dict[str, list[str]] = {}
+            for p in ports:
+                state = (p["state"] or "?").replace(" ", "-")
+                ctype = p["connect_type"] or "?"
+                by_bus.setdefault(p["port"].split("-")[0], []).append(
+                    f"{p['port']}: {state}/{ctype}")
+            for entries in by_bus.values():
+                print("hotplug ports — " + "  ".join(entries))
         if not findings:
             print("\nNo host-level problems found that would prevent USB "
                   "scanner detection.")
