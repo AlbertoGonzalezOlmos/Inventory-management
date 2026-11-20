@@ -25,6 +25,7 @@ from scripts.usb_host_check import (
     gather_bus_bdf,
     gather_daemon_pid,
     gather_device_present,
+    gather_port_states,
     gather_power_control,
     gather_scanner_identity,
     pairing_recovery_commands,
@@ -547,10 +548,24 @@ def test_parse_usb_flakiness_ignores_other_devices_disconnects():
 
 
 def test_parse_usb_flakiness_silent_on_healthy_log():
+    """R1 AUTHORIZED update (rulings-p1.md): the parser returns ALL NINE
+    keys, always — the exact-5-key schema is gone. 'Silent' means no
+    flakiness signal (no descriptor errors, no power cycles, no Opticon
+    attach, no episode), not 'fewer keys': R7 counts every port with any USB
+    activity, and the healthy log's camera attach on 3-1 is exactly that, so
+    it legitimately appears in port_stats / latest_attempt."""
     out = parse_usb_flakiness(NORMAL_BOOT_LOG)
     assert out == {"descriptor_errors": 0, "proto_errors": 0,
                    "opticon_port": None, "opticon_enumerated_at": None,
-                   "opticon_disconnected_at": None}
+                   "opticon_disconnected_at": None,
+                   "port_stats": {"3-1": {"attaches": 1, "successes": 0,
+                                          "descriptor_errors": 0,
+                                          "power_cycles": 0, "last_index": 1,
+                                          "last_ok": False}},
+                   "power_cycle_ports": [],
+                   "latest_attempt": {"port": "3-1", "index": 1},
+                   "latest_success": None,
+                   "latest_episode": None}
 
 
 # --- the flakiness findings ----------------------------------------------------
@@ -870,7 +885,9 @@ def test_main_dmesg_unavailable_returns_2_in_both_formats(
     assert "cannot read dmesg" in captured.err
     if json_output:
         payload = json.loads(captured.out)
-        assert set(payload) == {"kernel", "findings"}
+        # R2 AUTHORIZED update (rulings-p1.md): port_states is ALWAYS in the
+        # payload ([] when gather() knows no ports — every stub keeps working).
+        assert set(payload) == {"kernel", "findings", "port_states"}
         assert payload["findings"][0]["severity"] == "warning"
     else:
         assert "[WARN] synthetic warning" in captured.out
@@ -895,3 +912,685 @@ def test_main_dmesg_available_preserves_verdict_in_both_formats(
     else:
         label = {"error": "ERROR", "warning": "WARN", "info": "INFO"}[severity]
         assert f"[{label}] synthetic finding" in captured.out
+
+
+# --- P1: latest-episode selection and hotplug port state (mimo, 2026-11-20) ----
+# Fixtures below are the REAL kernel journal of THIS boot on hertha-shop
+# (7.0.0-43-generic, up since 2026-11-16), verbatim from
+# `journalctl -k -b -o short-iso` / `dmesg`:
+#   Nov 17 19:45-19:55  port 1-1: four address rounds, six -71 reads, then the
+#                      Opticon enumerated (065a:a001) and dropped off at 19:55.
+#   Nov 18 05:53       port 1-2: 2 address rounds, 4 x -71, ladder exhausted
+#                      ('usb usb1-port2: attempt power cycle').
+#   Nov 20 19:28       port 1-2: the same exhausted ladder again.
+# Device numbers restart after xHCI re-registers (15 vs 4/5) — line position
+# is the only identity.
+
+MIXED_EPISODES_LOG = [
+    "[79310.070744] usb 1-1: new full-speed USB device number 12 using xhci_hcd",
+    "[79310.182704] usb 1-1: device descriptor read/64, error -71",
+    "[79310.398741] usb 1-1: device descriptor read/64, error -71",
+    "[79310.614682] usb 1-1: new full-speed USB device number 13 using xhci_hcd",
+    "[79310.726866] usb 1-1: device descriptor read/64, error -71",
+    "[79612.007457] usb 1-1: new full-speed USB device number 14 using xhci_hcd",
+    "[79612.119487] usb 1-1: device descriptor read/64, error -71",
+    "[79612.335476] usb 1-1: device descriptor read/64, error -71",
+    "[79612.550580] usb 1-1: new full-speed USB device number 15 using xhci_hcd",
+    "[79613.345592] usb 1-1: device descriptor read/64, error -71",
+    "[79613.571284] usb 1-1: New USB device found, idVendor=065a, idProduct=a001, bcdDevice= 1.00",
+    "[79890.502382] usb 1-1: USB disconnect, device number 15",
+    "[115815.942405] usb 1-2: new full-speed USB device number 16 using xhci_hcd",
+    "[115816.054399] usb 1-2: device descriptor read/64, error -71",
+    "[115816.270591] usb 1-2: device descriptor read/64, error -71",
+    "[115816.486590] usb 1-2: new full-speed USB device number 17 using xhci_hcd",
+    "[115816.599447] usb 1-2: device descriptor read/64, error -71",
+    "[115816.814418] usb 1-2: device descriptor read/64, error -71",
+    "[115816.918837] usb usb1-port2: attempt power cycle",
+    "[337502.209337] usb 1-2: new full-speed USB device number 4 using xhci_hcd",
+    "[337502.321381] usb 1-2: device descriptor read/64, error -71",
+    "[337502.537445] usb 1-2: device descriptor read/64, error -71",
+    "[337502.753278] usb 1-2: new full-speed USB device number 5 using xhci_hcd",
+    "[337502.865374] usb 1-2: device descriptor read/64, error -71",
+    "[337503.081428] usb 1-2: device descriptor read/64, error -71",
+    "[337503.185502] usb usb1-port2: attempt power cycle",
+]
+
+# R4: `journalctl --since` / `tail` routinely starts mid-episode — the Nov-20
+# ladder without its attach lines.
+TRUNCATED_WINDOW_LOG = [
+    "[337502.321381] usb 1-2: device descriptor read/64, error -71",
+    "[337502.537445] usb 1-2: device descriptor read/64, error -71",
+    "[337502.865374] usb 1-2: device descriptor read/64, error -71",
+    "[337503.081428] usb 1-2: device descriptor read/64, error -71",
+    "[337503.185502] usb usb1-port2: attempt power cycle",
+]
+
+# R5: the kernel gave up on the port — zero descriptor errors in the window.
+POWER_CYCLE_ONLY_LOG = [
+    "[337503.185502] usb usb1-port2: attempt power cycle",
+]
+
+# R7: the host's OTHER devices — HP camera (0bda:58eb) on 1-4, Intel BT
+# (8087:0aa7) on 1-5. Clean episodes, real lines.
+PERIPHERAL_BOOT_LOG = [
+    "[    0.744475] usb 1-4: new high-speed USB device number 2 using xhci_hcd",
+    "[    0.887011] usb 1-4: New USB device found, idVendor=0bda, idProduct=58eb, bcdDevice= 0.07",
+    "[    1.002485] usb 1-5: new full-speed USB device number 3 using xhci_hcd",
+    "[    1.126830] usb 1-5: New USB device found, idVendor=8087, idProduct=0aa7, bcdDevice= 0.01",
+]
+
+PERIPHERAL_REATTACH_LOG = [
+    "[117059.029967] usb 1-4: USB disconnect, device number 2",
+    "[117059.031036] usb 1-5: USB disconnect, device number 3",
+    "[117061.292275] usb 1-4: new high-speed USB device number 2 using xhci_hcd",
+    "[117061.435576] usb 1-4: New USB device found, idVendor=0bda, idProduct=58eb, bcdDevice= 0.07",
+    "[117061.559127] usb 1-5: new full-speed USB device number 3 using xhci_hcd",
+    "[117061.684312] usb 1-5: New USB device found, idVendor=8087, idProduct=0aa7, bcdDevice= 0.01",
+]
+
+
+def test_mixed_episodes_headline_names_the_newest_failing_port(tmp_path):
+    """The defect case: an older Opticon success (1-1, Nov 17) must not
+    headline over the newest failing episode (1-2, Nov 20 exhausted ladder)."""
+    findings = healthy_analyze(tmp_path, log=MIXED_EPISODES_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    warn = findings[0]
+    assert warn.severity == "warning"
+    assert warn.title == (
+        "USB enumeration is retry-fragile on port 1-2: "
+        "4 descriptor-read errors, the kernel power-cycled the port")
+    assert "1-1" not in warn.title            # history never headlines
+    assert "'attempt power cycle'" in warn.detail
+    # the tally is computed from the log, newest-episode port first (R8)
+    assert warn.detail == (
+        "port 1-2: 4 attach attempts / 0 successes, 2 power cycles; "
+        "port 1-1: 4 attach attempts / 1 success. The newest attach episode "
+        "on port 1-2 exhausted the retry ladder ('attempt power cycle') — "
+        "the kernel gave up on that port, so the device stays ABSENT even "
+        "though it is plugged in; an earlier Opticon attach on 1-1 "
+        "succeeded, then dropped off. Repeated descriptor-read failures are "
+        "physical-layer evidence (cable/connector/port/device); they do not "
+        "identify the failing component or rule out power/port faults.")
+    assert warn.detail.index("port 1-2") < warn.detail.index("port 1-1")
+    assert "attach attempts" in warn.detail   # R8: rounds, never "plugs"
+    assert "plugs" not in warn.detail
+
+
+def test_parse_usb_flakiness_mixed_episodes_tallies_per_port():
+    out = parse_usb_flakiness(MIXED_EPISODES_LOG)
+    # per-port tallies, computed — R3/R8
+    assert out["port_stats"] == {
+        "1-1": {"attaches": 4, "successes": 1, "descriptor_errors": 6,
+                "power_cycles": 0, "last_index": 11, "last_ok": True},
+        "1-2": {"attaches": 4, "successes": 0, "descriptor_errors": 8,
+                "power_cycles": 2, "last_index": 25, "last_ok": False},
+    }
+    # newest EPISODE (Nov 20 ladder, index 19) — not the older 1-1 success
+    assert out["latest_episode"] == {
+        "port": "1-2", "index": 19, "attaches": 2, "descriptor_errors": 4,
+        "power_cycled": True, "success": False, "truncated": False}
+    assert out["latest_attempt"] == {"port": "1-2", "index": 22}
+    assert out["latest_success"] == {"port": "1-1", "index": 10}
+    assert out["power_cycle_ports"] == ["1-2"]   # unique, first-seen order
+    # the five legacy keys keep their exact meaning
+    assert out["descriptor_errors"] == 14
+    assert out["proto_errors"] == 14
+    assert out["opticon_port"] == "1-1"
+    assert out["opticon_enumerated_at"] == 10
+    assert out["opticon_disconnected_at"] == 11
+
+
+def test_truncated_window_still_names_the_failing_port(tmp_path):
+    """R4: a window starting mid-episode is first-class — never a port-less
+    legacy warning and never silence."""
+    out = parse_usb_flakiness(TRUNCATED_WINDOW_LOG)
+    ep = out["latest_episode"]
+    assert ep["truncated"] is True
+    assert ep["attaches"] == 0          # the attach line is not in the window
+    assert ep["port"] == "1-2"
+    assert ep["descriptor_errors"] == 4
+    assert ep["power_cycled"] is True
+    assert out["latest_attempt"] is None
+    assert out["latest_success"] is None
+
+    findings = healthy_analyze(tmp_path, log=TRUNCATED_WINDOW_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    warn = findings[0]
+    assert "port 1-2" in warn.title      # the port is named, not lost
+    assert "'attempt power cycle'" in warn.detail
+    assert "the attach line itself is not in the log" in warn.detail
+    # R5 suppression gate: attached device => no "looks ABSENT" claim
+    assert healthy_analyze(tmp_path, log=TRUNCATED_WINDOW_LOG,
+                           device_present=True) == []
+
+
+def test_power_cycle_alone_still_warns(tmp_path):
+    """R5: the kernel giving up on a port is evidence on its own — a power
+    cycle with zero descriptor errors in the window must still warn."""
+    out = parse_usb_flakiness(POWER_CYCLE_ONLY_LOG)
+    assert out["descriptor_errors"] == 0
+    assert out["latest_episode"]["power_cycled"] is True
+
+    findings = healthy_analyze(tmp_path, log=POWER_CYCLE_ONLY_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    warn = findings[0]
+    assert warn.severity == "warning"
+    assert "port 1-2" in warn.title
+    assert "'attempt power cycle'" in warn.detail
+    assert healthy_analyze(tmp_path, log=POWER_CYCLE_ONLY_LOG,
+                           device_present=True) == []
+
+
+def test_clean_camera_bt_episodes_never_mask_or_headline(tmp_path):
+    """R7: the camera (1-4) and BT dongle (1-5) enumerate cleanly before AND
+    after the failing 1-2 ladders. They must neither mask the failing episode
+    nor leak into its tally — while still being tracked in port_stats."""
+    log = PERIPHERAL_BOOT_LOG + MIXED_EPISODES_LOG + PERIPHERAL_REATTACH_LOG
+    out = parse_usb_flakiness(log)
+    assert set(out["port_stats"]) == {"1-1", "1-2", "1-4", "1-5"}  # tracked
+    # later clean attaches (the 1-5 re-attach at index 34) never become an
+    # episode and never steal the headline
+    assert out["latest_attempt"] == {"port": "1-5", "index": 34}
+    assert out["latest_episode"]["port"] == "1-2"
+
+    findings = healthy_analyze(tmp_path, log=log, device_present=False)
+    assert len(findings) == 1
+    warn = findings[0]
+    assert "port 1-2" in warn.title
+    assert "1-4" not in warn.title and "1-5" not in warn.title
+    assert "1-4" not in warn.detail and "1-5" not in warn.detail
+
+
+@pytest.mark.parametrize("log", [MIXED_EPISODES_LOG, TRUNCATED_WINDOW_LOG,
+                                 POWER_CYCLE_ONLY_LOG])
+def test_new_episode_findings_respect_the_tripwire(tmp_path, log):
+    """The new wording (R9) carries the same doctrine tripwire as the pinned
+    legacy texts: physical-layer evidence only, no uncollected measurements."""
+    findings = healthy_analyze(tmp_path, log=log, device_present=False)
+    finding = next(f for f in findings if "retry-fragile on port" in f.title)
+    rendered = finding.detail + "\n" + "\n".join(finding.fix)
+    for needle in ("NOT power", "NOT a dead port", "over_current_count",
+                   "every port tried", "works on another host"):
+        assert needle not in rendered
+    assert "physical-layer evidence" in finding.detail
+    assert "rule out power/port faults" in finding.detail
+
+
+# --- hotplug port state (R2): gather_port_states + its place in the report ----
+
+
+def test_gather_port_states_nested_and_flat_layouts(tmp_path):
+    """Both sysfs layouts, one row per port dir; missing attributes are None
+    (fail-silent per file), never a guess and never a raise."""
+    nested = tmp_path / "1-0:1.0" / "usb1-port1"   # this host's kernel
+    nested.mkdir(parents=True)
+    (nested / "state").write_text("not-attached\n")
+    (nested / "connect_type").write_text("hotplug\n")
+    (nested / "over_current_count").write_text("0\n")
+    (nested / "disable").write_text("0\n")
+    flat = tmp_path / "usb2-port1"                 # older kernels
+    flat.mkdir()
+    (flat / "state").write_text("Powered\n")
+    (flat / "connect_type").write_text("unknown\n")
+    rows = gather_port_states(str(tmp_path))
+    assert rows == [
+        {"port": "usb1-port1", "state": "not-attached",
+         "connect_type": "hotplug", "over_current_count": 0, "disable": 0},
+        {"port": "usb2-port1", "state": "Powered",
+         "connect_type": "unknown",
+         "over_current_count": None, "disable": None},
+    ]
+
+
+def test_gather_port_states_sorts_numerically_by_bus_and_port(tmp_path):
+    for port in ("usb1-port10", "usb2-port1", "usb1-port2", "usb1-port1"):
+        (tmp_path / port).mkdir()
+    rows = gather_port_states(str(tmp_path))
+    assert [r["port"] for r in rows] == [
+        "usb1-port1", "usb1-port2", "usb1-port10", "usb2-port1"]
+
+
+def test_gather_port_states_fail_silent_on_partial_or_absent_sysfs(tmp_path):
+    assert gather_port_states(str(tmp_path / "nope")) == []
+    root = tmp_path / "sys"
+    port = root / "1-0:1.0" / "usb1-port3"
+    port.mkdir(parents=True)
+    (port / "state").mkdir()                        # attribute unreadable
+    (port / "over_current_count").write_text("garbage\n")   # non-numeric
+    (port / "disable").write_text("")               # empty
+    assert gather_port_states(str(root)) == [
+        {"port": "usb1-port3", "state": None, "connect_type": None,
+         "over_current_count": None, "disable": None}]
+    not_a_dir = tmp_path / "afile"
+    not_a_dir.write_text("x")
+    assert gather_port_states(str(not_a_dir)) == []
+
+
+def test_main_json_always_carries_port_states(monkeypatch, capsys):
+    """R2: 'port_states' is top-level in --json and ALWAYS present — the
+    schema must not flap between runs or hosts."""
+    rows = [{"port": "usb1-port2", "state": "not-attached",
+             "connect_type": "hotplug", "over_current_count": 0,
+             "disable": 0}]
+    _stub_main_environment(monkeypatch, [], [])
+    facts = host_check.gather()          # the stub's dict, reachable as gather
+
+    facts["port_states"] = rows
+    assert host_check.main(["--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["port_states"] == rows
+
+    facts.pop("port_states")             # legacy stub: no such fact at all
+    assert host_check.main(["--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["port_states"] == []
+
+
+def test_main_text_port_table_is_context_not_a_finding(monkeypatch, capsys):
+    """R2: the text table prints before the findings and is NOT a Finding —
+    it must not change the findings, the counts line, or the exit code."""
+    rows = [
+        {"port": "usb1-port1", "state": "not-attached",
+         "connect_type": "hotplug", "over_current_count": 0, "disable": 0},
+        {"port": "usb1-port2", "state": "not-attached",
+         "connect_type": "hotplug", "over_current_count": 0, "disable": 0},
+    ]
+    findings = [host_check.Finding(
+        severity="warning", title="synthetic warning", detail="detail")]
+    _stub_main_environment(monkeypatch, [], findings)
+    facts = host_check.gather()
+
+    facts["port_states"] = []
+    assert host_check.main([]) == 1
+    without = capsys.readouterr().out
+    facts["port_states"] = rows
+    assert host_check.main([]) == 1      # same exit code with the table
+    with_table = capsys.readouterr().out
+
+    assert ("hotplug ports — usb1-port1: not-attached/hotplug  "
+            "usb1-port2: not-attached/hotplug") in with_table
+    assert "hotplug ports" not in without
+    # the ONLY difference is the table line: same verdict, same counts line,
+    # same finding blocks
+    table_line = ("hotplug ports — usb1-port1: not-attached/hotplug  "
+                  "usb1-port2: not-attached/hotplug\n")
+    assert with_table.replace(table_line, "") == without
+    assert "0 error(s), 1 warning(s), 0 info" in with_table
+    assert with_table.count("[WARN]") == 1   # still exactly ONE finding
+
+
+# --- P1 round 2: regression tests for FIX 1-7 (fixes-p1-r2.md) ----------------
+# Inputs are the exact adversarial cases from fixes-p1-r2.md / review-p1-glm.md
+# / verify-p1-kimi.md. Every expected number below is hand-counted from the
+# input lines — never copied from the parser.
+
+HUB_CHILD_LOG = [
+    "usb 1-1: New USB device found, idVendor=065a, idProduct=a001, bcdDevice= 1.00",
+    "usb 1-1: USB disconnect, device number 2",
+    "usb 1-2.1: new full-speed USB device number 3 using xhci_hcd",
+    "usb 1-2.1: device descriptor read/64, error -71",
+    "usb 1-2.1: device descriptor read/64, error -71",
+    "usb 1-2.1: device descriptor read/64, error -71",
+    "usb 1-3: new full-speed USB device number 4 using xhci_hcd",
+    "usb 1-3: device descriptor read/64, error -71",
+    "usb 1-3: device descriptor read/64, error -71",
+    "usb 1-3: device descriptor read/64, error -71",
+    "usb 1-3: device descriptor read/64, error -71",
+    "usb usb1-port3: attempt power cycle",
+]
+
+RECOVERED_CAMERA_LOG = [
+    "usb 1-1: new full-speed USB device number 12 using xhci_hcd",
+    "usb 1-1: New USB device found, idVendor=065a, idProduct=a001, bcdDevice= 1.00",
+    "usb 1-1: USB disconnect, device number 12",
+    "usb 1-4: new high-speed USB device number 13 using xhci_hcd",
+    "usb 1-4: device descriptor read/64, error -71",
+    "usb 1-4: device descriptor read/64, error -71",
+    "usb 1-4: device descriptor read/64, error -71",
+    "usb 1-4: New USB device found, idVendor=0bda, idProduct=58eb, bcdDevice= 0.07",
+]
+
+SUCCESS_WITHOUT_ATTACH_LOG = [
+    "usb 1-2: new full-speed USB device number 4 using xhci_hcd",
+    "usb 1-2: device descriptor read/64, error -71",
+    "usb 1-2: device descriptor read/64, error -71",
+    "usb 1-2: device descriptor read/64, error -71",
+    "usb 1-1: New USB device found, idVendor=065a, idProduct=a001",
+]
+
+SUPERSPEED_LOG = [
+    "usb 2-3: new SuperSpeed USB device number 4 using xhci_hcd",
+    "usb 2-3: device descriptor read/64, error -71",
+    "usb 2-3: device descriptor read/64, error -71",
+    "usb 2-3: device descriptor read/64, error -71",
+    "usb usb2-port3: attempt power cycle",
+]
+
+DISCONNECT_ONLY_LOG = [
+    "usb 1-1: USB disconnect, device number 15",
+]
+
+ORPHAN_POWER_CYCLE_LOG = [
+    "usb usb1-port2: attempt power cycle",
+    "usb 1-2: device descriptor read/64, error -71",
+    "usb 1-2: device descriptor read/64, error -71",
+    "usb 1-2: device descriptor read/64, error -71",
+]
+
+PREFIX_LESS_ERROR_LOG = [
+    "device descriptor read/64, error -71",
+    "device descriptor read/64, error -110",
+    "usb 1-2: device descriptor read/64, error -71",
+]
+
+
+def test_fix1_hub_child_port_never_crashes_and_stays_in_the_tally(tmp_path):
+    """FIX 1: a device behind a hub logs as `1-2.1`; `_port_key` used to
+    int() the '2.1' tail and traceback. The hub child must sort into the
+    tally and the newest failing port must headline."""
+    out = parse_usb_flakiness(HUB_CHILD_LOG)          # must not raise
+    # hand-counted: 3 (-71) on 1-2.1 + 4 (-71) on 1-3
+    assert out["descriptor_errors"] == 7
+    assert out["proto_errors"] == 7
+    assert out["port_stats"]["1-2.1"] == {
+        "attaches": 1, "successes": 0, "descriptor_errors": 3,
+        "power_cycles": 0, "last_index": 5, "last_ok": False}
+    assert out["port_stats"]["1-3"] == {
+        "attaches": 1, "successes": 0, "descriptor_errors": 4,
+        "power_cycles": 1, "last_index": 11, "last_ok": False}
+    assert out["power_cycle_ports"] == ["1-3"]
+    assert out["latest_episode"]["port"] == "1-3"
+
+    findings = healthy_analyze(tmp_path, log=HUB_CHILD_LOG,
+                               device_present=False)   # must not raise
+    assert len(findings) == 1
+    warn = findings[0]
+    assert warn.title == (
+        "USB enumeration is retry-fragile on port 1-3: "
+        "4 descriptor-read errors, the kernel power-cycled the port")
+    # tally is computed and mentions the hub child, newest port first
+    tally = ("port 1-3: 1 attach attempts / 0 successes, 1 power cycles; "
+             "port 1-1: 0 attach attempts / 1 success; "
+             "port 1-2.1: 1 attach attempts / 0 successes")
+    assert warn.detail.startswith(tally + ". ")
+    assert "1-2.1" in warn.detail
+
+
+def test_fix2_non_opticon_recovery_never_claims_absence(tmp_path):
+    """FIX 2: the camera recovered as 0bda — the 1-4 episode enumerated and
+    must never be called absent; the older 1-1 Opticon dropout headlines."""
+    out = parse_usb_flakiness(RECOVERED_CAMERA_LOG)
+    assert out["latest_episode"]["port"] == "1-1"
+    assert out["latest_episode"]["success"] is True
+    # hand-counted: 3 x -71 on 1-4; the recovery is NOT an Opticon success
+    assert out["port_stats"]["1-4"] == {
+        "attaches": 1, "successes": 0, "descriptor_errors": 3,
+        "power_cycles": 0, "last_index": 6, "last_ok": False}
+    assert out["latest_success"] == {"port": "1-1", "index": 1}
+
+    findings = healthy_analyze(tmp_path, log=RECOVERED_CAMERA_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    warn = findings[0]
+    assert warn.title == (
+        "the scanner enumerated, then dropped off the USB bus (port 1-1)")
+    assert warn.detail.startswith(
+        "3 descriptor-read error(s) this boot, one successful Opticon attach")
+    rendered = warn.title + "\n" + warn.detail + "\n" + "\n".join(warn.fix)
+    assert "stays ABSENT" not in rendered
+    assert "retry-fragile on port 1-4" not in rendered
+
+
+def test_fix2b_opticon_success_without_attach_line_beats_older_failure(
+        tmp_path):
+    """FIX 2 (kimi REAL BUG 1): a 065a success whose attach line is outside
+    the window synthesizes a success episode — the newest episode wins and
+    no stale failure headlines."""
+    out = parse_usb_flakiness(SUCCESS_WITHOUT_ATTACH_LOG)
+    ep = out["latest_episode"]
+    assert ep["port"] == "1-1"
+    assert ep["success"] is True
+    assert ep["truncated"] is True      # the attach line is not in the window
+    assert ep["attaches"] == 0
+    assert out["latest_success"] == {"port": "1-1", "index": 4}
+    # the older failure stays tallied but never headlines
+    assert out["port_stats"]["1-2"] == {
+        "attaches": 1, "successes": 0, "descriptor_errors": 3,
+        "power_cycles": 0, "last_index": 3, "last_ok": False}
+    # no flakiness finding, whatever the separate presence probe says
+    assert healthy_analyze(tmp_path, log=SUCCESS_WITHOUT_ATTACH_LOG,
+                           device_present=False) == []
+    assert healthy_analyze(tmp_path, log=SUCCESS_WITHOUT_ATTACH_LOG,
+                           device_present=None) == []
+
+
+def test_fix3_superspeed_attaches_count_and_map_to_their_port(tmp_path):
+    """FIX 3: the kernel spells USB3 'SuperSpeed' — such attaches are real
+    activity (not truncated windows), and `usb usb2-port3` maps to 2-3."""
+    out = parse_usb_flakiness(SUPERSPEED_LOG)
+    assert out["port_stats"]["2-3"] == {
+        "attaches": 1, "successes": 0, "descriptor_errors": 3,
+        "power_cycles": 1, "last_index": 4, "last_ok": False}
+    ep = out["latest_episode"]
+    assert ep["port"] == "2-3"
+    assert ep["attaches"] == 1
+    assert ep["truncated"] is False
+    assert out["power_cycle_ports"] == ["2-3"]
+    assert out["latest_attempt"] == {"port": "2-3", "index": 0}
+
+    findings = healthy_analyze(tmp_path, log=SUPERSPEED_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    rendered = findings[0].detail + "\n" + "\n".join(findings[0].fix)
+    assert "mid-episode" not in rendered
+    assert "the attach line itself is not in the log" not in rendered
+
+    # a bare SuperSpeed attach is visible activity too (kimi REAL BUG 2)
+    solo = parse_usb_flakiness(
+        ["usb 2-1: new SuperSpeed USB device number 2 using xhci_hcd"])
+    assert solo["port_stats"]["2-1"]["attaches"] == 1
+    assert solo["latest_attempt"] == {"port": "2-1", "index": 0}
+
+
+def test_fix4_disconnect_only_port_gets_an_activity_row(tmp_path):
+    """FIX 4 / R7: every port with ANY USB activity gets a port_stats row —
+    a lone disconnect is activity, with zero attaches. Still no finding."""
+    out = parse_usb_flakiness(DISCONNECT_ONLY_LOG)
+    assert out["port_stats"] == {
+        "1-1": {"attaches": 0, "successes": 0, "descriptor_errors": 0,
+                "power_cycles": 0, "last_index": 0, "last_ok": False}}
+    assert out["latest_episode"] is None
+    assert out["latest_attempt"] is None
+    assert out["opticon_disconnected_at"] is None   # no Opticon was seen
+    assert healthy_analyze(tmp_path, log=DISCONNECT_ONLY_LOG,
+                           device_present=False) == []
+
+
+def test_fix5_orphan_power_cycle_shares_one_episode_with_later_errors(
+        tmp_path):
+    """FIX 5: a power cycle with no open episode and a following error are
+    ONE plug — one episode carrying both signals, not two."""
+    out = parse_usb_flakiness(ORPHAN_POWER_CYCLE_LOG)
+    ep = out["latest_episode"]
+    # the single episode holds the power cycle AND the 3 later errors
+    assert ep["port"] == "1-2"
+    assert ep["index"] == 0
+    assert ep["power_cycled"] is True
+    assert ep["descriptor_errors"] == 3
+    assert ep["attaches"] == 0
+    assert out["port_stats"]["1-2"] == {
+        "attaches": 0, "successes": 0, "descriptor_errors": 3,
+        "power_cycles": 1, "last_index": 3, "last_ok": False}
+    assert out["power_cycle_ports"] == ["1-2"]
+
+    findings = healthy_analyze(tmp_path, log=ORPHAN_POWER_CYCLE_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    assert findings[0].title == (
+        "USB enumeration is retry-fragile on port 1-2: "
+        "3 descriptor-read errors, the kernel power-cycled the port")
+
+
+def test_fix6_zero_error_power_cycle_wording_never_invents_errors(tmp_path):
+    """FIX 6: with zero descriptor errors in the window, neither the title
+    nor the detail may claim descriptor failures that were not measured."""
+    findings = healthy_analyze(tmp_path, log=POWER_CYCLE_ONLY_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    warn = findings[0]
+    assert warn.title == (
+        "USB enumeration is retry-fragile on port 1-2: "
+        "the kernel power-cycled the port")
+    assert warn.detail == (
+        "port 1-2: 0 attach attempts / 0 successes, 1 power cycles. "
+        "The newest attach episode on port 1-2 ended with the kernel "
+        "power-cycling the port ('attempt power cycle') — the kernel gave "
+        "up on that port (the journal window starts mid-episode: the attach "
+        "line itself is not in the log), so the device stays ABSENT even "
+        "though it is plugged in. This is physical-layer evidence "
+        "(cable/connector/port/device); it does not identify the failing "
+        "component or rule out power/port faults.")
+    rendered = warn.title + "\n" + warn.detail + "\n" + "\n".join(warn.fix)
+    assert "0 descriptor-read error" not in rendered
+    assert "without completing a single descriptor read" not in rendered
+    # R9's tripwire phrases survive the rewording
+    assert "physical-layer evidence" in warn.detail
+    assert "rule out power/port faults" in warn.detail
+
+
+def test_fix7_prefix_less_descriptor_errors_count_globally(tmp_path):
+    """FIX 7: attribution needs the `usb <port>: ` prefix, but a prefix-less
+    descriptor error still counts in the global totals (it used to)."""
+    out = parse_usb_flakiness(PREFIX_LESS_ERROR_LOG)
+    # hand-counted: 3 error lines globally, 2 of them -71
+    assert out["descriptor_errors"] == 3
+    assert out["proto_errors"] == 2
+    # only the prefixed line is attributed — and counted exactly once
+    assert out["port_stats"] == {
+        "1-2": {"attaches": 0, "successes": 0, "descriptor_errors": 1,
+                "power_cycles": 0, "last_index": 2, "last_ok": False}}
+    assert out["latest_episode"]["port"] == "1-2"
+    assert out["latest_episode"]["descriptor_errors"] == 1
+    # one bare error is no evidence on its own: no finding
+    assert healthy_analyze(tmp_path, log=PREFIX_LESS_ERROR_LOG,
+                           device_present=False) == []
+
+
+# --- P1 round 3: episode lifecycle & recovery retraction (G1-G3) --------------
+# Inputs as specified in fixes-p1-r3.md; all expected values hand-counted
+# from the input lines.
+
+G1_TWO_PLUGS_LOG = [
+    "usb usb1-port2: attempt power cycle",
+    "usb 1-2: new full-speed USB device number 4 using xhci_hcd",
+]
+
+G1B_SUCCESS_AFTER_CYCLE_LOG = [
+    "usb usb1-port2: attempt power cycle",
+    "usb 1-2: new full-speed USB device number 4 using xhci_hcd",
+    "usb 1-2: New USB device found, idVendor=065a, idProduct=a001",
+]
+
+G2_RECOVERY_LOG = [
+    "usb 1-1: New USB device found, idVendor=065a, idProduct=a001",
+    "usb 1-1: USB disconnect, device number 12",
+    "usb usb1-port2: attempt power cycle",
+    "usb 1-2: New USB device found, idVendor=0bda, idProduct=58eb",
+]
+
+G3_CLEAN_ENUM_LOG = [
+    "usb 1-4: New USB device found, idVendor=0bda, idProduct=58eb",
+]
+
+
+def test_g1_new_attach_after_spent_power_cycle_is_a_separate_plug(tmp_path):
+    """G1: the orphan power cycle belongs to the PREVIOUS plug; the attach
+    starts a fresh episode. No merged episode, no absence claim for a plug
+    with zero observed errors."""
+    out = parse_usb_flakiness(G1_TWO_PLUGS_LOG)
+    # hand-counted: 1 attach (line 1), 1 power cycle (line 0), no errors.
+    # A merged episode would surface here as eligible (power_cycled=True
+    # carrying the attach) — instead nothing is eligible: the spent cycle is
+    # history and the fresh attach episode observed no failures.
+    assert out["latest_episode"] is None
+    assert out["latest_attempt"] == {"port": "1-2", "index": 1}
+    assert out["power_cycle_ports"] == ["1-2"]   # the cycle is history
+    # the two plugs never merge: one attach line, one cycle — both counted
+    assert out["port_stats"]["1-2"] == {
+        "attaches": 1, "successes": 0, "descriptor_errors": 0,
+        "power_cycles": 1, "last_index": 1, "last_ok": False}
+    assert healthy_analyze(tmp_path, log=G1_TWO_PLUGS_LOG,
+                           device_present=False) == []
+
+
+def test_g1b_attach_then_opticon_success_after_cycle_warns_nothing(tmp_path):
+    """G1 + FIX 2: cycle (history), then a full Opticon success on the new
+    plug — the success episode is newest and nothing warns."""
+    out = parse_usb_flakiness(G1B_SUCCESS_AFTER_CYCLE_LOG)
+    ep = out["latest_episode"]
+    assert ep["port"] == "1-2"
+    assert ep["success"] is True
+    assert ep["attaches"] == 1           # the fresh plug's own episode
+    assert ep["power_cycled"] is False   # the spent cycle was not absorbed
+    assert out["latest_success"] == {"port": "1-2", "index": 2}
+    assert out["opticon_enumerated_at"] == 2
+    assert out["opticon_disconnected_at"] is None
+    # hand-counted row: 1 attach, 1 success (Opticon), 1 power cycle (history)
+    assert out["port_stats"]["1-2"] == {
+        "attaches": 1, "successes": 1, "descriptor_errors": 0,
+        "power_cycles": 1, "last_index": 2, "last_ok": True}
+    assert healthy_analyze(tmp_path, log=G1B_SUCCESS_AFTER_CYCLE_LOG,
+                           device_present=False) == []
+
+
+def test_g2_recovery_enumeration_retracts_the_absence_claim(tmp_path):
+    """G2: the 0bda line proves 1-2 recovered AFTER its power cycle — the
+    stale episode must be retracted; the older 1-1 dropout headlines."""
+    out = parse_usb_flakiness(G2_RECOVERY_LOG)
+    assert out["latest_episode"]["port"] == "1-1"
+    assert out["latest_episode"]["success"] is True
+    assert out["power_cycle_ports"] == ["1-2"]   # history keeps the cycle
+
+    findings = healthy_analyze(tmp_path, log=G2_RECOVERY_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    warn = findings[0]
+    assert warn.title == (
+        "the scanner enumerated, then dropped off the USB bus (port 1-1)")
+    # hand-counted: the input holds ZERO descriptor-read error lines
+    assert warn.detail.startswith(
+        "0 descriptor-read error(s) this boot, one successful Opticon attach")
+    rendered = warn.title + "\n" + warn.detail + "\n" + "\n".join(warn.fix)
+    assert "1-2" not in rendered          # no 1-2 absence claim anywhere
+    assert "stays ABSENT" not in rendered
+
+
+def test_g2b_sole_power_cycle_still_warns_with_the_fix6_title(tmp_path):
+    """G2 guard: under list-based selection a sole power cycle is still the
+    only episode and still wins (FIX 6/R5)."""
+    findings = healthy_analyze(tmp_path, log=POWER_CYCLE_ONLY_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    assert findings[0].severity == "warning"
+    assert findings[0].title == (
+        "USB enumeration is retry-fragile on port 1-2: "
+        "the kernel power-cycled the port")
+
+
+def test_g3_non_opticon_enumeration_still_gets_an_activity_row(tmp_path):
+    """G3 ruling (R7 wins): a non-Opticon enumeration is USB activity even
+    with no attach line in the window — it gets a port_stats row, but
+    successes/last_ok stay Opticon-only."""
+    out = parse_usb_flakiness(G3_CLEAN_ENUM_LOG)
+    assert out["port_stats"] == {
+        "1-4": {"attaches": 0, "successes": 0, "descriptor_errors": 0,
+                "power_cycles": 0, "last_index": 0, "last_ok": False}}
+    assert out["port_stats"]["1-4"]["successes"] == 0
+    assert out["port_stats"]["1-4"]["last_ok"] is False
+    assert out["latest_episode"] is None
+    assert out["latest_attempt"] is None
+    assert healthy_analyze(tmp_path, log=G3_CLEAN_ENUM_LOG,
+                           device_present=False) == []

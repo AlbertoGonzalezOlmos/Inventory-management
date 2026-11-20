@@ -51,7 +51,9 @@ nothing happens":
    but silent" (dropout mid-session). Also reported: a running
    ``scanner_daemon`` (it holds the single-instance lock and the
    exclusive evdev grab — INFO, not a fault) and a configured stack with
-   no Opticon device currently on the bus.
+   no Opticon device currently on the bus. A read-only sysfs hotplug port
+   table (state/connect_type per port) prints before the findings and rides
+   in ``--json`` as ``port_states`` — report context, never a finding.
 
 Usage::
 
@@ -159,53 +161,447 @@ def parse_host_events(lines) -> tuple[dict, dict, list, dict]:
 #: Full-speed devices whose first descriptor reads keep failing with EPROTO
 #: (-71) never finish enumeration; the kernel retries address rounds and
 #: eventually gives up ("attempt power cycle") — the device then looks
-#: absent even though it is plugged in.
-_DESC_ERR_RE = re.compile(r"device descriptor read/\d+, error (-\d+)")
+#: absent even though it is plugged in. Every line names its own port, so
+#: attribution stays exact even when two ports interleave. The kernel spells
+#: USB3 as ``SuperSpeed``/``SuperSpeedPlus`` (bus 2 on this host) — FIX 3.
+_ATTACH_RE = re.compile(
+    r"\busb (\S+): new (?:(?:full|high|low|super)-speed|SuperSpeed(?:Plus)?) "
+    r"USB device number \d+")
 
-#: The Opticon attach (idVendor 065a) — the one device this repo cares about.
-_ENUM_OPTICON_RE = re.compile(r"usb (\S+): New USB device found, idVendor=065a\b",
-                              re.I)
+#: The descriptor-read failure line carries the failing port in its prefix.
+#: Attribution requires the prefix; a prefix-less line still counts in the
+#: global totals via the bare fallback below (FIX 7).
+_DESC_ERR_RE = re.compile(
+    r"\busb (\S+): device descriptor read/\d+, error (-\d+)")
+
+#: Prefix-less descriptor errors: counted globally, attributed to no port.
+_DESC_ERR_BARE_RE = re.compile(r"device descriptor read/\d+, error (-\d+)")
+
+#: ANY ``New USB device found`` closes the port's episode — the device
+#: recovered, possibly as something else. ``success`` / the legacy Opticon
+#: keys stay 065a-only (FIX 2, R7).
+_ENUM_ANY_RE = re.compile(r"\busb (\S+): New USB device found, idVendor=(\w+)",
+                          re.I)
 
 _USB_DISCONNECT_RE = re.compile(r"usb (\S+): USB disconnect")
+
+#: "usb usb1-port2: attempt power cycle" -> port "1-2": the kernel gave up on
+#: that port after the retry ladder; it then stays silent until the next plug.
+_POWER_CYCLE_RE = re.compile(r"\busb usb(\d+)-port(\d+): attempt power cycle\b")
+
+
+def _port_key(port: str) -> tuple[int, int, int]:
+    """Natural (bus, port, hub-child) sort key for "N-M" / "N-M.K" port
+    strings — a device behind a hub logs as e.g. ``1-2.1`` (FIX 1). Unknown
+    shapes sort last and never raise."""
+    m = re.fullmatch(r"(\d+)-(\d+)(?:\.(\d+))?", port)
+    if m is None:
+        return (10**9, 0, 0)
+    return (int(m.group(1)), int(m.group(2)),
+            int(m.group(3)) + 1 if m.group(3) else 0)
+
+
+def _port_tally(port_stats: dict, *, first: str | None = None) -> str:
+    """Render ``port 1-2: 12 attach attempts / 0 successes, 4 power cycles;
+    port 1-1: 6 attach attempts / 1 success``.
+
+    Latest-episode port first, then natural order. Only ports with flakiness
+    evidence (descriptor errors, power cycles, or an Opticon success) appear —
+    a clean camera/BT attach stays in ``port_stats`` but never pollutes the
+    sentence. ``attaches`` counts kernel address rounds, so the wording says
+    "attach attempts", never "plugs" (R8).
+    """
+    order: list[str] = []
+    if first is not None and first in port_stats:
+        order.append(first)
+    order += sorted((p for p in port_stats if p not in order), key=_port_key)
+    parts = []
+    for port in order:
+        st = port_stats[port]
+        if not (st["descriptor_errors"] or st["power_cycles"]
+                or st["successes"]):
+            continue
+        part = (f"port {port}: {st['attaches']} attach attempts / "
+                f"{st['successes']} "
+                + ("success" if st["successes"] == 1 else "successes"))
+        if st["power_cycles"]:
+            part += f", {st['power_cycles']} power cycles"
+        parts.append(part)
+    return "; ".join(parts)
+
+
+def _eligible(ep: dict) -> bool:
+    """G2: is this episode a candidate for ``latest_episode``?
+
+    An Opticon success is always eligible (the legacy dropout finding needs
+    it). A failure is eligible only while it is unattributed — an episode
+    whose device later enumerated as *something* recovered (``enumerated``)
+    and can never feed an absence claim (FIX 2)."""
+    if ep["success"]:
+        return True
+    return (not ep.get("enumerated", False)
+            and (ep["descriptor_errors"] or ep["power_cycled"]))
 
 
 def parse_usb_flakiness(lines) -> dict:
     """Scan kernel lines for the scanner's link signature. Pure; no I/O.
 
-    Returns ``{"descriptor_errors": total descriptor-read errors,
-    "proto_errors": the EPROTO (-71) subset, "opticon_port": the port of
-    the LAST 065a enumeration, "opticon_enumerated_at": its line index,
-    "opticon_disconnected_at": line index of a disconnect on that port
-    AFTER the enumeration (None when the device is still attached, or was
-    never seen)}``. A disconnect BEFORE the latest enumeration is a replug,
-    not a dropout — the counter resets on every successful attach.
+    Per-port state machine (R3): every line names its own port, so interleaved
+    ports never steal each other's errors. An *episode* is one attach sequence
+    on one port — the ``new … USB device number N`` rounds — until an
+    enumeration, a power cycle, a disconnect, or the next attach on that port.
+    ANY ``New USB device found`` closes the episode (the device recovered as
+    *something* — ``enumerated`` is set only then); only ``065a`` counts as
+    an Opticon success. A journal window that starts mid-episode (descriptor
+    errors or a power cycle with no attach line in view) yields a truncated
+    episode with ``attaches == 0``; it is first-class, never degraded to
+    silence (R4). Port names may be hub children (``1-2.1``).
+
+    Retraction is asymmetric: an episode synthesised from a truncated window
+    or an orphan power cycle is RETRACTED when the same port is re-plugged —
+    that evidence belongs to the previous plug — whereas a COMPLETE episode
+    (attach + full ladder, or success + dropout) is never retracted by a
+    later attach: complete evidence stays an established fact and remains
+    eligible alongside the new episode. Episodes carry unique monotonic
+    indices, so removal-by-value (``episodes.remove``) cannot collide.
+
+    The five legacy keys keep their exact meaning. The new keys are ALWAYS
+    present (schema stability, R1): ``port_stats`` tallies every port with any
+    USB activity (R7), ``power_cycle_ports`` is unique in first-seen order
+    (R8), ``latest_attempt`` is the newest attach line, ``latest_success`` the
+    last Opticon enumeration, and ``latest_episode`` the newest *eligible*
+    episode — computed ONCE at the end from the full episode list (G2), so
+    evidence that arrives after a candidate was first seen (e.g. a recovery
+    enumeration) is honoured and can retract it. A clean camera/BT attach can
+    never mask a failing port (R7).
     """
     descriptor_errors = 0
     proto_errors = 0
     opticon_port = None
     enumerated_at = None
     disconnected_at = None
+    port_stats: dict[str, dict] = {}
+    power_cycle_ports: list[str] = []
+    latest_attempt: dict | None = None
+    latest_success: dict | None = None
+    open_episodes: dict[str, dict] = {}
+    episodes: list[dict] = []
+
+    def stats(port):
+        return port_stats.setdefault(port, {
+            "attaches": 0, "successes": 0, "descriptor_errors": 0,
+            "power_cycles": 0, "last_index": -1, "last_ok": False})
+
+    def new_episode(port, i):
+        return {"port": port, "index": i, "attaches": 1,
+                "descriptor_errors": 0, "power_cycled": False,
+                "success": False, "truncated": False}
+
+    def truncated_episode(port, i):
+        return {"port": port, "index": i, "attaches": 0,
+                "descriptor_errors": 0, "power_cycled": False,
+                "success": False, "truncated": True}
+
     for i, line in enumerate(lines):
-        m = _DESC_ERR_RE.search(line)
+        m = _ATTACH_RE.search(line)
         if m:
+            port = m.group(1)
+            st = stats(port)
+            st["attaches"] += 1
+            st["last_index"] = i
+            st["last_ok"] = False
+            old = open_episodes.get(port)
+            if old is not None and (old["truncated"] or old["power_cycled"]):
+                # G1: the open episode belongs to the PREVIOUS plug (orphan
+                # power cycle / truncated window). Close it as history —
+                # drop it from the candidate list; its evidence lives on in
+                # port_stats. The new attach starts a fresh episode.
+                open_episodes.pop(port, None)
+                episodes.remove(old)
+                old = None
+            if old is not None:
+                # Same ladder, next address round: one physical plug burns
+                # two "new device number" lines (device 4 then 5). Count
+                # the round, keep accumulating into the SAME episode (R8).
+                old["attaches"] += 1
+            else:
+                ep = new_episode(port, i)
+                episodes.append(ep)
+                open_episodes[port] = ep
+            latest_attempt = {"port": port, "index": i}
+            continue
+        m = _DESC_ERR_RE.search(line)
+        if m is not None:
+            port, code = m.group(1), m.group(2)
+            descriptor_errors += 1
+            if code == "-71":
+                proto_errors += 1
+            st = stats(port)
+            st["descriptor_errors"] += 1
+            st["last_index"] = i
+            st["last_ok"] = False
+            ep = open_episodes.get(port)
+            if ep is None:  # the window starts mid-episode (R4)
+                ep = truncated_episode(port, i)
+                open_episodes[port] = ep
+                episodes.append(ep)
+            ep["descriptor_errors"] += 1
+            continue
+        # Prefix-less descriptor error (FIX 7): still counts in the global
+        # totals, but attribution requires the prefix. Must NOT swallow
+        # power-cycle/enumeration/disconnect lines.
+        m = _DESC_ERR_BARE_RE.search(line)
+        if m is not None:
             descriptor_errors += 1
             if m.group(1) == "-71":
                 proto_errors += 1
             continue
-        m = _ENUM_OPTICON_RE.search(line)
+        m = _POWER_CYCLE_RE.search(line)
         if m:
-            opticon_port, enumerated_at = m.group(1), i
-            disconnected_at = None  # replug: only a LATER dropout counts
+            port = f"{m.group(1)}-{m.group(2)}"
+            st = stats(port)
+            st["power_cycles"] += 1
+            st["last_index"] = i
+            st["last_ok"] = False
+            if port not in power_cycle_ports:
+                power_cycle_ports.append(port)
+            ep = open_episodes.get(port)
+            orphan = ep is None
+            if orphan:
+                ep = truncated_episode(port, i)
+                open_episodes[port] = ep  # FIX 5: later errors reuse it
+                episodes.append(ep)
+            ep["power_cycled"] = True
+            if not orphan:
+                open_episodes.pop(port, None)
+            continue
+        m = _ENUM_ANY_RE.search(line)
+        if m:
+            port, vid = m.group(1), m.group(2).lower()
+            is_opticon = vid == "065a"
+            if is_opticon:
+                opticon_port, enumerated_at = port, i
+                disconnected_at = None  # replug: only a LATER dropout counts
+                latest_success = {"port": port, "index": i}
+                st = stats(port)
+                st["successes"] += 1
+                st["last_index"] = i
+                st["last_ok"] = True
+            ep = open_episodes.pop(port, None)
+            if ep is None:
+                if is_opticon:
+                    # The window lacks the attach line: synthesize the
+                    # success episode so the newest episode always wins
+                    # (FIX 2, kimi REAL BUG 1).
+                    ep = {"port": port, "index": i, "attaches": 0,
+                          "descriptor_errors": 0, "power_cycled": False,
+                          "success": True, "truncated": True,
+                          "enumerated": True}
+                    episodes.append(ep)
+                else:
+                    # G3 (ruling): R7 wins — a non-Opticon enumeration is
+                    # USB activity even without an attach line in the
+                    # window. Root-hub lines ("usb usb1:") are controller
+                    # events, not port activity, so they get no row. Only
+                    # last_index may change; successes and last_ok stay
+                    # Opticon-only, so the finding tally is unaffected.
+                    if re.fullmatch(r"\d+-\d+(?:\.\d+)?", port):
+                        st = stats(port)
+                        st["last_index"] = i
+            else:
+                ep["enumerated"] = True
+                if is_opticon:
+                    ep["success"] = True
             continue
         m = _USB_DISCONNECT_RE.search(line)
-        if (m and opticon_port is not None and disconnected_at is None
-                and m.group(1) == opticon_port):
-            disconnected_at = i
+        if m:
+            port = m.group(1)
+            if (opticon_port is not None and disconnected_at is None
+                    and port == opticon_port):
+                disconnected_at = i
+            st = stats(port)  # FIX 4: a lone disconnect is activity (R7)
+            st["last_index"] = i
+            open_episodes.pop(port, None)
+            continue
+    # G2: select the newest eligible episode ONCE, at the end — evidence seen
+    # after a candidate arrived (a recovery enumeration) is honoured and can
+    # retract it. A sole power cycle is the only episode and still wins.
+    latest_episode = max(
+        (ep for ep in episodes if _eligible(ep)),
+        key=lambda ep: ep["index"], default=None)
     return {"descriptor_errors": descriptor_errors,
             "proto_errors": proto_errors,
             "opticon_port": opticon_port,
             "opticon_enumerated_at": enumerated_at,
-            "opticon_disconnected_at": disconnected_at}
+            "opticon_disconnected_at": disconnected_at,
+            "port_stats": port_stats,
+            "power_cycle_ports": power_cycle_ports,
+            "latest_attempt": latest_attempt,
+            "latest_success": latest_success,
+            "latest_episode": latest_episode}
+
+
+def _legacy_dropout_finding(flaky: dict) -> Finding:
+    """The enumerate-then-dropout finding, byte-identical to pre-P1 (R6):
+    ``test_analyze_warns_on_enumerate_then_dropout`` pins title, detail and
+    fix verbatim."""
+    errors_seen = flaky["proto_errors"] or flaky["descriptor_errors"]
+    return Finding(
+        severity="warning",
+        title=f"the scanner enumerated, then dropped off the USB bus "
+              f"(port {flaky['opticon_port']})",
+        detail=f"{errors_seen} descriptor-read error(s) this boot, one "
+               "successful Opticon attach, then a USB disconnect — "
+               "physical-layer evidence (cable/connector/port/device); it "
+               "does not identify the failing component or rule out power/port "
+               "faults. A flaky link explains both 'the scanner looks absent' "
+               "(retry-ladder exhaustion on plug) and 'attached but silent' "
+               "(dropout mid-session).",
+        fix=[
+            "journalctl -k | grep -E 'error -71|USB disconnect'  # the "
+            "signature",
+            "re-plug until the node appears: ls /sys/class/hidraw/",
+            "try one known-good data cable, then another direct USB port "
+            "(one change at a time)",
+            "re-run: uv run python scripts/usb_host_check.py",
+        ],
+    )
+
+
+def _legacy_retry_fragile_finding(flaky: dict) -> Finding:
+    """The no-history retry-fragile finding, byte-identical to pre-P1 (R6):
+    ``test_analyze_warns_when_the_retry_ladder_exhausts`` pins title, detail
+    and fix[2] verbatim."""
+    errors_seen = flaky["proto_errors"] or flaky["descriptor_errors"]
+    return Finding(
+        severity="warning",
+        title=f"USB enumeration is retry-fragile: "
+              f"{errors_seen} descriptor-read errors, no successful "
+              "scanner enumeration this boot",
+        detail="Each plug burns kernel address rounds; when the retry "
+               "ladder exhausts (journal: 'attempt power cycle'), the "
+               "device stays ABSENT — it looks like a dead scanner or a "
+               "charge-only cable. Repeated descriptor-read failures are "
+               "physical-layer evidence (cable/connector/port/device); they "
+               "do not identify the failing component or rule out power/port "
+               "faults.",
+        fix=[
+            "journalctl -k | grep -E 'error -71|new full-speed'  # the "
+            "retry ladder at work",
+            "re-plug until /dev/hidraw* appears "
+            "(scripts/opticon_detect.py says which node)",
+            "try one known-good data cable, then another direct USB port "
+            "(one change at a time)",
+        ],
+    )
+
+
+def _new_episode_finding(flaky: dict, ep: dict) -> Finding:
+    """The new wording (R9) — used ONLY for the mixed case (older Opticon
+    success, newer failing episode) and truncated windows. Numbers are
+    computed (R8); the tripwire phrases stay; the failure is never claimed
+    to be the scanner (R7)."""
+    port = ep["port"]
+    n = ep["descriptor_errors"]
+    tally = _port_tally(flaky["port_stats"], first=port)
+    if n > 0:
+        title = (f"USB enumeration is retry-fragile on port {port}: "
+                 f"{n} descriptor-read errors"
+                 + (", the kernel power-cycled the port"
+                    if ep["power_cycled"] else ""))
+    else:
+        # Zero descriptor errors in the window: only the power cycle was
+        # observed — never claim descriptor failures that were not measured
+        # (FIX 6).
+        title = (f"USB enumeration is retry-fragile on port {port}: "
+                 "the kernel power-cycled the port")
+    if ep["power_cycled"] and n > 0:
+        head = ("The newest attach episode on port " + port + " exhausted "
+                "the retry ladder ('attempt power cycle') — the kernel gave "
+                "up on that port")
+    elif ep["power_cycled"]:
+        head = ("The newest attach episode on port " + port + " ended with "
+                "the kernel power-cycling the port ('attempt power cycle') — "
+                "the kernel gave up on that port")
+    elif n > 0:
+        head = (f"The newest attach episode on port {port} burned {n} "
+                "descriptor-read error(s) without completing a single "
+                "descriptor read")
+    else:
+        # Unreachable under the R5 gate (>=3 errors or a power cycle).
+        head = (f"The newest attach episode on port {port} ended without "
+                "a descriptor read completing")
+    if (ep["truncated"]
+            and not flaky["port_stats"].get(port, {}).get("attaches")):
+        # The mid-episode sentence is printed only when the window really
+        # holds no attach line for this port (belt-and-braces after FIX 3).
+        head += " (the journal window starts mid-episode: the attach line " \
+                "itself is not in the log)"
+    head += ", so the device stays ABSENT even though it is plugged in"
+    detail = f"{tally}. {head}"
+    if (flaky["opticon_enumerated_at"] is not None
+            and flaky["opticon_enumerated_at"] < ep["index"]):
+        detail += (f"; an earlier Opticon attach on {flaky['opticon_port']} "
+                   "succeeded, then dropped off"
+                   if flaky["opticon_disconnected_at"] is not None else
+                   f"; an earlier Opticon attach on {flaky['opticon_port']} "
+                   "succeeded")
+    if n > 0:
+        detail += (". Repeated descriptor-read failures are physical-layer "
+                   "evidence (cable/connector/port/device); they do not "
+                   "identify the failing component or rule out power/port "
+                   "faults.")
+    else:
+        # R9's tripwire phrases stay, without claiming unobserved failures.
+        detail += (". This is physical-layer evidence (cable/connector/port/"
+                   "device); it does not identify the failing component or "
+                   "rule out power/port faults.")
+    return Finding(
+        severity="warning",
+        title=title,
+        detail=detail,
+        fix=[
+            "journalctl -k | grep -E 'error -71|attempt power cycle'  # the "
+            "signature",
+            "re-plug until the node appears: ls /sys/class/hidraw/",
+            "try one known-good data cable, then another direct USB port "
+            "(one change at a time)",
+            "re-run: uv run python scripts/usb_host_check.py",
+        ],
+    )
+
+
+def _flakiness_finding(flaky: dict, device_present: bool | None) -> Finding | None:
+    """The ONE flakiness finding, selected by the newest attach episode (R5).
+
+    Historical events may appear only as context, never as the headline. A
+    clean camera/BT episode never masks a failing port (R7), because
+    ``latest_episode`` only ever holds failed or Opticon-successful
+    episodes. The legacy texts stay byte-identical where tests pin them
+    (R6), and the legacy if/elif stays as the no-episode fallback."""
+    ep = flaky.get("latest_episode")
+    if ep is None:
+        # Legacy fallback, unchanged (R6): only reachable when the window
+        # holds no attach/error/power-cycle lines at all.
+        if flaky["opticon_disconnected_at"] is not None:
+            return _legacy_dropout_finding(flaky)
+        if (flaky["descriptor_errors"] >= 3
+                and flaky["opticon_enumerated_at"] is None
+                and device_present is not True):
+            return _legacy_retry_fragile_finding(flaky)
+        return None
+    if (ep["success"] and flaky["opticon_disconnected_at"] is not None
+            and ep["port"] == flaky["opticon_port"]):
+        return _legacy_dropout_finding(flaky)
+    if (not ep["success"]
+            and (ep["descriptor_errors"] >= 3 or ep["power_cycled"])
+            and device_present is not True):
+        if flaky["opticon_enumerated_at"] is None and not ep["truncated"]:
+            # No Opticon ever enumerated and the window saw the attach: the
+            # pinned no-history wording (R6), not the new one.
+            return _legacy_retry_fragile_finding(flaky)
+        return _new_episode_finding(flaky, ep)
+    return None
 
 
 def dead_controllers(deaths: dict, last_enum: dict, bus_bdf: dict,
@@ -423,6 +819,74 @@ def gather_device_present(sysfs_root: str = "/sys/bus/usb/devices") -> bool | No
     return False
 
 
+#: Hotplug port state dirs come in two sysfs layouts: nested under the root
+#: hub's interface device (``1-0:1.0/usb1-port2`` — this host's kernel) or
+#: flat under the devices root (``usb1-port2`` — older kernels).
+_PORT_DIR_RE = re.compile(r"usb(\d+)-port(\d+)")
+_HUB_IFACE_RE = re.compile(r"\d+-0:1\.0")
+
+
+def _port_attr(path: str, attr: str) -> str | None:
+    """One sysfs port attribute, stripped; None when absent/unreadable/empty."""
+    try:
+        with open(os.path.join(path, attr), encoding="ascii",
+                  errors="replace") as fh:
+            value = fh.read().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def gather_port_states(sysfs_root: str = "/sys/bus/usb/devices") -> list[dict]:
+    """Hotplug port state — the cheapest no-root "is anything attached" oracle.
+
+    One row per port dir in EITHER layout (nested ``<bus>-0:1.0/usbN-portM``
+    or flat ``usbN-portM``), sorted by (bus, port) number::
+
+        {"port": "usb1-port2", "state": str|None, "connect_type": str|None,
+         "over_current_count": int|None, "disable": int|None}
+
+    ``[]`` when the root is absent/unreadable. FAIL-SILENT per file (the
+    ``gather_power_control`` convention): a missing/unreadable attribute is
+    None, never a guess; a partial sysfs never raises. This is report
+    context, not a fault signal — it never becomes a finding.
+    """
+    try:
+        names = os.listdir(sysfs_root)
+    except OSError:
+        return []
+    found: dict[str, tuple[tuple[int, int], str]] = {}
+    for name in names:
+        m = _PORT_DIR_RE.fullmatch(name)
+        if m:
+            found[name] = ((int(m.group(1)), int(m.group(2))),
+                           os.path.join(sysfs_root, name))
+        elif _HUB_IFACE_RE.fullmatch(name):
+            hub = os.path.join(sysfs_root, name)
+            try:
+                children = os.listdir(hub)
+            except OSError:
+                continue
+            for child in children:
+                m = _PORT_DIR_RE.fullmatch(child)
+                if m and child not in found:
+                    found[child] = ((int(m.group(1)), int(m.group(2))),
+                                    os.path.join(hub, child))
+    rows = []
+    for port, (_key, path) in sorted(found.items(), key=lambda kv: kv[1][0]):
+        row: dict = {"port": port,
+                     "state": _port_attr(path, "state"),
+                     "connect_type": _port_attr(path, "connect_type")}
+        for attr in ("over_current_count", "disable"):
+            value = _port_attr(path, attr)
+            try:
+                row[attr] = int(value) if value is not None else None
+            except ValueError:
+                row[attr] = None
+        rows.append(row)
+    return rows
+
+
 def pairing_recovery_commands(config_terminal_id, *, config_path,
                               daemon_pid, delete_terminal) -> list[str]:
     """ONE recovery ladder for the stale-identity findings — the same shape
@@ -609,53 +1073,12 @@ def analyze(dmesg_lines, bus_bdf: dict, *, udev_rules: str,
             ))
 
     # --- USB link flakiness: the -71 / enumerate-then-dropout signature ---
+    # The newest attach episode decides (R5); legacy texts stay byte-identical
+    # where tests pin them (R6).
     flaky = parse_usb_flakiness(dmesg_lines)
-    errors_seen = flaky["proto_errors"] or flaky["descriptor_errors"]
-    if flaky["opticon_disconnected_at"] is not None:
-        findings.append(Finding(
-            severity="warning",
-            title=f"the scanner enumerated, then dropped off the USB bus "
-                  f"(port {flaky['opticon_port']})",
-            detail=f"{errors_seen} descriptor-read error(s) this boot, one "
-                   "successful Opticon attach, then a USB disconnect — "
-                   "physical-layer evidence (cable/connector/port/device); it "
-                   "does not identify the failing component or rule out power/port "
-                   "faults. A flaky link explains both 'the scanner looks absent' "
-                   "(retry-ladder exhaustion on plug) and 'attached but silent' "
-                   "(dropout mid-session).",
-            fix=[
-                "journalctl -k | grep -E 'error -71|USB disconnect'  # the "
-                "signature",
-                "re-plug until the node appears: ls /sys/class/hidraw/",
-                "try one known-good data cable, then another direct USB port "
-                "(one change at a time)",
-                "re-run: uv run python scripts/usb_host_check.py",
-            ],
-        ))
-    elif (flaky["descriptor_errors"] >= 3
-          and flaky["opticon_enumerated_at"] is None
-          and device_present is not True):
-        findings.append(Finding(
-            severity="warning",
-            title=f"USB enumeration is retry-fragile: "
-                  f"{errors_seen} descriptor-read errors, no successful "
-                  "scanner enumeration this boot",
-            detail="Each plug burns kernel address rounds; when the retry "
-                   "ladder exhausts (journal: 'attempt power cycle'), the "
-                   "device stays ABSENT — it looks like a dead scanner or a "
-                   "charge-only cable. Repeated descriptor-read failures are "
-                   "physical-layer evidence (cable/connector/port/device); they "
-                   "do not identify the failing component or rule out power/port "
-                   "faults.",
-            fix=[
-                "journalctl -k | grep -E 'error -71|new full-speed'  # the "
-                "retry ladder at work",
-                "re-plug until /dev/hidraw* appears "
-                "(scripts/opticon_detect.py says which node)",
-                "try one known-good data cable, then another direct USB port "
-                "(one change at a time)",
-            ],
-        ))
+    flaky_finding = _flakiness_finding(flaky, device_present)
+    if flaky_finding is not None:
+        findings.append(flaky_finding)
 
     # --- a running daemon: plain words, INFO (normal operation, but it
     # explains why capture tools on the input path see nothing and why a
@@ -877,6 +1300,7 @@ def gather() -> dict:
         # None, which produces no findings)
         "identity": gather_scanner_identity(),
         "device_present": gather_device_present(),
+        "port_states": gather_port_states(),
         "daemon_pid": gather_daemon_pid(),
         "hostname": socket.gethostname(),
     }
@@ -919,9 +1343,24 @@ def main(argv=None) -> int:
 
     if args.json:
         print(json.dumps({"kernel": facts["uname"],
-                          "findings": [asdict(f) for f in findings]}, indent=2))
+                          "findings": [asdict(f) for f in findings],
+                          "port_states": facts.get("port_states", [])},
+                         indent=2))
     else:
         print(f"host preflight — kernel {facts['uname']}")
+        # R2: compact hotplug port table BEFORE the findings — context only,
+        # never a Finding; findings list, counts line and exit code untouched.
+        # Rows arrive (bus, port)-sorted, so insertion order keeps bus order.
+        ports = facts.get("port_states", [])
+        if ports:
+            by_bus: dict[str, list[str]] = {}
+            for p in ports:
+                state = (p["state"] or "?").replace(" ", "-")
+                ctype = p["connect_type"] or "?"
+                by_bus.setdefault(p["port"].split("-")[0], []).append(
+                    f"{p['port']}: {state}/{ctype}")
+            for entries in by_bus.values():
+                print("hotplug ports — " + "  ".join(entries))
         if not findings:
             print("\nNo host-level problems found that would prevent USB "
                   "scanner detection.")
