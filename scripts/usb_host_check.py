@@ -257,6 +257,14 @@ def parse_usb_flakiness(lines) -> dict:
     episode with ``attaches == 0``; it is first-class, never degraded to
     silence (R4). Port names may be hub children (``1-2.1``).
 
+    Retraction is asymmetric: an episode synthesised from a truncated window
+    or an orphan power cycle is RETRACTED when the same port is re-plugged —
+    that evidence belongs to the previous plug — whereas a COMPLETE episode
+    (attach + full ladder, or success + dropout) is never retracted by a
+    later attach: complete evidence stays an established fact and remains
+    eligible alongside the new episode. Episodes carry unique monotonic
+    indices, so removal-by-value (``episodes.remove``) cannot collide.
+
     The five legacy keys keep their exact meaning. The new keys are ALWAYS
     present (schema stability, R1): ``port_stats`` tallies every port with any
     USB activity (R7), ``power_cycle_ports`` is unique in first-seen order
