@@ -1477,3 +1477,120 @@ def test_fix7_prefix_less_descriptor_errors_count_globally(tmp_path):
     # one bare error is no evidence on its own: no finding
     assert healthy_analyze(tmp_path, log=PREFIX_LESS_ERROR_LOG,
                            device_present=False) == []
+
+
+# --- P1 round 3: episode lifecycle & recovery retraction (G1-G3) --------------
+# Inputs as specified in fixes-p1-r3.md; all expected values hand-counted
+# from the input lines.
+
+G1_TWO_PLUGS_LOG = [
+    "usb usb1-port2: attempt power cycle",
+    "usb 1-2: new full-speed USB device number 4 using xhci_hcd",
+]
+
+G1B_SUCCESS_AFTER_CYCLE_LOG = [
+    "usb usb1-port2: attempt power cycle",
+    "usb 1-2: new full-speed USB device number 4 using xhci_hcd",
+    "usb 1-2: New USB device found, idVendor=065a, idProduct=a001",
+]
+
+G2_RECOVERY_LOG = [
+    "usb 1-1: New USB device found, idVendor=065a, idProduct=a001",
+    "usb 1-1: USB disconnect, device number 12",
+    "usb usb1-port2: attempt power cycle",
+    "usb 1-2: New USB device found, idVendor=0bda, idProduct=58eb",
+]
+
+G3_CLEAN_ENUM_LOG = [
+    "usb 1-4: New USB device found, idVendor=0bda, idProduct=58eb",
+]
+
+
+def test_g1_new_attach_after_spent_power_cycle_is_a_separate_plug(tmp_path):
+    """G1: the orphan power cycle belongs to the PREVIOUS plug; the attach
+    starts a fresh episode. No merged episode, no absence claim for a plug
+    with zero observed errors."""
+    out = parse_usb_flakiness(G1_TWO_PLUGS_LOG)
+    # hand-counted: 1 attach (line 1), 1 power cycle (line 0), no errors.
+    # A merged episode would surface here as eligible (power_cycled=True
+    # carrying the attach) — instead nothing is eligible: the spent cycle is
+    # history and the fresh attach episode observed no failures.
+    assert out["latest_episode"] is None
+    assert out["latest_attempt"] == {"port": "1-2", "index": 1}
+    assert out["power_cycle_ports"] == ["1-2"]   # the cycle is history
+    # the two plugs never merge: one attach line, one cycle — both counted
+    assert out["port_stats"]["1-2"] == {
+        "attaches": 1, "successes": 0, "descriptor_errors": 0,
+        "power_cycles": 1, "last_index": 1, "last_ok": False}
+    assert healthy_analyze(tmp_path, log=G1_TWO_PLUGS_LOG,
+                           device_present=False) == []
+
+
+def test_g1b_attach_then_opticon_success_after_cycle_warns_nothing(tmp_path):
+    """G1 + FIX 2: cycle (history), then a full Opticon success on the new
+    plug — the success episode is newest and nothing warns."""
+    out = parse_usb_flakiness(G1B_SUCCESS_AFTER_CYCLE_LOG)
+    ep = out["latest_episode"]
+    assert ep["port"] == "1-2"
+    assert ep["success"] is True
+    assert ep["attaches"] == 1           # the fresh plug's own episode
+    assert ep["power_cycled"] is False   # the spent cycle was not absorbed
+    assert out["latest_success"] == {"port": "1-2", "index": 2}
+    assert out["opticon_enumerated_at"] == 2
+    assert out["opticon_disconnected_at"] is None
+    # hand-counted row: 1 attach, 1 success (Opticon), 1 power cycle (history)
+    assert out["port_stats"]["1-2"] == {
+        "attaches": 1, "successes": 1, "descriptor_errors": 0,
+        "power_cycles": 1, "last_index": 2, "last_ok": True}
+    assert healthy_analyze(tmp_path, log=G1B_SUCCESS_AFTER_CYCLE_LOG,
+                           device_present=False) == []
+
+
+def test_g2_recovery_enumeration_retracts_the_absence_claim(tmp_path):
+    """G2: the 0bda line proves 1-2 recovered AFTER its power cycle — the
+    stale episode must be retracted; the older 1-1 dropout headlines."""
+    out = parse_usb_flakiness(G2_RECOVERY_LOG)
+    assert out["latest_episode"]["port"] == "1-1"
+    assert out["latest_episode"]["success"] is True
+    assert out["power_cycle_ports"] == ["1-2"]   # history keeps the cycle
+
+    findings = healthy_analyze(tmp_path, log=G2_RECOVERY_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    warn = findings[0]
+    assert warn.title == (
+        "the scanner enumerated, then dropped off the USB bus (port 1-1)")
+    # hand-counted: the input holds ZERO descriptor-read error lines
+    assert warn.detail.startswith(
+        "0 descriptor-read error(s) this boot, one successful Opticon attach")
+    rendered = warn.title + "\n" + warn.detail + "\n" + "\n".join(warn.fix)
+    assert "1-2" not in rendered          # no 1-2 absence claim anywhere
+    assert "stays ABSENT" not in rendered
+
+
+def test_g2b_sole_power_cycle_still_warns_with_the_fix6_title(tmp_path):
+    """G2 guard: under list-based selection a sole power cycle is still the
+    only episode and still wins (FIX 6/R5)."""
+    findings = healthy_analyze(tmp_path, log=POWER_CYCLE_ONLY_LOG,
+                               device_present=False)
+    assert len(findings) == 1
+    assert findings[0].severity == "warning"
+    assert findings[0].title == (
+        "USB enumeration is retry-fragile on port 1-2: "
+        "the kernel power-cycled the port")
+
+
+def test_g3_non_opticon_enumeration_still_gets_an_activity_row(tmp_path):
+    """G3 ruling (R7 wins): a non-Opticon enumeration is USB activity even
+    with no attach line in the window — it gets a port_stats row, but
+    successes/last_ok stay Opticon-only."""
+    out = parse_usb_flakiness(G3_CLEAN_ENUM_LOG)
+    assert out["port_stats"] == {
+        "1-4": {"attaches": 0, "successes": 0, "descriptor_errors": 0,
+                "power_cycles": 0, "last_index": 0, "last_ok": False}}
+    assert out["port_stats"]["1-4"]["successes"] == 0
+    assert out["port_stats"]["1-4"]["last_ok"] is False
+    assert out["latest_episode"] is None
+    assert out["latest_attempt"] is None
+    assert healthy_analyze(tmp_path, log=G3_CLEAN_ENUM_LOG,
+                           device_present=False) == []
