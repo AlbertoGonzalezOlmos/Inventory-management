@@ -230,6 +230,19 @@ def _port_tally(port_stats: dict, *, first: str | None = None) -> str:
     return "; ".join(parts)
 
 
+def _eligible(ep: dict) -> bool:
+    """G2: is this episode a candidate for ``latest_episode``?
+
+    An Opticon success is always eligible (the legacy dropout finding needs
+    it). A failure is eligible only while it is unattributed — an episode
+    whose device later enumerated as *something* recovered (``enumerated``)
+    and can never feed an absence claim (FIX 2)."""
+    if ep["success"]:
+        return True
+    return (not ep.get("enumerated", False)
+            and (ep["descriptor_errors"] or ep["power_cycled"]))
+
+
 def parse_usb_flakiness(lines) -> dict:
     """Scan kernel lines for the scanner's link signature. Pure; no I/O.
 
@@ -248,9 +261,11 @@ def parse_usb_flakiness(lines) -> dict:
     present (schema stability, R1): ``port_stats`` tallies every port with any
     USB activity (R7), ``power_cycle_ports`` is unique in first-seen order
     (R8), ``latest_attempt`` is the newest attach line, ``latest_success`` the
-    last Opticon enumeration, and ``latest_episode`` the newest *interesting*
-    episode (failed, or an Opticon success) — a clean camera/BT attach can
-    never mask it (R7).
+    last Opticon enumeration, and ``latest_episode`` the newest *eligible*
+    episode — computed ONCE at the end from the full episode list (G2), so
+    evidence that arrives after a candidate was first seen (e.g. a recovery
+    enumeration) is honoured and can retract it. A clean camera/BT attach can
+    never mask a failing port (R7).
     """
     descriptor_errors = 0
     proto_errors = 0
@@ -262,25 +277,12 @@ def parse_usb_flakiness(lines) -> dict:
     latest_attempt: dict | None = None
     latest_success: dict | None = None
     open_episodes: dict[str, dict] = {}
-    latest_episode: dict | None = None
+    episodes: list[dict] = []
 
     def stats(port):
         return port_stats.setdefault(port, {
             "attaches": 0, "successes": 0, "descriptor_errors": 0,
             "power_cycles": 0, "last_index": -1, "last_ok": False})
-
-    def consider(ep):
-        nonlocal latest_episode
-        # Interesting = an Opticon success, or a failure that was NOT closed
-        # by any enumeration. An episode whose device later enumerated as
-        # something else recovered (FIX 2): it must never headline or feed
-        # an absence claim.
-        interesting = ep["success"] or (
-            not ep.get("enumerated", False)
-            and (ep["descriptor_errors"] or ep["power_cycled"]))
-        if interesting and (latest_episode is None
-                            or ep["index"] > latest_episode["index"]):
-            latest_episode = ep
 
     def new_episode(port, i):
         return {"port": port, "index": i, "attaches": 1,
@@ -300,13 +302,24 @@ def parse_usb_flakiness(lines) -> dict:
             st["attaches"] += 1
             st["last_index"] = i
             st["last_ok"] = False
-            if port in open_episodes:
+            old = open_episodes.get(port)
+            if old is not None and (old["truncated"] or old["power_cycled"]):
+                # G1: the open episode belongs to the PREVIOUS plug (orphan
+                # power cycle / truncated window). Close it as history —
+                # drop it from the candidate list; its evidence lives on in
+                # port_stats. The new attach starts a fresh episode.
+                open_episodes.pop(port, None)
+                episodes.remove(old)
+                old = None
+            if old is not None:
                 # Same ladder, next address round: one physical plug burns
                 # two "new device number" lines (device 4 then 5). Count
                 # the round, keep accumulating into the SAME episode (R8).
-                open_episodes[port]["attaches"] += 1
+                old["attaches"] += 1
             else:
-                open_episodes[port] = new_episode(port, i)
+                ep = new_episode(port, i)
+                episodes.append(ep)
+                open_episodes[port] = ep
             latest_attempt = {"port": port, "index": i}
             continue
         m = _DESC_ERR_RE.search(line)
@@ -323,6 +336,7 @@ def parse_usb_flakiness(lines) -> dict:
             if ep is None:  # the window starts mid-episode (R4)
                 ep = truncated_episode(port, i)
                 open_episodes[port] = ep
+                episodes.append(ep)
             ep["descriptor_errors"] += 1
             continue
         # Prefix-less descriptor error (FIX 7): still counts in the global
@@ -348,8 +362,8 @@ def parse_usb_flakiness(lines) -> dict:
             if orphan:
                 ep = truncated_episode(port, i)
                 open_episodes[port] = ep  # FIX 5: later errors reuse it
+                episodes.append(ep)
             ep["power_cycled"] = True
-            consider(ep)
             if not orphan:
                 open_episodes.pop(port, None)
             continue
@@ -375,15 +389,21 @@ def parse_usb_flakiness(lines) -> dict:
                           "descriptor_errors": 0, "power_cycled": False,
                           "success": True, "truncated": True,
                           "enumerated": True}
-                    consider(ep)
-                # A non-Opticon enumeration with no open episode leaves no
-                # episode to close; port_stats is deliberately untouched so
-                # a clean camera enumeration does not move last_index.
+                    episodes.append(ep)
+                else:
+                    # G3 (ruling): R7 wins — a non-Opticon enumeration is
+                    # USB activity even without an attach line in the
+                    # window. Root-hub lines ("usb usb1:") are controller
+                    # events, not port activity, so they get no row. Only
+                    # last_index may change; successes and last_ok stay
+                    # Opticon-only, so the finding tally is unaffected.
+                    if re.fullmatch(r"\d+-\d+(?:\.\d+)?", port):
+                        st = stats(port)
+                        st["last_index"] = i
             else:
                 ep["enumerated"] = True
                 if is_opticon:
                     ep["success"] = True
-                consider(ep)
             continue
         m = _USB_DISCONNECT_RE.search(line)
         if m:
@@ -393,12 +413,14 @@ def parse_usb_flakiness(lines) -> dict:
                 disconnected_at = i
             st = stats(port)  # FIX 4: a lone disconnect is activity (R7)
             st["last_index"] = i
-            old = open_episodes.pop(port, None)
-            if old is not None:
-                consider(old)
+            open_episodes.pop(port, None)
             continue
-    for ep in open_episodes.values():
-        consider(ep)
+    # G2: select the newest eligible episode ONCE, at the end — evidence seen
+    # after a candidate arrived (a recovery enumeration) is honoured and can
+    # retract it. A sole power cycle is the only episode and still wins.
+    latest_episode = max(
+        (ep for ep in episodes if _eligible(ep)),
+        key=lambda ep: ep["index"], default=None)
     return {"descriptor_errors": descriptor_errors,
             "proto_errors": proto_errors,
             "opticon_port": opticon_port,
