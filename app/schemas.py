@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -586,6 +587,18 @@ class TerminalRegisterIn(_Stripped):
     terminal_id: str = Field(min_length=1, max_length=64,
                              pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     secret: str = Field(min_length=32, max_length=128)
+    # Portable identity (P1): the laptop's machine key (sha256 of
+    # /etc/machine-id hex-truncated to 16 chars). Nullable and unique — one
+    # laptop keeps one terminal across daemon reinstalls.
+    machine_key: str | None = Field(default=None, min_length=16,
+                                    max_length=16,
+                                    pattern=r"^[0-9a-f]{16}$")
+    # Staff-minted registration invite (P1): 16 chars of the Crockford
+    # alphabet (80 bits). Shape-validated HERE (422) before any admission
+    # gate sees the payload; semantic validity (exists/unexpired/
+    # unconsumed) is the gate's call. Stored only as its hash.
+    invite: str | None = Field(default=None, min_length=16, max_length=16,
+                               pattern=r"^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{16}$")
 
 
 class TerminalRegisterOut(BaseModel):
@@ -638,9 +651,41 @@ class ScanEventOut(BaseModel):
     kind: str
 
 
+class AgentStatusOut(BaseModel):
+    """The laptop-side agent as the poll reports it (R4): ALWAYS an object
+    — a never-heartbeated terminal is the all-null shape below, not a
+    missing key. ``online`` is derived from ``agent_seen_at`` (heartbeat
+    only), NOT ``last_seen_at`` (register/ingest also touch that clock).
+    The poll's `live` pill additionally requires device_status ==
+    "present" — online + unplugged is honest `off`, not `live`."""
+
+    online: bool = False
+    device_status: str | None = None
+    personality: str | None = None
+
+
+class HeartbeatIn(_Stripped):
+    """The agent's liveness report (R10): device state plus the detected
+    scanner personality. A typo'd state must never silently become
+    "absent" — anything outside the three known states is a 422."""
+
+    device_status: Literal["present", "absent", "no-permission"]
+    personality: str | None = Field(default=None, pattern=r"^[a-z0-9-]{1,32}$")
+
+
+class TerminalInviteOut(BaseModel):
+    """A minted registration invite, shown ONCE (only its hash is stored)."""
+
+    invite_code: str
+    expires_at: datetime
+
+
 class ScanEventsOut(BaseModel):
     """One poll: unconsumed events with seq > after (at-most-once), plus
-    the terminal's latest seq (the cursor high-water mark)."""
+    the terminal's latest seq (the cursor high-water mark) and the agent
+    object (R4: always present; the all-null shape means never
+    heartbeated)."""
 
     events: list[ScanEventOut]
     latest_seq: int
+    agent: AgentStatusOut = Field(default_factory=AgentStatusOut)

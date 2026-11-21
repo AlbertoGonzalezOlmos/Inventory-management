@@ -117,7 +117,7 @@ def test_migration_table_is_well_formed():
 
 
 def test_every_migration_the_app_currently_needs_is_listed():
-    """The table is the whole story: six columns, one index."""
+    """The table is the whole story: eleven columns, one index."""
     assert {(t, c) for t, c, _d, _e in COLUMN_MIGRATIONS} == {
         ("users", "must_change_password"),
         ("items", "barcode"),
@@ -125,8 +125,50 @@ def test_every_migration_the_app_currently_needs_is_listed():
         ("auth_tokens", "logoff_deadline"),
         ("users", "qr_badge_generation"),
         ("users", "phone"),
+        ("terminals", "machine_key"),
+        ("terminals", "device_status"),
+        ("terminals", "personality"),
+        ("terminals", "pairing_code_expires_at"),
+        ("terminals", "agent_seen_at"),
     }
     assert {t for t, _s in INDEX_MIGRATIONS} == {"auth_tokens"}
+
+
+def test_terminal_identity_columns_migrate_idempotently(tmp_path, monkeypatch):
+    """A pre-P1 terminals table gains the five portable columns exactly once.
+
+    machine_key (identity + its unique index), device_status/personality
+    (agent-reported facts) and pairing_code_expires_at/agent_seen_at (the
+    TTL and heartbeat clocks) are all nullable, so the upgrade changes
+    nothing about existing rows — and a double boot must repair, not
+    double-ALTER or fail (the IF NOT EXISTS doctrine).
+    """
+    db = tmp_path / "legacy-terminals.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE terminals (id INTEGER NOT NULL PRIMARY KEY, "
+        "terminal_id VARCHAR NOT NULL, secret_hash VARCHAR NOT NULL, "
+        "token_hash VARCHAR, pairing_code_hash VARCHAR, "
+        "created_at DATETIME NOT NULL, last_seen_at DATETIME)")
+    conn.execute(
+        "INSERT INTO terminals VALUES (1, 'old-kiosk', 'hash', NULL, NULL, "
+        "'2026-01-01', '2026-01-01')")
+    conn.commit()
+    conn.close()
+
+    _run(db, monkeypatch, times=2)  # boot, boot again — must not fail
+
+    assert {"machine_key", "device_status", "personality",
+            "pairing_code_expires_at", "agent_seen_at"} <= _columns(db, "terminals")
+    assert _indexes(db, "terminals") >= {"ix_terminals_machine_key"}
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT terminal_id, machine_key, device_status, agent_seen_at "
+            "FROM terminals").fetchall()
+    finally:
+        conn.close()
+    assert row == [("old-kiosk", None, None, None)]  # upgrade wrote nothing
 
 
 def test_a_malformed_entry_fails_loudly(tmp_path, monkeypatch):

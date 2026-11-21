@@ -272,6 +272,57 @@ class Terminal(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
     last_seen_at: datetime | None = Field(default=None, sa_type=DateTime)
 
+    # --- Portable identity (P1, docs/scanner-portable-design-2026-11-21) ---
+
+    # The laptop's machine key (sha256 of /etc/machine-id hex-truncated to
+    # 16 chars): the identity a reinstalled daemon re-asserts so one laptop
+    # keeps one terminal. Nullable AND unique — SQLite treats NULLs as
+    # distinct under the unique index, so legacy rows coexist. (ADD COLUMN
+    # cannot carry UNIQUE on an existing database, so the index is a
+    # COLUMN_MIGRATIONS post-ADD statement; create_all carries it here.)
+    machine_key: str | None = Field(default=None, sa_type=String(32),
+                                    unique=True, index=True)
+    # Agent-reported device state ("present"/"absent"/"no-permission").
+    # Written only by the heartbeat; NULL = a legacy terminal that never
+    # heartbeated (never a fake "absent" — it is simply not measured).
+    device_status: str | None = Field(default=None, sa_type=String(16))
+    # Scanner personality as detected agent-side ("hid-a001" etc.). Stored,
+    # never validated-and-dropped (R3): the poll reports what was measured.
+    personality: str | None = Field(default=None, sa_type=String(32))
+    # Pairing-code deadline (R9): every mint stores now + TTL, a successful
+    # pair clears it; NULL = a legacy code, which never expires. No index:
+    # read off the row already fetched by the terminal_id seek.
+    pairing_code_expires_at: datetime | None = Field(default=None,
+                                                     sa_type=DateTime)
+    # Heartbeat timestamp (R4): the ONLY clock behind "agent online" in the
+    # poll. last_seen_at is deliberately NOT it — register and ingest also
+    # touch that clock, so it would claim "online" for a daemon that never
+    # heartbeated.
+    agent_seen_at: datetime | None = Field(default=None, sa_type=DateTime)
+
+
+class ScannerInvite(SQLModel, table=True):
+    """A registration invite for portable bring-your-own-laptop (P1).
+
+    Single-use admission for POST /terminals: the staff minted code is
+    shown ONCE and only its SHA-256 is stored (the session-token
+    doctrine — a leaked database yields no usable invite). Consumption is
+    an atomic conditional UPDATE (``consumed_at IS NULL``), so two
+    registers racing one invite can never both spend it. ``created_by``
+    names the staff user who minted it (NULL = loopback mint); expired
+    rows are pruned on the next mint, never read as authority.
+    """
+
+    __tablename__ = "scanner_invites"
+
+    id: int | None = Field(default=None, primary_key=True)
+    # Every lookup is by hash — a seek, and duplicate codes impossible.
+    invite_hash: str = Field(sa_type=String(64), unique=True, index=True)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime)
+    expires_at: datetime = Field(sa_type=DateTime)
+    consumed_at: datetime | None = Field(default=None, sa_type=DateTime)
+    created_by: str | None = Field(default=None)
+
 
 class ScanEvent(SQLModel, table=True):
     """One scanned code in a terminal's queue (the daemon→SPA channel).

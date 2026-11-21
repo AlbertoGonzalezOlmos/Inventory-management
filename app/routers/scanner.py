@@ -58,7 +58,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -159,6 +159,25 @@ def _pairing_file() -> Path:
 def _mint_pairing_code() -> str:
     return "".join(secrets.choice(_PAIRING_ALPHABET)
                    for _ in range(_PAIRING_CODE_LEN))
+
+
+#: Pairing-code TTL (R9): how long a minted code stays usable. Env, read at
+#: CALL time (the SCANNER_EVENT_TTL_SECONDS precedent).
+_PAIR_CODE_TTL_ENV = "HCRM_SCANNER_PAIR_CODE_TTL_SECONDS"
+_PAIR_CODE_TTL_DEFAULT = 600
+
+
+def pairing_code_expiry(now: datetime | None = None) -> datetime:
+    """The deadline stored on EVERY pairing-code mint (R9).
+
+    Register and reclaim both store this in
+    ``Terminal.pairing_code_expires_at``; :func:`_pair_terminal` refuses
+    codes past it (byte-identical 401 — no "right but late" oracle) and
+    clears the deadline on success. A NULL column is the legacy shape:
+    codes minted before this schema never expire.
+    """
+    ttl = int(os.environ.get(_PAIR_CODE_TTL_ENV, _PAIR_CODE_TTL_DEFAULT))
+    return (now or utcnow()) + timedelta(seconds=ttl)
 
 
 def _presented_credential(request: Request, header_name: str,
@@ -284,6 +303,8 @@ def register_terminal(
         pairing_code_hash=token_hash(code),
         created_at=now,
         last_seen_at=now,
+        # Every mint stores a deadline (R9) — see pairing_code_expiry().
+        pairing_code_expires_at=pairing_code_expiry(now),
     ))
     session.commit()
     return TerminalRegisterOut(pairing_code=code)
@@ -307,7 +328,12 @@ def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
     ).first()
     code_hash = token_hash(code)
     if (terminal is None or terminal.pairing_code_hash is None
-            or not hmac.compare_digest(code_hash, terminal.pairing_code_hash)):
+            or not hmac.compare_digest(code_hash, terminal.pairing_code_hash)
+            # Pairing-code TTL (R9): an expired code gets the SAME 401 as a
+            # wrong one — byte-identical, so "right but late" is
+            # indistinguishable from "never right" (no timing oracle).
+            or (terminal.pairing_code_expires_at is not None
+                and terminal.pairing_code_expires_at <= utcnow())):
         raise coded_detail(
             "bad_pairing",
             {"status": "bad_pairing", "message": ERRORS["bad_pairing"].message},
@@ -317,7 +343,10 @@ def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
         update(Terminal)
         .where(Terminal.terminal_id == terminal_id,
                Terminal.token_hash.is_(None))  # type: ignore[union-attr]
-        .values(token_hash=token_hash(raw))
+        .values(token_hash=token_hash(raw),
+                # Spent is spent: clear the deadline the moment the code
+                # dies (R9) — the row stops advertising a moot TTL.
+                pairing_code_expires_at=None)
     )
     if result.rowcount != 1:
         # Someone else paired this terminal between our read and the

@@ -206,6 +206,28 @@ COLUMN_MIGRATIONS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # Contact phone (Task B): nullable, normalised in the schemas; existing
     # rows land NULL (not set) — the upgrade changes nothing.
     ("users", "phone", "TEXT", ()),
+    # Portable identity (P1): the laptop's machine key (sha256 of
+    # /etc/machine-id, 16 hex chars). Nullable and UNIQUE. ADD COLUMN cannot
+    # carry the UNIQUE constraint, so the index rides along as a post-ADD
+    # statement (the items.barcode precedent); SQLite treats NULLs as
+    # distinct, so the all-NULL legacy rows coexist happily.
+    ("terminals", "machine_key", "VARCHAR(32)",
+     ("CREATE UNIQUE INDEX IF NOT EXISTS ix_terminals_machine_key "
+      "ON terminals (machine_key)",)),
+    # Agent-reported device state ("present"/"absent"/"no-permission");
+    # written only by the heartbeat. NULL = never measured (legacy) — never
+    # a fake "absent". No index: read off the row already fetched.
+    ("terminals", "device_status", "VARCHAR(16)", ()),
+    # Scanner personality as detected agent-side ("hid-a001" etc.); stored,
+    # never validated-and-dropped (R3). No index.
+    ("terminals", "personality", "VARCHAR(32)", ()),
+    # Pairing-code deadline (R9): mint stores now + TTL, a successful pair
+    # clears it; NULL = a legacy code, which never expires. No index.
+    ("terminals", "pairing_code_expires_at", "DATETIME", ()),
+    # Heartbeat timestamp (R4): the only clock behind "agent online" —
+    # last_seen_at is also touched by register/ingest and would claim
+    # "online" for a daemon that never heartbeated. No index.
+    ("terminals", "agent_seen_at", "DATETIME", ()),
 )
 
 #: Index migrations: an index added to a model never reaches an existing
