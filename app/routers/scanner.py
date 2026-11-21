@@ -62,17 +62,21 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import delete, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
+from pydantic import ValidationError
 
 from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
 from app.error_codes import ERRORS, coded_detail
 from app.models import ScanEvent, ScannerInvite, Terminal, utcnow
 from app.schemas import (
+    AgentStatusOut,
+    HeartbeatIn,
     ScanEventOut,
     ScanEventsOut,
     TerminalInviteOut,
@@ -93,6 +97,11 @@ router = APIRouter(prefix="/api/scanner", tags=["scanner"])
 #: How long an unconsumed scan may rest in the queue (badge payloads are
 #: bearer credentials). Module attribute at call time — tests monkeypatch it.
 SCANNER_EVENT_TTL_SECONDS = 300
+
+#: Agent liveness freshness in seconds. Read at CALL time so tests can
+#: monkeypatch it without sleeping; the environment supplies the boot default.
+HEARTBEAT_FRESH_SECONDS = int(os.environ.get(
+    "HCRM_SCANNER_HEARTBEAT_FRESH_SECONDS", "90"))
 
 #: Crockford base32 without lookalikes (no I L O U): 8 chars ≈ 40 bits —
 #: strong enough without a brute-force counter on a LAN plaintext app.
@@ -181,6 +190,30 @@ def pairing_code_expiry(now: datetime | None = None) -> datetime:
     """
     ttl = int(os.environ.get(_PAIR_CODE_TTL_ENV, _PAIR_CODE_TTL_DEFAULT))
     return (now or utcnow()) + timedelta(seconds=ttl)
+
+
+def _require_json(request: Request) -> None:
+    """Require JSON before credential work (the /pair/auto CSRF gate)."""
+    content_type = request.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        raise coded_detail(
+            "json_required",
+            {"status": "json_required",
+             "message": ERRORS["json_required"].message},
+        )
+
+
+def _agent_status(terminal: Terminal, now: datetime) -> AgentStatusOut:
+    """Heartbeat-only agent truth; register/ingest never imply liveness."""
+    seen = terminal.agent_seen_at
+    age = (now - seen).total_seconds() if seen is not None else None
+    online = (age is not None
+              and 0 <= age <= HEARTBEAT_FRESH_SECONDS)
+    return AgentStatusOut(
+        online=online,
+        device_status=terminal.device_status,
+        personality=terminal.personality,
+    )
 
 
 #: Registration invites (P1, R8): staff-minted single-use admission for a
@@ -552,6 +585,84 @@ def register_terminal(
     return TerminalRegisterOut(pairing_code=code)
 
 
+@router.post("/terminals/{terminal_id}/reclaim",
+             response_model=TerminalRegisterOut)
+def reclaim_terminal(
+    terminal_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> TerminalRegisterOut:
+    """Rotate a terminal's pairing code and revoke its current read token.
+
+    This is the self-healing path for ``409 already_paired``: the terminal
+    secret, never a staff session, authorizes a fresh single-use code. The
+    previously paired browser's next poll returns 401 BY DESIGN, and the SPA
+    automatically unpairs that browser. Repeat calls kill earlier codes too.
+    Unknown secrets and path/secret mismatches are indistinguishable.
+    """
+    _require_json(request)
+    secret = _presented_credential(request, "X-Scanner-Secret")
+    terminal = _terminal_by_credential(session, Terminal.secret_hash, secret)
+    if terminal.terminal_id != terminal_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILED)
+    code = _mint_pairing_code()
+    now = utcnow()
+    result = session.exec(
+        update(Terminal)
+        .where(Terminal.id == terminal.id,
+               Terminal.secret_hash == terminal.secret_hash)
+        .values(pairing_code_hash=token_hash(code),
+                pairing_code_expires_at=pairing_code_expiry(now),
+                token_hash=None)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILED)
+    session.commit()
+    return TerminalRegisterOut(pairing_code=code)
+
+
+@router.post("/terminals/{terminal_id}/heartbeat",
+             status_code=status.HTTP_204_NO_CONTENT)
+async def heartbeat_terminal(
+    terminal_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> Response:
+    """Record agent liveness and the last measured device state.
+
+    ``agent_seen_at`` is written ONLY here and drives the poll's online bit;
+    ``last_seen_at`` retains its broader daemon-activity meaning. An absent
+    device updates status but never clears either timestamp or browser token.
+    """
+    _require_json(request)
+    # Parse explicitly so the 415 content-type gate runs BEFORE FastAPI's
+    # body validation (which would otherwise answer text/plain with 422).
+    try:
+        payload = HeartbeatIn.model_validate_json(await request.body())
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+    secret = _presented_credential(request, "X-Scanner-Secret")
+    terminal = _terminal_by_credential(session, Terminal.secret_hash, secret)
+    if terminal.terminal_id != terminal_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILED)
+    now = utcnow()
+    result = session.exec(
+        update(Terminal)
+        .where(Terminal.id == terminal.id,
+               Terminal.secret_hash == terminal.secret_hash)
+        .values(last_seen_at=now,
+                agent_seen_at=now,
+                device_status=payload.device_status,
+                personality=payload.personality)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILED)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
     """The shared verify-and-mint core of ``/pair`` and ``/pair/auto``.
 
@@ -816,6 +927,7 @@ def poll_events(
     return ScanEventsOut(
         events=[ScanEventOut(seq=e.seq, code=e.code, kind=e.kind) for e in events],
         latest_seq=latest_seq,
+        agent=_agent_status(terminal, now),
     )
 
 
