@@ -220,6 +220,22 @@ _REGISTRY: tuple[Error, ...] = (
           "Deleting a terminal requires staff "
           "privileges (or a loopback caller)"),
     Error("terminal_not_found", 404, "No terminal {terminal}"),
+    # --- scanner: portable admission (P1) -------------------------------------
+    Error("invite_staff_only", 403,
+          "Minting a registration invite requires staff "
+          "privileges (or a loopback caller)"),
+    Error("invite_limit", 409,
+          "Too many open registration invites — wait for one "
+          "to be used or expire, then mint again"),
+    Error("bad_invite", 403, "Unknown or expired invite"),
+    Error("machine_key_in_use", 409,
+          "That machine key is already registered to terminal "
+          "{terminal} — recovery is DELETE "
+          "/api/scanner/terminals/{terminal_url} (staff or loopback), "
+          "then re-register"),
+    Error("register_rate_limited", 429,
+          "Too many registrations from this address — retry "
+          "after {seconds} seconds"),
     # --- framework-level envelopes (app.main's exception handlers) -------------
     # FastAPI's own request validation (422). Two codes: a body field is named
     # in ``detail[0].loc`` and gets its label row; a model-level error (loc
