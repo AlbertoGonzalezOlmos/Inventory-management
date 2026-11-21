@@ -98,10 +98,11 @@ router = APIRouter(prefix="/api/scanner", tags=["scanner"])
 #: bearer credentials). Module attribute at call time — tests monkeypatch it.
 SCANNER_EVENT_TTL_SECONDS = 300
 
-#: Agent liveness freshness in seconds. Read at CALL time so tests can
-#: monkeypatch it without sleeping; the environment supplies the boot default.
-HEARTBEAT_FRESH_SECONDS = int(os.environ.get(
-    "HCRM_SCANNER_HEARTBEAT_FRESH_SECONDS", "90"))
+#: Agent liveness freshness in seconds — the boot DEFAULT. The environment
+#: override HCRM_SCANNER_HEARTBEAT_FRESH_SECONDS is read at CALL time inside
+#: _agent_status (R14), like the other scanner envs, so changing it needs no
+#: restart; tests monkeypatch this default when the env is unset.
+HEARTBEAT_FRESH_SECONDS = 90
 
 #: Crockford base32 without lookalikes (no I L O U): 8 chars ≈ 40 bits —
 #: strong enough without a brute-force counter on a LAN plaintext app.
@@ -205,10 +206,12 @@ def _require_json(request: Request) -> None:
 
 def _agent_status(terminal: Terminal, now: datetime) -> AgentStatusOut:
     """Heartbeat-only agent truth; register/ingest never imply liveness."""
+    fresh = int(os.environ.get("HCRM_SCANNER_HEARTBEAT_FRESH_SECONDS",
+                               HEARTBEAT_FRESH_SECONDS))
     seen = terminal.agent_seen_at
     age = (now - seen).total_seconds() if seen is not None else None
     online = (age is not None
-              and 0 <= age <= HEARTBEAT_FRESH_SECONDS)
+              and 0 <= age <= fresh)
     return AgentStatusOut(
         online=online,
         device_status=terminal.device_status,
@@ -239,12 +242,13 @@ def _invite_max_open() -> int:
     return int(os.environ.get(_INVITE_MAX_ENV, _INVITE_MAX_DEFAULT))
 
 
-#: Non-loopback register throttle (R7): a FIXED window per client IP, counted
-#: AFTER the admission gate, loopback exempt. Clock and counter are module
-#: attributes read at call time so tests drive the window without sleeping.
-#: In-process only — a multi-worker deployment would need a shared store
-#: (documented limitation; the admission gate, not this, is the security
-#: boundary).
+#: Non-loopback register throttle (R7): a SLIDING window per client IP,
+#: counted AFTER the admission gate, loopback exempt. Clock and counter are
+#: module attributes read at call time so tests drive the window without
+#: sleeping. In-process only — a multi-worker deployment would need a shared
+#: store (documented limitation; the admission gate, not this, is the security
+#: boundary). Behind a reverse proxy every laptop shares the proxy's IP, so
+#: they all share ONE bucket (the key is request.client.host).
 _REGISTER_RATE_MAX_ENV = "HCRM_SCANNER_REGISTER_RATE_MAX"
 _REGISTER_RATE_MAX_DEFAULT = 20
 _REGISTER_RATE_WINDOW_ENV = "HCRM_SCANNER_REGISTER_RATE_WINDOW_SECONDS"
@@ -255,7 +259,7 @@ _register_rate_hits: dict[str, list[float]] = {}
 
 def _register_rate_limit(ip: str) -> int | None:
     """Record one admitted non-loopback attempt; return Retry-After seconds
-    when the fixed window is full, else None. The window slides no further
+    when the sliding window is full, else None. The window slides no further
     than its oldest hit: Retry-After is the seconds until that hit ages out."""
     max_hits = int(os.environ.get(_REGISTER_RATE_MAX_ENV,
                                   _REGISTER_RATE_MAX_DEFAULT))
@@ -469,6 +473,9 @@ def register_terminal(
     which terminals exist (the gate fires before any existence check). The
     response carries the single-use pairing code, shown once; only its hash
     is stored. Re-registering an existing terminal_id is a 409, not a rotate.
+    The minted code expires after HCRM_SCANNER_PAIR_CODE_TTL_SECONDS (default
+    600 s): on the same-host kiosk, click the pill within 10 minutes of
+    --register or re-run --register for a fresh code.
     """
     loopback = _is_loopback(request)
     # 1. Admission gate — validate the invite, do NOT consume it here.
@@ -550,10 +557,13 @@ def register_terminal(
                  owner=repr(secret_owner.terminal_id))},
             owner=repr(secret_owner.terminal_id),
         )
-    # 4. Consume the invite — the atomic hash-keyed conditional UPDATE (R1/R8).
-    #    rowcount != 1 means a racing register spent it first → bad_invite;
-    #    the insert below never runs. Same autobegun transaction as the insert.
-    if invite_row is not None:
+    # 4. Consume the invite — ONLY when it is the admission basis (R12). A
+    #    register admitted by loopback or HCRM_SCANNER_REGISTER_ANY must not
+    #    spend a presented invite (it was redundant). The atomic hash-keyed
+    #    conditional UPDATE (R1/R8): rowcount != 1 means a racing register
+    #    spent it first → bad_invite; the insert below never runs. Same
+    #    autobegun transaction as the insert.
+    if invite_row is not None and not (loopback or _register_open()):
         result = session.exec(
             update(ScannerInvite)
             .where(ScannerInvite.invite_hash == token_hash(payload.invite),

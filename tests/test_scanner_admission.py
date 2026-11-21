@@ -276,3 +276,101 @@ def test_invite_code_never_in_register_or_errors(client, admin_token):
     bad = reg(client, "leak-bad", invite="3" * 16)
     assert code not in bad.text
     assert "3" * 16 not in bad.text
+
+
+# --- R12: an invite is spent only when it ADMITTED the register --------------
+
+def _invite_row(code):
+    with Session(engine) as s:
+        return s.exec(select(ScannerInvite).where(
+            ScannerInvite.invite_hash == token_hash(code))).one()
+
+
+def test_loopback_register_with_valid_invite_does_not_consume_it(client, loopback):
+    code = mint(client).json()["invite_code"]      # loopback mint
+    r = reg(client, "lb-invite", invite=code)       # admitted by LOOPBACK
+    assert r.status_code == 201, r.text
+    assert _invite_row(code).consumed_at is None    # invite NOT spent
+
+
+def test_register_any_with_valid_invite_does_not_consume_it(client, admin_token,
+                                                            monkeypatch):
+    monkeypatch.setenv("HCRM_SCANNER_REGISTER_ANY", "1")
+    code = mint(client, admin_token).json()["invite_code"]
+    r = reg(client, "env-invite", invite=code)      # admitted by the env flag
+    assert r.status_code == 201, r.text
+    assert _invite_row(code).consumed_at is None
+
+
+# --- R13: pin the four probe-verified behaviours -----------------------------
+
+def test_unadmitted_caller_existing_terminal_is_403_not_409(client):
+    with Session(engine) as s:                      # an existing terminal
+        s.add(Terminal(terminal_id="exists", secret_hash=new_secret()))
+        s.commit()
+    r = reg(client, "exists")                       # non-loopback, no env/invite
+    assert r.status_code == 403                     # gate first — no existence leak
+    assert r.json()["detail"]["status"] == "loopback_only"
+
+
+def test_machine_key_commit_race_maps_to_409_not_500(client, monkeypatch):
+    """glm probe C: a conflicting commit lands AFTER our read-checks, BEFORE
+    our INSERT (no invite → no earlier write lock). The unique index raises
+    IntegrityError at commit → rollback → 409 naming the winner, never 500."""
+    monkeypatch.setenv("HCRM_SCANNER_REGISTER_ANY", "1")
+    key = "abcdef0123456789"
+    real = scanner_router._mint_pairing_code
+
+    def steal():
+        with Session(engine) as s:
+            s.add(Terminal(terminal_id="race-winner", secret_hash=new_secret(),
+                           machine_key=key))
+            s.commit()
+        return real()
+
+    monkeypatch.setattr(scanner_router, "_mint_pairing_code", steal)
+    r = reg(client, "race-loser", machine_key=key)
+    assert r.status_code == 409
+    assert r.json()["detail"]["status"] == "machine_key_in_use"
+    assert "race-winner" in r.json()["detail"]["message"]
+
+
+def test_secret_and_machine_key_409_leave_invite_unconsumed(client, admin_token):
+    secret = new_secret()
+    key = "0123456789abcdef"
+    with Session(engine) as s:
+        s.add(Terminal(terminal_id="owner", secret_hash=token_hash(secret),
+                       machine_key=key))
+        s.commit()
+    code1 = mint(client, admin_token).json()["invite_code"]
+    r1 = reg(client, "new-a", secret=secret, invite=code1)   # secret_in_use
+    assert r1.status_code == 409
+    assert r1.json()["detail"]["status"] == "secret_in_use"
+    code2 = mint(client, admin_token).json()["invite_code"]
+    r2 = reg(client, "new-b", machine_key=key, invite=code2)  # machine_key_in_use
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["status"] == "machine_key_in_use"
+    assert _invite_row(code1).consumed_at is None    # neither 409 burned its invite
+    assert _invite_row(code2).consumed_at is None
+
+
+def test_reclaim_never_paired_terminal_returns_200(client, loopback):
+    secret = new_secret()
+    assert reg(client, "never-paired", secret=secret).status_code == 201
+    r = client.post("/api/scanner/terminals/never-paired/reclaim", json={},
+                    headers={"X-Scanner-Secret": secret})
+    assert r.status_code == 200, r.text             # no prior pairing needed
+    assert len(r.json()["pairing_code"]) == 8
+
+
+# --- R14: heartbeat freshness env is read at CALL time -----------------------
+
+def test_heartbeat_fresh_seconds_read_at_call_time(monkeypatch):
+    base = utcnow()
+    terminal = Terminal(terminal_id="x", secret_hash="h",
+                        agent_seen_at=base - timedelta(seconds=50))
+    monkeypatch.setenv("HCRM_SCANNER_HEARTBEAT_FRESH_SECONDS", "30")
+    assert scanner_router._agent_status(terminal, base).online is False  # 50 > 30
+    monkeypatch.setenv("HCRM_SCANNER_HEARTBEAT_FRESH_SECONDS", "120")
+    assert scanner_router._agent_status(terminal, base).online is True   # 50 <= 120
+    # the second call picked up the new env with NO reimport/restart
