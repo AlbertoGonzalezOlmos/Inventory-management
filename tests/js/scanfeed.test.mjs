@@ -389,8 +389,7 @@ test("every pill detail reason maps to a translated scanner.detail.* row", () =>
 });
 
 test("popup handshake strings exist with real Danish copy", () => {
-  for (const key of ["scanner.pairing", "scanner.reclaim", "scanner.retry",
-                     "scanner.offer_invalid", "scanner.agent_upgrade_required"]) {
+  for (const key of ["scanner.pairing", "scanner.reclaim"]) {
     assert.ok(MESSAGES.en[key], `${key} missing en`);
     assert.ok(MESSAGES.da[key], `${key} missing da`);
     assert.notEqual(MESSAGES.en[key], MESSAGES.da[key], `${key} da is a copy`);

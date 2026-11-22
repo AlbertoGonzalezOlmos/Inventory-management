@@ -380,7 +380,6 @@ scan.misread,Misread — re-scan,Læst forkert — scan igen
 scan.staged_failed,A staged scan could not be added,En midlertidigt gemt scanning kunne ikke tilføjes
 scan.staged_misread,A staged scan was a misread — dropped,En midlertidigt gemt scanning var læst forkert — kasseret
 scan.staged_saved,Scan saved — log in or scan your badge to assign it,"Scanning gemt — log ind, eller scan din badge for at tildele den"
-scanner.agent_upgrade_required,Update the scanner agent on this laptop to confirm liveness.,"Opdatér scanneragenten på denne bærbare computer for at bekræfte, at den er aktiv."
 scanner.detail.bound_elsewhere,This scanner is already paired to another browser or machine.,Denne scanner er allerede parret med en anden browser eller maskine.
 scanner.detail.no_agent,"No scanner agent responded on this laptop—install or start it, then retry.","Der svarede ingen scanneragent på denne bærbare computer — installér eller start den, og prøv igen."
 scanner.detail.no_device,No Opticon scanner is attached to this laptop—plug it in.,Der er ikke nogen Opticon-scanner tilsluttet denne bærbare computer — tilslut den.
@@ -391,7 +390,6 @@ scanner.detail.server_down,The HCRM server is unreachable—retrying.,HCRM-serve
 scanner.label.live,scanner,scanner
 scanner.label.off,scanner offline,scanner inaktiv
 scanner.label.unpaired,no scanner,ingen scanner
-scanner.offer_invalid,The scanner agent sent an invalid pairing response—retry.,Scanneragenten sendte et ugyldigt parringssvar — prøv igen.
 scanner.pair_failed,Pairing failed ({status}),Parringen mislykkedes ({status})
 scanner.paired,"Paired — scans from this terminal now arrive here, even with this window unfocused.","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus."
 scanner.paired_offline,"Paired — scans from this terminal now arrive here, even with this window unfocused (server unreachable — retrying).","Parret — scanninger fra denne terminal ankommer nu her, også når vinduet ikke er i fokus (serveren er ikke tilgængelig — prøver igen)."
@@ -401,7 +399,6 @@ scanner.pairing_label,Scanner pairing,Scannerparring
 scanner.reclaim,Refreshing the scanner pairing code…,Fornyer scannerens parringskode…
 scanner.repair_prefix,"To re-pair: DELETE the terminal (staff or loopback), re-run","For at parre igen: SLET terminalen (personale eller loopback), kør igen"
 scanner.repair_suffix,", then click the pill.",", og klik derefter på statusknappen."
-scanner.retry,Try pairing again,Prøv at parre igen
 scanner.title.live,Scans arrive via the grab daemon (no window focus needed) — click to manage the pairing,Scanninger ankommer via grab-daemonen (vinduet behøver ikke have fokus) — klik for at administrere parringen
 scanner.title.off,"Paired, but the server is unreachable — retrying — click to manage the pairing","Parret, men serveren er ikke tilgængelig — prøver igen — klik for at administrere parringen"
 scanner.title.unpaired,Not paired — click to pair this kiosk from the pairing file the daemon wrote,"Ikke parret — klik for at parre denne kiosk ud fra den parringsfil, daemonen skrev"

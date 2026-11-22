@@ -2425,6 +2425,24 @@ Vue.createApp({
       if (data.nonce !== attempt.nonce) return;
       if (typeof data.terminal_id !== "string"
           || !/^[A-Za-z0-9._-]{1,64}$/.test(data.terminal_id)) return;
+      if (data.pairing_code === null
+          && (data.reason === "no_offer" || data.reason === "reclaim_failed")) {
+        // F1: a null code is the agent's DIAGNOSIS, not a malformed offer
+        // (dropping it here stranded the portable flow past the code TTL
+        // with a false no-agent). A stale offer self-heals through the
+        // reducer's capped reclaim — the daemon mints a fresh code with
+        // its secret; a failed reclaim is a registration problem. Either
+        // way this round is consumed and the old watchdog cannot fire:
+        // reclaim re-arms a FRESH deadline (clearing this one first) and
+        // pairFailed's reducer effect clears it outright.
+        attempt.offerUsed = true;
+        if (data.reason === "no_offer") {
+          this._feedDispatch({ type: "reclaim" });
+        } else {
+          this._pairFail("register-denied");
+        }
+        return;
+      }
       if (typeof data.pairing_code !== "string"
           || !/^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{8}$/.test(data.pairing_code)) return;
       attempt.offerUsed = true;   // one offer per attempt (single-use code)

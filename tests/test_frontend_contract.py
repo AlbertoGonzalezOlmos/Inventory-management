@@ -1319,3 +1319,50 @@ def test_pairing_channel_never_logs_payloads():
                    "_endPairAttempt(release) {", "async autoPair() {"):
         assert "console." not in _method_body(header), \
             f"{header} must not log pairing payloads"
+
+
+def test_null_code_offer_self_heals_or_names_registration():
+    """F1: a null pairing_code with a validated origin/source/type/nonce/
+    terminal_id is the agent's DIAGNOSIS — never dropped by the 8-char
+    shape gate (the drop stranded the portable flow past the code TTL with
+    a false no-agent). reason no_offer dispatches the reducer's capped
+    reclaim (the stale-code self-heal: the daemon mints a fresh code with
+    its secret); reclaim_failed is register-denied. The round is consumed
+    (offerUsed) so a repeat message cannot re-dispatch."""
+    handler = _method_body("_onScannerMessage(event) {")
+    assert "data.pairing_code === null" in handler
+    branch = handler[handler.index("data.pairing_code === null"):]
+    branch = branch[:branch.index("typeof data.pairing_code")]
+    assert 'data.reason === "no_offer"' in branch
+    assert 'data.reason === "reclaim_failed"' in branch
+    assert '_feedDispatch({ type: "reclaim" })' in branch, \
+        "no_offer must dispatch the existing capped reclaim action"
+    assert '_pairFail("register-denied")' in branch, \
+        "reclaim_failed is a registration problem, not a missing agent"
+    assert "attempt.offerUsed = true;" in branch
+    # R1 order survives: the terminal_id shape validates BEFORE the branch,
+    # and the branch sits BEFORE the shape gate that used to drop it.
+    assert handler.index("data.terminal_id") \
+        < handler.index("data.pairing_code === null") \
+        < handler.index("typeof data.pairing_code")
+
+
+def test_diagnosis_paths_stop_the_watchdog():
+    """F1's other half: after a null-code diagnosis the OLD watchdog can
+    never fire no-agent. reclaim's re-arm clears the running timer before
+    starting the new deadline, and pairFailed's reducer effect (node-tested:
+    failure() emits clearWatchdog) maps to the adapter's clear case. The
+    tick's only dispatch is the no-agent fire, guarded by attempt identity
+    — a stale timer self-clears instead of diagnosing."""
+    feed = _method_body("_applyFeedEffect(effect) {")
+    arm = feed[feed.index('case "armWatchdog":'):]
+    arm = arm[:arm.index('case "clearWatchdog":')]
+    assert arm.index("this._clearPairWatchdog();") < arm.index("setInterval("), \
+        "a re-arm must clear the previous deadline's timer first"
+    clear = feed[feed.index('case "clearWatchdog":'):]
+    clear = clear[:clear.index('case "pairRequest":')]
+    assert "this._clearPairWatchdog();" in clear
+    tick = _method_body("_pairWatchdogTick(attempt, deadline) {")
+    assert tick.count("_feedDispatch") + tick.count("_pairFail") == 1, \
+        "the tick has exactly one fire (the no-agent diagnosis)"
+    assert "this._pairAttempt !== attempt" in tick
