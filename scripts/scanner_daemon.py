@@ -86,6 +86,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import signal
 import socket
@@ -942,7 +943,20 @@ def load_pairing_file(path):
 # --- loopback popup agent (P2) -----------------------------------------------
 
 class NonceStore:
-    """Bounded, in-memory, single-use popup nonces (120 s maximum)."""
+    """Bounded, in-memory, single-use popup nonces (120 s maximum).
+
+    Each entry is ``(deadline, used)``. A nonce is live until its deadline
+    and single-use: consuming it marks it used and KEEPS the tombstone, so
+    a replay is refused for as long as the entry is remembered. Entries are
+    forgotten only by TTL pruning (on issue) or the bounded cap — never by
+    a time check on lookup, which would let an expired nonce re-enter as
+    "unseen" and be accepted again.
+    """
+
+    #: Strict shape of a CLIENT-supplied nonce (R2: the SPA generates its
+    #: own 128-bit base64url value per attempt — 22 chars). Anything outside
+    #: this alphabet/length is refused and never recorded.
+    _CLIENT_SHAPE = re.compile(r"[A-Za-z0-9_-]{16,128}")
 
     def __init__(self, *, ttl: float = 120.0, cap: int = 1024,
                  clock=time.monotonic):
@@ -951,17 +965,17 @@ class NonceStore:
         self.ttl = float(ttl)
         self.cap = cap
         self.clock = clock
-        self._items: dict[str, float] = {}
+        self._items: dict[str, tuple[float, bool]] = {}
         self._lock = threading.Lock()
 
     def _prune(self, now: float, *, for_issue: bool = False) -> None:
-        expired = [nonce for nonce, deadline in self._items.items()
+        expired = [nonce for nonce, (deadline, _used) in self._items.items()
                    if deadline <= now]
         for nonce in expired:
             self._items.pop(nonce, None)
         if for_issue:
             while len(self._items) >= self.cap:
-                oldest = min(self._items, key=self._items.get)
+                oldest = min(self._items, key=lambda n: self._items[n][0])
                 self._items.pop(oldest, None)
 
     def issue(self) -> str:
@@ -971,15 +985,57 @@ class NonceStore:
             nonce = secrets.token_urlsafe(16)
             while nonce in self._items:
                 nonce = secrets.token_urlsafe(16)
-            self._items[nonce] = now + self.ttl
+            self._items[nonce] = (now + self.ttl, False)
             return nonce
 
     def consume(self, nonce: str) -> bool:
+        """Legacy pop-style consume of an ISSUED nonce (single-use: the pop
+        itself forgets it; a used tombstone is refused too)."""
         with self._lock:
             now = self.clock()
             self._prune(now)
-            deadline = self._items.pop(nonce, None)
-            return deadline is not None and deadline > now
+            entry = self._items.pop(nonce, None)
+            return entry is not None and not entry[1] and entry[0] > now
+
+    def accept(self, nonce: str) -> bool:
+        """Consume a presented nonce — store-issued OR client-supplied (R2).
+
+        SECURITY: the nonce is a single-use CORRELATION ID, not an
+        authorization token. Authorization is the Host + Origin/Referer
+        guard, which runs BEFORE this; accept() only guarantees that a
+        presented nonce cannot be replayed:
+
+        (a) a previously issued/recorded, unexpired nonce is consumed
+            (True) and kept as a used tombstone — any replay is False;
+        (b) an unseen nonce matching the strict client shape
+            (``^[A-Za-z0-9_-]{16,128}$``) is recorded with the same TTL,
+            already used — the presentation IS its single use — and
+            accepted (True). This is the SPA-generated case: the SPA
+            makes its own 128-bit nonce per attempt and checks the echo
+            in the offer, so the store must accept it without having
+            issued it;
+        (c) anything else is False.
+
+        A recorded-but-expired nonce is refused, never re-accepted via
+        (b): "unseen" really means never presented (within the store's
+        bounded memory).
+        """
+        if not isinstance(nonce, str):
+            return False
+        with self._lock:
+            now = self.clock()
+            entry = self._items.get(nonce)
+            if entry is not None:
+                deadline, used = entry
+                if used or deadline <= now:
+                    return False
+                self._items[nonce] = (deadline, True)
+                return True
+            if not self._CLIENT_SHAPE.fullmatch(nonce):
+                return False
+            self._prune(now, for_issue=True)
+            self._items[nonce] = (now + self.ttl, True)
+            return True
 
 
 class OfferStore:
@@ -1226,7 +1282,9 @@ class LocalAgentServer:
                            "nonce": fresh,
                            "reclaim": params.get("reclaim", "0")})})
             return
-        if not self.nonces.consume(nonce):
+        # R2: the SPA supplies its OWN nonce per attempt; accept() is
+        # single-use for both issued and client-supplied values.
+        if not self.nonces.accept(nonce):
             self._html(handler, 403,
                        "<!doctype html><p>Pairing link expired or already "
                        "used — press the pill again.</p>")

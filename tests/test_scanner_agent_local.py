@@ -254,6 +254,66 @@ def test_nonce_single_use_expiry_and_cap(agent):
     assert capped.consume(third) is True
 
 
+def test_client_supplied_nonce_works_once_then_replay_403(agent):
+    """R2: the SPA generates its OWN 128-bit base64url nonce per attempt
+    (22 chars) and checks the echo — the store must accept it without
+    having issued it, exactly once. The tombstone outlives the TTL: a
+    replay is refused even after the deadline (no issue() pruned it)."""
+    value = "ClientSuppliedNonce123"   # 22 chars, base64url alphabet
+    status, _, body = pair(agent, value)
+    assert status == 200
+    payload = offer(body)
+    assert payload["nonce"] == value          # echoed for the SPA's check
+    assert payload["pairing_code"] == CODE
+    assert pair(agent, value)[0] == 403       # replay refused
+    assert pair(agent, value)[0] == 403       # still refused
+    agent.clock[0] += 121                     # past the TTL, no prune
+    assert pair(agent, value)[0] == 403       # the tombstone still says no
+    assert agent.post.calls == []             # no reclaim side effects
+
+
+def test_short_or_invalid_client_nonce_is_403(agent):
+    """Only the strict shape ^[A-Za-z0-9_-]{16,128}$ is ever recorded;
+    everything else is 403 with no offer and no store growth."""
+    for bad in ("", "abc", "fifteen12345678", "x" * 129,
+                "bad.nonce1234567890", "bad+nonce1234567890",
+                "bad/nonce1234567890", "bad%20nonce123456789"):
+        status, _, body = pair(agent, bad)
+        assert status == 403, bad
+        assert CODE.encode() not in body
+    # the length boundaries themselves are valid (16 and 128)
+    assert pair(agent, "abc1234567890123")[0] == 200
+    assert pair(agent, "y" * 128)[0] == 200
+
+
+def test_bootstrap_nonce_still_works_once(agent):
+    """The no-nonce 307 bootstrap is byte-identical: it issues a 22-char
+    nonce, the redirect serves the offer once, and the replay is 403."""
+    status, _, body = bootstrap(agent)
+    assert status == 200
+    value = offer(body)["nonce"]
+    assert len(value) == 22
+    assert offer(body)["pairing_code"] == CODE
+    assert pair(agent, value)[0] == 403
+    agent.clock[0] += 121
+    assert pair(agent, value)[0] == 403
+
+
+def test_client_nonce_store_stays_bounded():
+    """accept() records client nonces under the SAME cap: the store never
+    grows past it, the newest tombstones still refuse replay, and an
+    evicted oldest entry is forgotten (the bounded-memory horizon — the
+    nonce is a correlation id, authorization is the Host/Origin guard)."""
+    store = daemon.NonceStore(cap=4, clock=lambda: 1000.0)
+    values = [f"client{i:016d}" for i in range(8)]
+    for value in values:
+        assert store.accept(value) is True
+    assert len(store._items) <= 4
+    assert store.accept(values[-1]) is False   # single-use survives the cap
+    assert store.accept(values[-2]) is False
+    assert store.accept(values[0]) is True     # evicted => forgotten
+
+
 def test_status_is_host_guarded_and_never_leaks_credentials(agent):
     status, headers, body = request(agent, "/status", origin=None)
     assert status == 200
