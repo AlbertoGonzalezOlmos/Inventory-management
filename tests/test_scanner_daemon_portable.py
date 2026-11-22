@@ -13,6 +13,7 @@ import tempfile
 
 import pytest
 
+import scripts.scanner_daemon as daemon
 from scripts.scanner_daemon import (
     PostError, derive_machine_key, load_config, main, portable_config_file,
     save_config,
@@ -256,3 +257,118 @@ def test_server_flag_overrides_forward_target(tmp_path, scanner_sysfs, machine_i
     assert "http://shop:8000/api/scanner/terminals" in urls
     assert "http://shop:8000/api/scanner/events" in urls
     assert not any("other:9000" in u for u in urls)
+
+
+# --- the RUNNING daemon resolves portability from the persisted config ------
+# (The systemd user unit starts the daemon with NO flags: the values live in
+# agent.env and the config. The transient --invite flag is gone by then, so
+# the offer path and the local server must resolve from the runtime state.)
+
+def _record_servers(monkeypatch):
+    """Capture every LocalAgentServer main() starts (ephemeral port via
+    HCRM_SCANNER_LOCAL_PORT=0 in the callers — never the real 47631)."""
+    started = []
+
+    class Recording(daemon.LocalAgentServer):
+        def start(self):
+            started.append(self)
+            return super().start()
+
+    monkeypatch.setattr(daemon, "LocalAgentServer", Recording)
+    return started
+
+
+def test_run_with_persisted_portable_config_serves_the_xdg_offer(
+        tmp_path, scanner_sysfs, monkeypatch):
+    """(a) A config carrying site_origin + env-only server/site-origin and
+    NO flags resolves the XDG offer path and starts the local server — the
+    popup serves the FRESH code beside the config, never the stale repo
+    file (the live blocker: /pair offered the repo code and 401'd)."""
+    cfg = tmp_path / "xdg" / "hcrm" / "scanner.json"
+    save_config(cfg, "laptop-1", "S" * 43, machine_key="0123456789abcdef",
+                server_url="http://shop:8000", site_origin="http://shop:8000")
+    offer = cfg.with_name("scanner-pairing.json")
+    offer.write_text(json.dumps({"terminal_id": "laptop-1",
+                                 "pairing_code": "FRESH234"}))
+    monkeypatch.setenv("HCRM_SCANNER_SERVER", "http://shop:8000")
+    monkeypatch.setenv("HCRM_SCANNER_SITE_ORIGIN", "http://shop:8000")
+    monkeypatch.setenv("HCRM_SCANNER_LOCAL_PORT", "0")
+    # the repo default points at a STALE file: serving it is the bug
+    monkeypatch.setenv("HCRM_SCANNER_PAIRING_FILE", str(tmp_path / "stale.json"))
+    started = _record_servers(monkeypatch)
+    code = run(["--config", str(cfg)], PostScript([]), scanner_sysfs,
+               reader=reader_yielding("8412345678905"))
+    assert code == 0
+    assert len(started) == 1
+    assert started[0].offers.path == offer
+    assert started[0].offers.get() == "FRESH234"
+    assert started[0].config["site_origin"] == "http://shop:8000"
+    assert started[0].config["server_url"] == "http://shop:8000"
+
+
+def test_env_site_origin_alone_resolves_portable(tmp_path, scanner_sysfs,
+                                                 monkeypatch):
+    """The env mirror alone (a config WITHOUT site_origin) still resolves
+    portable: the resolution chain is flag -> env -> config."""
+    cfg = tmp_path / "scanner.json"
+    save_config(cfg, "laptop-1", "S" * 43)   # no site_origin persisted
+    monkeypatch.setenv("HCRM_SCANNER_SITE_ORIGIN", "http://shop:8000")
+    monkeypatch.setenv("HCRM_SCANNER_LOCAL_PORT", "0")
+    started = _record_servers(monkeypatch)
+    code = run(["--config", str(cfg)], PostScript([]), scanner_sysfs,
+               reader=reader_yielding("8412345678905"))
+    assert code == 0
+    assert len(started) == 1
+    assert started[0].offers.path == cfg.with_name("scanner-pairing.json")
+    assert started[0].config["site_origin"] == "http://shop:8000"
+
+
+def test_run_legacy_config_keeps_repo_offer_and_never_serves(
+        tmp_path, scanner_sysfs, monkeypatch):
+    """(b) A legacy config (no site_origin anywhere) resolves the repo
+    default and starts NO server; an explicit --local-port still serves,
+    reading the repo default exactly as today."""
+    cfg = tmp_path / "scanner.json"
+    save_config(cfg, "counter-1", "S" * 43)   # legacy two-key config
+    repo_offer = tmp_path / "repo-offer.json"
+    monkeypatch.setenv("HCRM_SCANNER_PAIRING_FILE", str(repo_offer))
+    monkeypatch.delenv("HCRM_SCANNER_SITE_ORIGIN", raising=False)
+    monkeypatch.delenv("HCRM_SCANNER_LOCAL_PORT", raising=False)
+    started = _record_servers(monkeypatch)
+    code = run(["--config", str(cfg)], PostScript([]), scanner_sysfs,
+               reader=reader_yielding("8412345678905"))
+    assert code == 0
+    assert started == []                      # R2: legacy never serves
+    code = run(["--config", str(cfg), "--local-port", "0"], PostScript([]),
+               scanner_sysfs, reader=reader_yielding("8412345678905"))
+    assert code == 0
+    assert len(started) == 1
+    assert started[0].offers.path == repo_offer
+
+
+def test_registration_and_run_agree_on_the_offer_path(
+        tmp_path, scanner_sysfs, machine_id, monkeypatch):
+    """(c) The --invite registration writes the XDG offer; the flag-less
+    run (the user unit) serves the SAME file and the SAME code — and never
+    re-registers over the existing identity."""
+    cfg = tmp_path / "xdg" / "hcrm" / "scanner.json"
+    monkeypatch.setenv("HCRM_SCANNER_CONFIG", str(cfg))
+    post = PostScript([{"pairing_code": PAIRING_CODE}])
+    assert run(_portable_args(), post, scanner_sysfs,
+               machine_id_path=machine_id) == 0
+    offer = cfg.with_name("scanner-pairing.json")
+    assert offer.exists()
+    # the unit's run: NO flags, the env mirrors, an ephemeral port
+    monkeypatch.setenv("HCRM_SCANNER_SERVER", "http://shop:8000")
+    monkeypatch.setenv("HCRM_SCANNER_SITE_ORIGIN", "http://shop:8000")
+    monkeypatch.setenv("HCRM_SCANNER_LOCAL_PORT", "0")
+    started = _record_servers(monkeypatch)
+    run_post = PostScript([])
+    assert run(["--config", str(cfg)], run_post, scanner_sysfs,
+               machine_id_path=machine_id,
+               reader=reader_yielding("8412345678905")) == 0
+    assert len(started) == 1
+    assert started[0].offers.path == offer
+    assert started[0].offers.get() == PAIRING_CODE
+    assert not any(c["url"].endswith("/api/scanner/terminals")
+                   for c in run_post.calls)   # no re-registration

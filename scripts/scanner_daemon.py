@@ -1489,6 +1489,20 @@ def default_config_file() -> Path:
     return Path(os.path.join(data_dir, "scanner.json"))
 
 
+def offer_file_for(config_path, pairing_file, *, portable: bool) -> Path:
+    """The ONE offer-path rule, shared by the identity check, registration
+    and the running popup server so they can never drift: an explicit
+    --pairing-file wins; a PORTABLE install keeps the offer beside its
+    config (the XDG path the --invite registration writes); the legacy
+    same-host flow keeps the repo data dir the server's /pair/auto reads.
+    """
+    if pairing_file:
+        return Path(pairing_file)
+    if portable:
+        return Path(config_path).with_name("scanner-pairing.json")
+    return default_pairing_file()
+
+
 def portable_config_file() -> Path:
     """The PORTABLE config default (R6): $HCRM_SCANNER_CONFIG, else
     $XDG_CONFIG_HOME/hcrm/scanner.json, else ~/.config/hcrm/scanner.json.
@@ -2334,7 +2348,10 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
         parser.error("--site-origin must be scheme://host[:port]")
     if args.invite and not args.server:
         parser.error("--server is required with --invite")
-    base_url = args.server or args.forward
+    # One base_url source of truth: the flag, then the agent.env mirror
+    # (HCRM_SCANNER_SERVER), then the legacy --forward default.
+    base_url = (args.server or os.environ.get("HCRM_SCANNER_SERVER")
+                or args.forward)
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep
     tick = clock if clock is not None else time.monotonic
@@ -2405,6 +2422,19 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
             else:
                 terminal_id, secret = config["terminal_id"], config["secret"]
             terminal_hint = terminal_id
+            # Portability is a property of the RESOLVED runtime state, never
+            # of the transient --invite flag: the systemd user unit runs with
+            # NO flags — the values live in agent.env and the persisted
+            # config. Flag wins, then env, then config; each candidate is
+            # canonicalized, so a malformed value cannot mask a good one.
+            resolved_site_origin = None
+            for candidate in (args.site_origin,
+                              os.environ.get("HCRM_SCANNER_SITE_ORIGIN"),
+                              (config or {}).get("site_origin")):
+                if candidate:
+                    resolved_site_origin = _origin_of(candidate)
+                    if resolved_site_origin:
+                        break
             # C2: the loud bring-up. A config copied from another host makes
             # the daemon forward under THAT host's identity while the server
             # answers 200 — the silent half of the 2026-11-17 incident. Warn
@@ -2415,8 +2445,9 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
             if config is not None and not args.register \
                     and not args.register_only \
                     and args.terminal_id != terminal_id:
-                offer_path = (Path(args.pairing_file) if args.pairing_file
-                              else default_pairing_file())
+                offer_path = offer_file_for(
+                    args.config, args.pairing_file,
+                    portable=bool(resolved_site_origin))
                 host = (hostname if hostname is not None
                         else socket.gethostname())
                 findings = identity_findings(
@@ -2433,7 +2464,7 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                     _log(_REFUSE_HOST_IDENTITY)
                     return 1
             if args.register or config is None:
-                portable = args.invite is not None
+                portable = bool(resolved_site_origin)
                 machine_key = (derive_machine_key(
                     config, machine_id_path=machine_id_path)
                     if portable else None)
@@ -2450,15 +2481,20 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 if portable:
                     # R3: the offer lives BESIDE the XDG config, never in the
                     # repo data dir; OfferStore.put persists code+expiry atomically.
+                    # The persisted server_url survives a flag-less re-register
+                    # (the config is the source of truth; --server overrides).
                     save_config(args.config, terminal_id, secret,
-                                machine_key=machine_key, server_url=base_url,
-                                site_origin=_origin_of(args.site_origin))
-                    pairing_path = (Path(args.pairing_file) if args.pairing_file
-                                    else Path(args.config).with_name(
-                                        "scanner-pairing.json"))
+                                machine_key=machine_key,
+                                server_url=(args.server
+                                            or (config or {}).get("server_url")
+                                            or base_url),
+                                site_origin=resolved_site_origin)
+                    pairing_path = offer_file_for(args.config, args.pairing_file,
+                                                  portable=True)
                 else:
                     save_config(args.config, terminal_id, secret)
-                    pairing_path = args.pairing_file or default_pairing_file()
+                    pairing_path = offer_file_for(args.config, args.pairing_file,
+                                                  portable=False)
                 # Write-then-announce, and FATAL on failure: with the code
                 # no longer printed by default, the offer file is its only
                 # copy — losing it silently would strand the registration.
@@ -2488,9 +2524,12 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 _log("registration complete (--register-only) — not grabbing")
                 return 0
 
-            # R2: local serving is opt-in, so every legacy invocation stays off.
-            site_origin = (args.site_origin
-                           or (config or {}).get("site_origin"))
+            # R2: local serving is opt-in, so every legacy invocation stays
+            # off. The origin is the RESOLVED one (flag -> env -> persisted
+            # config): a portable install serves with no flags at all, and a
+            # legacy config (no site_origin anywhere) never starts a server
+            # unless --local-port / HCRM_SCANNER_LOCAL_PORT explicitly asks.
+            site_origin = resolved_site_origin
             env_port = os.environ.get("HCRM_SCANNER_LOCAL_PORT")
             local_port = (args.local_port if args.local_port is not None
                           else _port_number(env_port) if env_port
@@ -2502,17 +2541,15 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                     "secret": secret,
                     "server_url": (getattr(args, "server", None)
                                    or runtime_config.get("server_url")
-                                   or args.forward),
-                    "site_origin": (site_origin
-                                    or runtime_config.get("site_origin")),
+                                   or base_url),
+                    "site_origin": site_origin,
                 })
-                if args.site_origin:
-                    offer_path = (Path(args.pairing_file) if args.pairing_file
-                                  else Path(args.config).with_name(
-                                      "scanner-pairing.json"))
-                else:
-                    offer_path = (Path(args.pairing_file) if args.pairing_file
-                                  else default_pairing_file())
+                # The SAME offer-path rule as registration: the popup must
+                # serve the file the registration wrote — beside the config
+                # for a portable install, the repo data dir for legacy.
+                offer_path = offer_file_for(
+                    args.config, args.pairing_file,
+                    portable=bool(site_origin))
                 # R4: the Heartbeater owns device state; the popup reads its
                 # snapshot. Started only on the portable path (this block is
                 # unreachable under --register-only/--find-scanner/--dry-run).
