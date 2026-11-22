@@ -4,6 +4,7 @@ import http.client
 import json
 import re
 import socket
+import subprocess
 import threading
 from urllib.parse import parse_qs, urlsplit
 
@@ -92,6 +93,61 @@ def offer(body):
     return json.loads(match.group(1))
 
 
+# Execute the served offer page's inline script in node with a minimal DOM shim
+# (no browser, no agent — R7): record window.close / postMessage / timers, then
+# drive a release message or the deadline and report what happened.
+_PAGE_HARNESS = r"""
+const fs = require('fs'); const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const closes = [], posts = [], timers = [];
+let handler = null;
+const opener = { postMessage: (data, origin) => posts.push({data, origin}) };
+const messageEl = { textContent: "" };
+const sandbox = {
+  window: {
+    opener: input.hasOpener ? opener : null,
+    close: () => closes.push(true),
+    addEventListener: (type, fn) => { if (type === 'message') handler = fn; },
+  },
+  document: { getElementById: () => messageEl },
+  setTimeout: (fn, ms) => { timers.push({fn, ms, cleared: false}); return timers.length; },
+  clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].cleared = true; },
+};
+vm.createContext(sandbox);
+vm.runInContext(input.script, sandbox);
+const closesAfterLoad = closes.length, postsAfterLoad = posts.length;
+if (input.release && handler) {
+  handler({
+    source: input.release === 'wrong-source' ? {} : opener,
+    origin: input.release === 'wrong-origin' ? 'http://evil.example' : input.siteOrigin,
+    data: { type: input.release === 'wrong-type' ? 'other' : 'hcrm-paired',
+            nonce: input.release === 'wrong-nonce' ? 'WRONGNONCE0000000000000' : input.nonce },
+  });
+}
+if (input.fireDeadline) { for (const t of timers) if (!t.cleared) t.fn(); }
+console.log(JSON.stringify({
+  closesAfterLoad, closes: closes.length,
+  postsAfterLoad, postsFinal: posts.length,
+  timers: timers.map(t => ({ms: t.ms, cleared: t.cleared})),
+  messageText: messageEl.textContent,
+}));
+"""
+
+
+def _run_offer_page(body, *, release=None, has_opener=True, fire_deadline=False):
+    script = re.search(rb'<script nonce="[^"]+">(.*?)</script>',
+                       body, re.S).group(1).decode()
+    payload = offer(body)
+    proc = subprocess.run(
+        ["node", "-e", _PAGE_HARNESS],
+        input=json.dumps({"script": script, "nonce": payload["nonce"],
+                          "siteOrigin": SITE, "release": release,
+                          "hasOpener": has_opener, "fireDeadline": fire_deadline}),
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
 def test_pair_bootstrap_exact_page_csp_and_payload(agent):
     status, headers, body = bootstrap(agent)
     assert status == 200
@@ -114,8 +170,42 @@ def test_pair_bootstrap_exact_page_csp_and_payload(agent):
     text = body.decode()
     assert f'<script nonce="{payload["nonce"]}">' in text
     assert "window.opener.postMessage(OFFER, SITE_ORIGIN)" in text
-    assert "setTimeout(() => window.close(), 250)" in text
     assert 'postMessage(OFFER, "*")' not in text
+    # R3: no immediate self-close; the window waits for the pairing release.
+    assert "setTimeout(() => window.close(), 250)" not in text
+    assert "hcrm-paired" in text and "20000" in text
+    # Behavioral: stays open after posting the offer once; a valid release
+    # (same nonce, same origin, from the opener) closes it — and never re-posts.
+    result = _run_offer_page(body, release="valid")
+    assert result["postsAfterLoad"] == 1 and result["closesAfterLoad"] == 0
+    assert result["closes"] == 1 and result["postsFinal"] == 1
+
+
+def test_offer_page_ignores_release_with_wrong_nonce(agent):
+    _, _, body = bootstrap(agent)
+    for bad in ("wrong-nonce", "wrong-origin", "wrong-source", "wrong-type"):
+        result = _run_offer_page(body, release=bad)
+        assert result["closes"] == 0, bad        # ignored — the window stays open
+        assert result["postsFinal"] == 1         # the offer is never re-posted
+
+
+def test_offer_page_closes_on_twenty_second_deadline(agent):
+    _, _, body = bootstrap(agent)
+    result = _run_offer_page(body, fire_deadline=True)
+    assert result["closesAfterLoad"] == 0        # stayed open after posting
+    assert result["timers"][0]["ms"] == 20000
+    assert result["closes"] == 1                 # the deadline closed it
+    # a valid release clears the deadline (no double close)
+    released = _run_offer_page(body, release="valid")
+    assert released["timers"][0]["cleared"] is True
+    assert released["closes"] == 1
+
+
+def test_offer_page_closes_when_opener_missing(agent):
+    _, _, body = bootstrap(agent)
+    result = _run_offer_page(body, has_opener=False)
+    assert result["closesAfterLoad"] == 1        # closed immediately
+    assert result["postsFinal"] == 0             # nothing posted without an opener
 
 
 def test_host_guard_rejects_rebinding_before_any_offer(agent):

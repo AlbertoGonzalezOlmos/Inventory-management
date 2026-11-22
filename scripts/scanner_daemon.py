@@ -1282,10 +1282,25 @@ class LocalAgentServer:
 <body><p id="message">Pair this laptop's scanner.</p><script nonce="{nonce}">
 "use strict"; const OFFER = {offer}; const SITE_ORIGIN = {origin};
 const message = document.getElementById("message");
-if (!window.opener) {{ message.textContent = "Open this page from the site's scanner pill."; }}
-else {{ window.opener.postMessage(OFFER, SITE_ORIGIN);
-  if (!OFFER.reason) setTimeout(() => window.close(), 250);
-  else message.textContent = OFFER.reason === "no_offer" ? "No offer is available." : "Reclaim failed."; }}
+function closeWindow() {{ window.close(); }}
+if (!window.opener) {{
+  message.textContent = "Open this page from the site's scanner pill.";
+  closeWindow();
+}} else {{
+  window.opener.postMessage(OFFER, SITE_ORIGIN);
+  if (OFFER.reason === "no_offer") {{ message.textContent = "No offer is available."; closeWindow(); }}
+  else if (OFFER.reason === "reclaim_failed") {{ message.textContent = "Reclaim failed."; closeWindow(); }}
+  else {{
+    const deadline = setTimeout(closeWindow, 20000);
+    window.addEventListener("message", (event) => {{
+      if (event.source !== window.opener || event.origin !== SITE_ORIGIN) return;
+      const data = event.data;
+      if (!data || data.type !== "hcrm-paired" || data.nonce !== OFFER.nonce) return;
+      clearTimeout(deadline);
+      closeWindow();
+    }});
+  }}
+}}
 </script></body></html>"""
 
 
