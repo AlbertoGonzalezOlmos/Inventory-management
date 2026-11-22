@@ -811,12 +811,49 @@ def load_config(path) -> dict | None:
     return cfg
 
 
-def save_config(path, terminal_id: str, secret: str) -> None:
-    """Write the config 0600 — it holds a write credential for the API."""
+def derive_machine_key(config: dict | None = None, *,
+                       machine_id_path: str = "/etc/machine-id") -> str:
+    """The laptop's stable identity: sha256(/etc/machine-id)[:16].
+
+    Never derived from the hostname or the network. When the machine-id file
+    is absent (macOS/dev), fall back to a persisted random 16-hex value in the
+    config; with neither, mint a fresh one (the caller persists it via
+    save_config). Injectable path so tests run with no /etc/machine-id.
+    """
+    try:
+        raw = Path(machine_id_path).read_text().strip()
+    except OSError:
+        raw = ""
+    if raw:
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    existing = (config or {}).get("machine_key")
+    if (isinstance(existing, str) and len(existing) == 16
+            and all(c in "0123456789abcdef" for c in existing)):
+        return existing
+    return secrets.token_hex(8)
+
+
+def save_config(path, terminal_id: str, secret: str, *,
+                machine_key: str | None = None,
+                server_url: str | None = None,
+                site_origin: str | None = None) -> None:
+    """Write the config 0600 — it holds a write credential for the API.
+
+    The legacy two keys stay byte-compatible; the portable path additionally
+    stores machine_key/server_url/site_origin (each only when provided). The
+    invite is NEVER written here. load_config tolerates the extra keys' absence.
+    """
+    cfg = {"terminal_id": terminal_id, "secret": secret}
+    if machine_key is not None:
+        cfg["machine_key"] = machine_key
+    if server_url is not None:
+        cfg["server_url"] = server_url
+    if site_origin is not None:
+        cfg["site_origin"] = site_origin
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, json.dumps({"terminal_id": terminal_id,
-                                 "secret": secret}, indent=2).encode())
+        os.write(fd, json.dumps(cfg, indent=2).encode())
     finally:
         os.close(fd)
 
@@ -1289,15 +1326,22 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def register_terminal(post, base_url: str, terminal_id: str, secret: str) -> str:
+def register_terminal(post, base_url: str, terminal_id: str, secret: str, *,
+                      invite: str | None = None,
+                      machine_key: str | None = None) -> str:
     """POST /api/scanner/terminals → the single-use pairing code.
 
     Raises PostError (409 already-registered etc.): main turns that into a
-    loud exit with the server's own recovery message.
+    loud exit with the server's own recovery message. invite/machine_key ride
+    the body only on the portable path; the legacy body is unchanged.
     """
-    body = post(base_url.rstrip("/") + "/api/scanner/terminals", {},
-                {"terminal_id": terminal_id, "secret": secret})
-    return body["pairing_code"]
+    body = {"terminal_id": terminal_id, "secret": secret}
+    if invite is not None:
+        body["invite"] = invite
+    if machine_key is not None:
+        body["machine_key"] = machine_key
+    resp = post(base_url.rstrip("/") + "/api/scanner/terminals", {}, body)
+    return resp["pairing_code"]
 
 
 REGISTER_RETRY_DELAY = 2.0
@@ -1305,7 +1349,8 @@ REGISTER_RETRY_DELAY = 2.0
 
 def register_with_retry(post, base_url, terminal_id, secret, *,
                         wait=0.0, delay=REGISTER_RETRY_DELAY,
-                        clock=time.monotonic, sleep=time.sleep, log=_log):
+                        clock=time.monotonic, sleep=time.sleep, log=_log,
+                        invite=None, machine_key=None):
     """register_terminal with a bounded, transient-only retry budget.
 
     The deadline is monotonic and includes the time a failing POST spent, so
@@ -1319,7 +1364,8 @@ def register_with_retry(post, base_url, terminal_id, secret, *,
     attempt = 1
     while True:
         try:
-            return register_terminal(post, base_url, terminal_id, secret)
+            return register_terminal(post, base_url, terminal_id, secret,
+                                     invite=invite, machine_key=machine_key)
         except PostError as exc:
             # isinstance FIRST: a non-integer status (legacy callers pass
             # strings) would make PostError.transient's ``status >= 500``
@@ -1358,6 +1404,21 @@ def default_config_file() -> Path:
     data_dir = os.environ.get(
         "HCRM_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data"))
     return Path(os.path.join(data_dir, "scanner.json"))
+
+
+def portable_config_file() -> Path:
+    """The PORTABLE config default (R6): $HCRM_SCANNER_CONFIG, else
+    $XDG_CONFIG_HOME/hcrm/scanner.json, else ~/.config/hcrm/scanner.json.
+
+    Only the new portable path (--register --invite) defaults here; the legacy
+    same-host flow keeps --config / default_config_file() (the repo data dir).
+    """
+    env = os.environ.get("HCRM_SCANNER_CONFIG")
+    if env:
+        return Path(env)
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "hcrm" / "scanner.json"
 
 
 def default_db_file() -> Path:
@@ -1833,7 +1894,14 @@ def _registration_recovery(exc: "PostError", terminal_id: str | None,
                     f"--register --forward {base}")
     pill = ("in the kiosk browser ON THIS HOST, click the 'no scanner' pill "
             "— that mints this host's read token")
-    if exc.status == 409 and "secret_in_use" in text:
+    if exc.status == 409 and "machine_key_in_use" in text:
+        steps = [diagnose,
+                 "this laptop's machine key is already registered to another "
+                 "terminal — press the pill again (the popup's reclaim reuses "
+                 "it automatically), or delete the stale registration — "
+                 f"VERIFY FIRST: {delete_cmd}",
+                 register_cmd]
+    elif exc.status == 409 and "secret_in_use" in text:
         steps = [diagnose,
                  "this config's secret belongs to ANOTHER terminal (a copied "
                  f"config) — move it aside: mv {config_path} {config_path}.old-host",
@@ -1910,7 +1978,7 @@ def _nonnegative_seconds(text: str) -> float:
 def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
          closer=None, scan_reader=None, lock_path=None,
          sysfs_root=None, clock=None, db_path=None, http_get=None,
-         hostname=None, device=None) -> int:
+         hostname=None, device=None, machine_id_path="/etc/machine-id") -> int:
     """The daemon entrypoint (round 4, T5).
 
     Modes:
@@ -2009,7 +2077,18 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                         help="site origin allowed to receive the popup offer "
                              "(scheme://host[:port]); also enables portable "
                              "popup serving")
+    parser.add_argument("--server", metavar="URL", default=None,
+                        help="portable registration/pairing/forward target "
+                             "(default: --forward); one base_url source of truth")
+    parser.add_argument("--invite", metavar="CODE", default=None,
+                        help="staff-minted registration invite (portable path); "
+                             "defaults the config to the XDG path; never logged")
     args = parser.parse_args(argv)
+    if args.invite and not args.site_origin:
+        parser.error("--site-origin is required with --invite")
+    if args.site_origin and _origin_of(args.site_origin) is None:
+        parser.error("--site-origin must be scheme://host[:port]")
+    base_url = args.server or args.forward
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep
     tick = clock if clock is not None else time.monotonic
@@ -2023,6 +2102,7 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
     installed = []
     stop_event = threading.Event()
     local_server = None
+    offers = None
     try:
         # Signals: raise _Stopped from anywhere (including a blocking read)
         # so the with-blocks unwind and the fd closes. Installed in BOTH
@@ -2062,15 +2142,18 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 print(line, flush=True)
             return code
 
+        if not args.config and args.invite:
+            args.config = str(portable_config_file())   # R6: XDG default, portable only
         if not args.config:
             parser.error("--config is required (or pass --dry-run / "
-                         "--find-scanner)")
+                         "--find-scanner / --register --invite)")
 
         terminal_hint = args.terminal_id
         with DaemonLock(lock_path):
             config = load_config(args.config)
             if config is None:
-                terminal_id = args.terminal_id or socket.gethostname()
+                terminal_id = args.terminal_id or (
+                    hostname if hostname is not None else socket.gethostname())
                 secret = secrets.token_urlsafe(32)
             else:
                 terminal_id, secret = config["terminal_id"], config["secret"]
@@ -2103,22 +2186,41 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                     _log(_REFUSE_HOST_IDENTITY)
                     return 1
             if args.register or config is None:
+                portable = args.invite is not None
+                machine_key = (derive_machine_key(
+                    config, machine_id_path=machine_id_path)
+                    if portable else None)
                 try:
                     code = register_with_retry(
-                        post_fn, args.forward, terminal_id, secret,
+                        post_fn, base_url, terminal_id, secret,
+                        invite=args.invite, machine_key=machine_key,
                         wait=args.register_wait, sleep=nap,
                         clock=tick, log=_log)
                 except (_Stopped, KeyboardInterrupt):
                     # Stopped while waiting out the retry budget: a clean
                     # exit (fd/grab untouched — registration precedes both).
                     return 0
-                save_config(args.config, terminal_id, secret)
+                if portable:
+                    # R3: the offer lives BESIDE the XDG config, never in the
+                    # repo data dir; OfferStore.put persists code+expiry atomically.
+                    save_config(args.config, terminal_id, secret,
+                                machine_key=machine_key, server_url=base_url,
+                                site_origin=_origin_of(args.site_origin))
+                    pairing_path = (Path(args.pairing_file) if args.pairing_file
+                                    else Path(args.config).with_name(
+                                        "scanner-pairing.json"))
+                else:
+                    save_config(args.config, terminal_id, secret)
+                    pairing_path = args.pairing_file or default_pairing_file()
                 # Write-then-announce, and FATAL on failure: with the code
                 # no longer printed by default, the offer file is its only
                 # copy — losing it silently would strand the registration.
-                pairing_path = args.pairing_file or default_pairing_file()
                 try:
-                    save_pairing_file(pairing_path, terminal_id, code)
+                    if portable:
+                        offers = OfferStore(pairing_path, terminal_id, clock=tick)
+                        offers.put(code)
+                    else:
+                        save_pairing_file(pairing_path, terminal_id, code)
                 except OSError as exc:
                     print(f"scanner_daemon: could not write the pairing "
                           f"file {pairing_path}: {exc}\n"
@@ -2166,7 +2268,8 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                                   else default_pairing_file())
                 local_server = LocalAgentServer(
                     local_port, config=runtime_config,
-                    offers=OfferStore(offer_path, terminal_id, clock=tick),
+                    offers=offers if offers is not None else OfferStore(
+                        offer_path, terminal_id, clock=tick),
                     nonces=NonceStore(clock=tick),
                     device=device or _device_not_configured,
                     post=post_fn, stop_event=stop_event, log=_log)
@@ -2175,7 +2278,7 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
 
             spool = Spool(args.spool or (str(args.config) + ".spool"),
                           log=_log)
-            forwarder = Forwarder(post_fn, _forward_events_url(args.forward),
+            forwarder = Forwarder(post_fn, _forward_events_url(base_url),
                                   secret, spool, log=_log)
             if spool.pending():
                 _log(f"replaying {len(spool.pending())} spooled scan(s)")
@@ -2210,7 +2313,7 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
         return 1
     except PostError as exc:
         for line in _registration_recovery(
-                exc, terminal_hint or socket.gethostname(), args.forward,
+                exc, terminal_hint or socket.gethostname(), base_url,
                 args.config):
             print(line, file=sys.stderr)
         return 1
