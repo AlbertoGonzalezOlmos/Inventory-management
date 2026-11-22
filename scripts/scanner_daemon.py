@@ -2028,7 +2028,12 @@ class Heartbeater:
         self.secret = secret
         if interval is None:
             interval = os.environ.get("HCRM_SCANNER_HEARTBEAT_SECONDS", 30)
-        self.interval = max(5, int(interval))
+        try:
+            self.interval = max(5, int(interval))
+        except (TypeError, ValueError):
+            self.interval = 30
+            log(f"heartbeat: invalid interval {interval!r} — using the "
+                f"default 30s")
         self.stop_event = (stop_event if stop_event is not None
                            else threading.Event())
         self.clock = clock
@@ -2245,15 +2250,17 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
     parser.add_argument("--invite", metavar="CODE", default=None,
                         help="staff-minted registration invite (portable path); "
                              "defaults the config to the XDG path; never logged")
-    parser.add_argument("--heartbeat-interval", metavar="SECONDS", type=int,
-                        default=None,
+    parser.add_argument("--heartbeat-interval", metavar="SECONDS", default=None,
                         help="device-state heartbeat interval (default "
-                             "$HCRM_SCANNER_HEARTBEAT_SECONDS or 30; minimum 5)")
+                             "$HCRM_SCANNER_HEARTBEAT_SECONDS or 30; minimum 5; "
+                             "a non-numeric value clamps to 30 with a warning)")
     args = parser.parse_args(argv)
     if args.invite and not args.site_origin:
         parser.error("--site-origin is required with --invite")
     if args.site_origin and _origin_of(args.site_origin) is None:
         parser.error("--site-origin must be scheme://host[:port]")
+    if args.invite and not args.server:
+        parser.error("--server is required with --invite")
     base_url = args.server or args.forward
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep

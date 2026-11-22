@@ -8,8 +8,11 @@ import errno
 import threading
 import time
 
+import pytest
+
 from scripts.scanner_daemon import (
-    Heartbeater, PostError, _device_probe,
+    DeviceLostError, GrabPermissionError, Heartbeater, LocalAgentServer,
+    NonceStore, OfferStore, PostError, _device_probe, run_loop,
 )
 from tests.test_scanner_daemon import _input_class, _make_event_node
 from tests.test_scanner_daemon_grab import FakeGrab
@@ -25,6 +28,13 @@ NOPERM = {"status": "no-permission", "node": "/dev/input/event3",
 def _hb(post, *, probe=None, **kw):
     return Heartbeater(post, "http://shop:8000", "laptop-1", SECRET,
                        probe=probe or (lambda: dict(PRESENT)), **kw)
+
+
+@pytest.fixture()
+def scanner_sysfs(tmp_path):
+    root = _input_class(tmp_path)
+    _make_event_node(root, "event3", "065a", "a001")
+    return root
 
 
 def test_heartbeat_maps_grabbed_device_to_present(tmp_path):
@@ -130,3 +140,111 @@ def test_heartbeat_stop_joins_within_two_seconds_without_raising():
     hb.stop()                                    # never raises, joins <= 2s
     assert time.monotonic() - began < 2.0
     assert not hb._thread.is_alive()
+
+
+# --- F2: a non-numeric interval clamps to 30 with ONE warning, no traceback --
+
+def test_heartbeat_nonnumeric_env_clamps_to_default_with_one_warning(monkeypatch):
+    monkeypatch.setenv("HCRM_SCANNER_HEARTBEAT_SECONDS", "not-a-number")
+    logs = []
+    hb = _hb(lambda u, h, b: {}, log=logs.append)
+    assert hb.interval == 30
+    assert len(logs) == 1 and "30" in logs[0]
+
+
+def test_heartbeat_nonnumeric_flag_clamps_to_default_with_one_warning():
+    logs = []
+    hb = _hb(lambda u, h, b: {}, interval="not-a-number", log=logs.append)
+    assert hb.interval == 30
+    assert len(logs) == 1 and "30" in logs[0]
+
+
+def test_heartbeat_interval_still_clamps_to_minimum_five():
+    assert _hb(lambda u, h, b: {}, interval="3").interval == 5
+    assert _hb(lambda u, h, b: {}, interval="12").interval == 12
+
+
+# --- F3: the four run_loop on_state hook points ------------------------------
+
+def _recorder():
+    states = []
+    return states, lambda s, n, p: states.append((s, n, p))
+
+
+def test_run_loop_reports_present_on_grab(scanner_sysfs):
+    fake = FakeGrab()
+    states, on_state = _recorder()
+
+    def reader(fd, on_unmapped=None):
+        yield "8412345678905"
+        return                                   # EOF → device loss → stop
+
+    run_loop(lambda c: None, sysfs_root=scanner_sysfs, opener=fake.opener,
+             ioctl=fake.ioctl, closer=fake.closer, scan_reader=reader,
+             sleep=lambda s: None, stop=lambda: True, on_state=on_state)
+    assert states[0][0] == "present"
+    assert states[0][2] == "hid-a001"
+    assert states[0][1]                          # the grabbed node
+
+
+def test_run_loop_reports_absent_on_device_loss(scanner_sysfs):
+    fake = FakeGrab()
+    states, on_state = _recorder()
+
+    def reader(fd, on_unmapped=None):
+        yield "8412345678905"
+        return                                   # EOF → DeviceLostError
+
+    run_loop(lambda c: None, sysfs_root=scanner_sysfs, opener=fake.opener,
+             ioctl=fake.ioctl, closer=fake.closer, scan_reader=reader,
+             sleep=lambda s: None, stop=lambda: True, on_state=on_state)
+    assert [s[0] for s in states] == ["present", "absent"]
+    assert states[1] == ("absent", None, None)
+
+
+def test_run_loop_reports_no_permission_before_loud_raise(scanner_sysfs):
+    fake = FakeGrab(open_error=PermissionError(errno.EACCES, "denied"))
+    states, on_state = _recorder()
+    with pytest.raises(GrabPermissionError):
+        run_loop(lambda c: None, sysfs_root=scanner_sysfs, opener=fake.opener,
+                 ioctl=fake.ioctl, closer=fake.closer,
+                 scan_reader=lambda fd, on_unmapped=None: iter(()),
+                 sleep=lambda s: None, stop=lambda: True, on_state=on_state)
+    # the hook fired BEFORE the loud raise, and never as "absent"
+    assert len(states) == 1
+    assert states[0][0] == "no-permission"
+    assert states[0][2] == "hid-a001"
+    assert states[0][1]                          # the node that exists
+
+
+def test_run_loop_reports_absent_when_no_device_found(tmp_path):
+    root = _input_class(tmp_path)                # empty: nothing discovered
+    states, on_state = _recorder()
+    run_loop(lambda c: None, sysfs_root=root, scan_reader=lambda fd, on_unmapped=None: iter(()),
+             sleep=lambda s: None, stop=lambda: True, on_state=on_state)
+    assert states == [("absent", None, None)]
+
+
+# --- F4: a set stop_event suppresses the reclaim POST ------------------------
+
+def test_stop_event_suppresses_reclaim_post(tmp_path):
+    calls = []
+
+    def post(u, h, b):
+        calls.append((u, h, b))
+        return {"pairing_code": "7Q2MB4XW"}
+
+    config = {"terminal_id": "t", "secret": SECRET,
+              "server_url": "http://shop:8000", "site_origin": "http://shop:8000"}
+    stop = threading.Event()
+    server = LocalAgentServer(
+        0, config=config, offers=OfferStore(tmp_path / "offer.json", "t"),
+        nonces=NonceStore(), device=lambda: dict(ABSENT), post=post,
+        stop_event=stop)
+    stop.set()
+    assert server._reclaim_code() is None
+    assert calls == []                           # NO reclaim POST when stopping
+    # control: without the stop signal the same call DOES post and rotate
+    stop.clear()
+    assert server._reclaim_code() == "7Q2MB4XW"
+    assert len(calls) == 1 and calls[0][0].endswith("/terminals/t/reclaim")

@@ -213,6 +213,18 @@ def test_legacy_config_still_required_without_invite(scanner_sysfs):
     assert exc.value.code == 2
 
 
+def test_invite_requires_server(scanner_sysfs, capsys):
+    # F1: --invite without --server must NOT silently fall back to --forward
+    # (http://127.0.0.1:8000) and burn the staff invite against the wrong server.
+    post = PostScript([])
+    with pytest.raises(SystemExit) as exc:
+        run(["--register", "--invite", INVITE,
+             "--site-origin", "http://shop:8000"], post, scanner_sysfs)
+    assert exc.value.code == 2
+    assert "--server is required with --invite" in capsys.readouterr().err
+    assert post.calls == []
+
+
 # --- legacy path unchanged ---------------------------------------------------
 
 def test_legacy_register_body_and_config_unchanged(tmp_path, scanner_sysfs):
