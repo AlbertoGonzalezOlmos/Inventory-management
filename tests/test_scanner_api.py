@@ -13,12 +13,15 @@ import secrets
 from datetime import timedelta
 
 import pytest
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 import app.routers.scanner as scanner_router
 from app.database import engine
-from app.models import ScanEvent
+from app.models import ScannerInvite, ScanEvent, Terminal, utcnow
 from app.scanshapes import BADGE_PREFIX
+from app.schemas import HeartbeatIn
 from tests.conftest import ADMIN_PASSWORD_AFTER_CHANGE, auth, create_user
 
 BADGE = BADGE_PREFIX + "A" * 43
@@ -95,6 +98,16 @@ def age_events(terminal_id, seconds):
                 select(ScanEvent).where(ScanEvent.terminal_id == terminal_id)).all():
             event.created_at -= timedelta(seconds=seconds)
             session.add(event)
+        session.commit()
+
+
+def expire_pairing_code(terminal_id):
+    """Wind the stored pairing deadline into the past — deterministic TTL."""
+    with Session(engine) as session:
+        terminal = session.exec(select(Terminal).where(
+            Terminal.terminal_id == terminal_id)).one()
+        terminal.pairing_code_expires_at = utcnow() - timedelta(seconds=1)
+        session.add(terminal)
         session.commit()
 
 
@@ -660,3 +673,161 @@ def test_delete_unknown_terminal_404s(client, loopback, admin_token):
     r = client.delete("/api/scanner/terminals/nope",
                       headers=auth(admin_token))
     assert r.status_code == 404
+
+
+# --- Portable identity + pairing TTL (P1) -------------------------------------
+
+
+def test_register_sets_a_pair_code_expiry(client, loopback):
+    """Every mint stores a deadline (R9): the TTL only exists if the row
+    carries it — a NULL here would mean 'never expires' by definition."""
+    register(client, terminal_id="ttl-mint")
+    with Session(engine) as session:
+        terminal = session.exec(select(Terminal).where(
+            Terminal.terminal_id == "ttl-mint")).one()
+        assert terminal.pairing_code_expires_at is not None
+        assert (terminal.pairing_code_expires_at - terminal.created_at
+                == timedelta(seconds=600))
+        assert terminal.pairing_code_expires_at > utcnow()
+
+
+def test_pairing_code_expiry_honours_the_ttl_env_at_call_time(monkeypatch):
+    """The env is read per call (the SCANNER_EVENT_TTL_SECONDS precedent),
+    so a deploy can shorten the window without a rebuild."""
+    monkeypatch.setenv("HCRM_SCANNER_PAIR_CODE_TTL_SECONDS", "60")
+    before = utcnow()
+    expiry = scanner_router.pairing_code_expiry()
+    assert before + timedelta(seconds=60) <= expiry <= utcnow() + timedelta(seconds=60)
+
+
+def test_pair_after_the_ttl_is_401_and_indistinguishable_from_a_wrong_code(
+        client, loopback):
+    """Expired is answered EXACTLY like wrong (R9): a distinct body would
+    turn pairing into a 'your code was right but late' oracle."""
+    _, code = register(client, terminal_id="ttl-expired")
+    wrong = "2" * 8 if code != "2" * 8 else "3" * 8
+    r_wrong = pair(client, "ttl-expired", wrong)
+    expire_pairing_code("ttl-expired")
+    r_expired = pair(client, "ttl-expired", code)  # the RIGHT code, just late
+    assert r_wrong.status_code == r_expired.status_code == 401
+    assert r_wrong.content == r_expired.content  # byte-identical bodies
+
+
+def test_legacy_null_expiry_codes_never_expire(client, loopback):
+    """A NULL deadline is the pre-P1 row shape (R9): codes minted before
+    this schema must keep working forever, not die at the upgrade."""
+    _, code = register(client, terminal_id="ttl-legacy")
+    with Session(engine) as session:
+        terminal = session.exec(select(Terminal).where(
+            Terminal.terminal_id == "ttl-legacy")).one()
+        terminal.pairing_code_expires_at = None
+        session.add(terminal)
+        session.commit()
+    r = pair(client, "ttl-legacy", code)
+    assert r.status_code == 200
+    assert r.json()["token"]
+
+
+def test_successful_pair_clears_the_pairing_code_deadline(client, loopback):
+    """Spent is spent (R9): the success path clears the deadline so the
+    row stops advertising a moot TTL for a code that can never be used."""
+    _, code = register(client, terminal_id="ttl-spent")
+    assert pair(client, "ttl-spent", code).status_code == 200
+    with Session(engine) as session:
+        terminal = session.exec(select(Terminal).where(
+            Terminal.terminal_id == "ttl-spent")).one()
+        assert terminal.pairing_code_expires_at is None
+        assert terminal.token_hash is not None
+
+
+def test_register_rejects_bad_machine_key_and_invite_shapes(client, loopback):
+    """Shape is refused 422 before any gate sees the payload (R8): the
+    16-hex machine key and the 16-char alphabet invite are wire contracts —
+    a wrong shape must never reach the admission logic."""
+    secret = new_secret()
+    bad_bodies = [
+        {"terminal_id": "shape-1", "secret": secret, "machine_key": "A" * 16},
+        {"terminal_id": "shape-1", "secret": secret, "machine_key": "g" * 16},
+        {"terminal_id": "shape-1", "secret": secret, "machine_key": "a" * 15},
+        {"terminal_id": "shape-1", "secret": secret, "machine_key": "a" * 17},
+        {"terminal_id": "shape-1", "secret": secret, "invite": "2" * 15},
+        {"terminal_id": "shape-1", "secret": secret, "invite": "2" * 17},
+        {"terminal_id": "shape-1", "secret": secret, "invite": "I" * 16},
+        {"terminal_id": "shape-1", "secret": secret, "invite": "2" * 15 + "u"},
+    ]
+    for body in bad_bodies:
+        r = client.post("/api/scanner/terminals", json=body)
+        assert r.status_code == 422, (body, r.status_code, r.text)
+    # Valid shapes pass the schema; semantics are the gate's later call.
+    r = client.post("/api/scanner/terminals", json={
+        "terminal_id": "shape-ok", "secret": new_secret(),
+        "machine_key": "0123456789abcdef"})
+    assert r.status_code == 201, r.text
+
+
+def test_heartbeat_in_rejects_bad_device_status_and_personality():
+    """The heartbeat contract (R10): a typo'd state must not silently
+    become 'absent', and a personality is agent-shaped or nothing."""
+    HeartbeatIn(device_status="present")
+    HeartbeatIn(device_status="no-permission", personality="hid-a001")
+    HeartbeatIn(device_status="absent", personality=None)
+    with pytest.raises(ValidationError):
+        HeartbeatIn(device_status="weird")
+    with pytest.raises(ValidationError):
+        HeartbeatIn(device_status="present", personality="HID A001")
+    with pytest.raises(ValidationError):
+        HeartbeatIn(device_status="present", personality="x" * 33)
+
+
+def test_poll_carries_the_agent_object_and_never_a_fake_value(client, loopback):
+    """R4: the poll ALWAYS carries the agent object; a terminal that never
+    heartbeated is the all-null shape — honest 'not measured', never a fake
+    'online: true' (the pill's live gate wants agent AND device present)."""
+    _, code = register(client, terminal_id="agent-object")
+    token = pair(client, "agent-object", code).json()["token"]
+    body = poll(client, token).json()
+    assert body == {"events": [], "latest_seq": 0,
+                    "agent": {"online": False, "device_status": None,
+                              "personality": None}}
+
+
+def test_machine_key_unique_index_allows_many_nulls_and_refuses_duplicates():
+    """SQLite NULLs are distinct under the unique index (legacy terminals
+    keep coexisting), but one machine key binds exactly one terminal — the
+    identity a reinstalled daemon re-asserts."""
+    with Session(engine) as session:
+        session.add(Terminal(terminal_id="null-1", secret_hash=new_secret()))
+        session.add(Terminal(terminal_id="null-2", secret_hash=new_secret()))
+        session.add(Terminal(terminal_id="laptop-a", secret_hash=new_secret(),
+                             machine_key="a" * 16))
+        session.commit()
+    with Session(engine) as session:
+        session.add(Terminal(terminal_id="laptop-b", secret_hash=new_secret(),
+                             machine_key="a" * 16))
+        with pytest.raises(IntegrityError):
+            session.commit()
+    with Session(engine) as session:
+        owners = session.exec(select(Terminal).where(
+            Terminal.machine_key == "a" * 16)).all()  # type: ignore[union-attr]
+        assert [t.terminal_id for t in owners] == ["laptop-a"]  # no half-commit
+        nulls = {t.terminal_id for t in session.exec(select(Terminal).where(
+            Terminal.machine_key.is_(None))).all()}  # type: ignore[union-attr]
+        assert {"null-1", "null-2"} <= nulls
+
+
+def test_scanner_invites_table_exists_with_a_unique_hash_index():
+    """create_all makes the invite table (a new table needs no migration);
+    the unique hash index is what makes 'one code, one use' enforceable —
+    lookups are seeks and minting a duplicate code is impossible."""
+    with Session(engine) as session:
+        session.add(ScannerInvite(invite_hash="h" * 64,
+                                  expires_at=utcnow() + timedelta(hours=1)))
+        session.commit()
+        with pytest.raises(IntegrityError):
+            session.add(ScannerInvite(invite_hash="h" * 64,
+                                      expires_at=utcnow() + timedelta(hours=1)))
+            session.commit()
+    with engine.connect() as conn:
+        indexes = {row[1]: row[2] for row in conn.exec_driver_sql(
+            "PRAGMA index_list(scanner_invites)")}
+    assert indexes.get("ix_scanner_invites_invite_hash") == 1  # unique

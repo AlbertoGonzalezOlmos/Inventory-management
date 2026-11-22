@@ -1,77 +1,109 @@
-/* HCRM scan feed — the pure poll-channel state machine (round 4, T6).
+/* HCRM scan feed — pure poll-channel + popup state machine.
  *
- * The round-4 grab daemon (scripts/scanner_daemon.py) forwards the Opticon
- * M-10's scans into a server-side per-terminal queue (POST /api/scanner/
- * events); THIS module decides what the SPA does with the poll results.
- * All DOM work — the setInterval pacing, the fetch, the header pill, the
- * localStorage of the terminal token — lives in the app.js adapter; this
- * file is PURE so `node --test` (tests/js/scanfeed.test.mjs) can drive it
- * with scripted poll results and assert the EFFECT sequences, which are
- * the adapter's exact instructions.
+ * All DOM work, timers, popup navigation, API calls, and localStorage live in
+ * app.js. This file only computes state and the adapter's next effects.
  *
- * States (mode):
- *   UNPAIRED — no terminal token; the wedge capture (round 3,
- *              scancapture.js) is the ONLY scan path. NOT an error: it is
- *              the fallback, deliberately kept installed.
- *   POLLING  — paired, the paced 1 s poll is running.
- *   ERROR    — paired but the last poll failed (server unreachable): the
- *              poll KEEPS RUNNING (a kiosk must heal itself); this state
- *              only flips the pill to "off".
+ * States (mode): UNPAIRED (no token) · POLLING · ERROR (poll failed, retrying).
+ * data-scanner-feed stays live|off|unpaired. detail is null or no-agent |
+ * no-device | no-permission | bound-elsewhere | register-denied | server-down |
+ * popup-blocked. A successful poll with a present agent is live only for
+ * online + device_status=present; a missing agent field is the legacy rule
+ * (successful poll => live), never an inferred offline state.
  *
- * Actions: {type:"paired", token} · {type:"events", events, latest_seq} ·
- * {type:"pollError"} · {type:"unpair"}. Effects (the adapter's orders):
- * startPoll · stopPoll · emitEvent(code, kind) · setPill(mode) — pill
- * modes "live" | "off" | "unpaired" (the data-scanner-feed attribute).
+ * Actions: popup{reclaim} · offer{nonce,terminal_id,code} · pairFailed{reason}
+ * · reclaim · paired{token} · events{events,latest_seq,agent?} · pollError ·
+ * unpair. Effects: openPopup · closePopup · armWatchdog · clearWatchdog ·
+ * pairRequest · setDetail · startPoll · stopPoll · emitEvent · setPill.
+ * Reclaim is deliberately capped at one attempt per popup session.
  *
- * Delivery semantics (coordinator decision, mirrored server-side in T4):
- * AT-MOST-ONCE. The cursor advances in the same transition that emits the
- * events, and events with seq <= cursor are never emitted (the no-double-
- * emit guard — the server's consumed-marking already dedupes across
- * restarts; this guard dedupes within a session, e.g. a replayed response).
- * A tab dying mid-batch loses the batch: a lost scan is re-scannable, a
- * phantom cart line is a data error.
- *
- * POLL_INTERVAL_MS is a CLIENT-side pacing constant only — it is NEVER sent
- * over the wire (no wait_ms/hold parameter anywhere): a server-side hold
- * would freeze ui_check's virtual-time DOM dump and turn the browser gate
- * red (measured: r4rev M9). Pinned by tests/test_frontend_contract.py.
+ * Delivery stays at-most-once: the cursor advances with emitted events and
+ * seq <= cursor is never emitted twice. POLL_INTERVAL_MS is a client constant,
+ * never a request parameter.
  */
 
-const POLL_INTERVAL_MS = 1000;   // client-paced; never a request parameter
+const POLL_INTERVAL_MS = 1000;
 
 const UNPAIRED = "unpaired";
 const POLLING = "polling";
 const ERROR = "error";
 
-// Pill modes (the adapter renders data-scanner-feed="<mode>").
-const PILL_LIVE = "live";         // paired, polls succeeding
-const PILL_OFF = "off";           // paired, server unreachable (retrying)
-const PILL_UNPAIRED = "unpaired"; // no binding: the wedge path is live
+const PILL_LIVE = "live";
+const PILL_OFF = "off";
+const PILL_UNPAIRED = "unpaired";
+
+const DETAILS = Object.freeze([
+  "no-agent", "no-device", "no-permission", "bound-elsewhere",
+  "register-denied", "server-down", "popup-blocked",
+]);
+const DETAIL_SET = new Set(DETAILS);
 
 function initialFeedState() {
-  return { mode: UNPAIRED, cursor: 0, token: null };
+  return { mode: UNPAIRED, cursor: 0, token: null, detail: null,
+           reclaimUsed: false };
+}
+
+function failure(state, reason) {
+  const mode = state.token ? state.mode : UNPAIRED;
+  return {
+    state: { ...state, mode, detail: reason },
+    effects: [
+      { type: "setDetail", reason },
+      { type: "clearWatchdog" },
+      { type: "closePopup" },
+      { type: "setPill", mode: state.token ? PILL_OFF : PILL_UNPAIRED },
+    ],
+  };
 }
 
 function feedStep(state, action) {
   switch (action.type) {
-    case "paired": {
-      // (Re)pairing starts from cursor 0 BY DESIGN: the server's
-      // consumed-marking is the cross-restart dedupe, so a fresh session
-      // re-receives only what was never delivered; this cursor is
-      // within-session paging.
+    case "popup":
+      // A new popup session resets the one-reclaim budget, never the cursor.
       return {
-        state: { mode: POLLING, cursor: 0, token: action.token },
+        state: { ...state, mode: UNPAIRED, detail: null, reclaimUsed: false },
         effects: [
-          { type: "setPill", mode: PILL_LIVE },
-          { type: "startPoll" },
+          { type: "openPopup", reclaim: action.reclaim },
+          { type: "armWatchdog" },
         ],
       };
-    }
+
+    case "offer":
+      // The adapter validates origin/source/type/nonce/schema before this
+      // action; the reducer never turns that into a token without /pair.
+      return {
+        state,
+        effects: [
+          { type: "pairRequest", terminal_id: action.terminal_id,
+            code: action.code },
+          { type: "clearWatchdog" },
+        ],
+      };
+
+    case "pairFailed":
+      if (!DETAIL_SET.has(action.reason)) return { state, effects: [] };
+      return failure(state, action.reason);
+
+    case "reclaim":
+      if (state.reclaimUsed) return failure(state, "bound-elsewhere");
+      return {
+        state: { ...state, reclaimUsed: true, detail: null },
+        effects: [
+          { type: "openPopup", reclaim: 1 },
+          { type: "armWatchdog" },
+        ],
+      };
+
+    case "paired":
+      // Token issuance is not streaming proof. The first successful poll
+      // chooses live/off; do not repeat the old immediate-live optimism.
+      return {
+        state: { mode: POLLING, cursor: 0, token: action.token,
+                 detail: null, reclaimUsed: false },
+        effects: [{ type: "startPoll" }],
+      };
 
     case "events": {
       if (state.mode === UNPAIRED || !state.token) {
-        // A poll result racing an unpair: drop it (no double-emit after
-        // the binding is gone).
         return { state, effects: [] };
       }
       const events = action.events || [];
@@ -79,43 +111,61 @@ function feedStep(state, action) {
       const effects = fresh.map((e) => ({
         type: "emitEvent", code: e.code, kind: e.kind,
       }));
-      effects.push({ type: "setPill", mode: PILL_LIVE });
-      // Monotonic: never regress past a cursor a later response already
-      // advanced (latest_seq can drop after server-side pruning).
+      let detail = null;
+      let healthy = true;
+      if (action.agent !== undefined) {
+        const agent = action.agent;
+        healthy = Boolean(agent && agent.online
+          && agent.device_status === "present");
+        if (!healthy) {
+          if (!agent || !agent.online) detail = "no-agent";
+          else if (agent.device_status === "no-permission") {
+            detail = "no-permission";
+          } else {
+            detail = "no-device";
+          }
+        }
+      }
+      // Undefined agent = old server/daemon: exactly today's successful-poll
+      // behavior. A present object has to prove both freshness and presence.
+      effects.push({ type: "setPill", mode: healthy ? PILL_LIVE : PILL_OFF });
+      effects.push({ type: "setDetail", reason: detail });
       const cursor = Math.max(state.cursor, action.latest_seq || 0,
         ...fresh.map((e) => e.seq), 0);
-      return { state: { ...state, mode: POLLING, cursor }, effects };
+      return { state: { ...state, mode: POLLING, cursor, detail }, effects };
     }
 
-    case "pollError": {
+    case "pollError":
       if (state.mode === UNPAIRED || !state.token) {
         return { state, effects: [] };
       }
-      // The adapter's timer keeps firing — this state is "retrying", not
-      // "stopped"; the pill is the only visible change.
+      // The timer keeps running: off/server-down is a retry state, not a stop.
       return {
-        state: { ...state, mode: ERROR },
-        effects: [{ type: "setPill", mode: PILL_OFF }],
+        state: { ...state, mode: ERROR, detail: "server-down" },
+        effects: [
+          { type: "setPill", mode: PILL_OFF },
+          { type: "setDetail", reason: "server-down" },
+        ],
       };
-    }
 
-    case "unpair": {
+    case "unpair":
       return {
         state: initialFeedState(),
         effects: [
           { type: "stopPoll" },
           { type: "setPill", mode: PILL_UNPAIRED },
+          { type: "setDetail", reason: null },
         ],
       };
-    }
   }
-  return { state, effects: [] };  // unknown action: inert, never a crash
+  return { state, effects: [] };
 }
 
 const HcrmScanFeed = {
   POLL_INTERVAL_MS,
   UNPAIRED, POLLING, ERROR,
   PILL_LIVE, PILL_OFF, PILL_UNPAIRED,
+  DETAILS,
   initialFeedState,
   feedStep,
 };

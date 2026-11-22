@@ -58,21 +58,28 @@ import json
 import logging
 import os
 import secrets
-from datetime import timedelta
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import delete, or_, update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
+from pydantic import ValidationError
 
 from app.database import get_session
 from app.deps import bearer_scheme, get_current_user
 from app.error_codes import ERRORS, coded_detail
-from app.models import ScanEvent, Terminal, utcnow
+from app.models import ScanEvent, ScannerInvite, Terminal, utcnow
 from app.schemas import (
+    AgentStatusOut,
+    HeartbeatIn,
     ScanEventOut,
     ScanEventsOut,
+    TerminalInviteOut,
     TerminalPairIn,
     TerminalPairOut,
     TerminalRegisterIn,
@@ -90,6 +97,12 @@ router = APIRouter(prefix="/api/scanner", tags=["scanner"])
 #: How long an unconsumed scan may rest in the queue (badge payloads are
 #: bearer credentials). Module attribute at call time — tests monkeypatch it.
 SCANNER_EVENT_TTL_SECONDS = 300
+
+#: Agent liveness freshness in seconds — the boot DEFAULT. The environment
+#: override HCRM_SCANNER_HEARTBEAT_FRESH_SECONDS is read at CALL time inside
+#: _agent_status (R14), like the other scanner envs, so changing it needs no
+#: restart; tests monkeypatch this default when the env is unset.
+HEARTBEAT_FRESH_SECONDS = 90
 
 #: Crockford base32 without lookalikes (no I L O U): 8 chars ≈ 40 bits —
 #: strong enough without a brute-force counter on a LAN plaintext app.
@@ -161,6 +174,164 @@ def _mint_pairing_code() -> str:
                    for _ in range(_PAIRING_CODE_LEN))
 
 
+#: Pairing-code TTL (R9): how long a minted code stays usable. Env, read at
+#: CALL time (the SCANNER_EVENT_TTL_SECONDS precedent).
+_PAIR_CODE_TTL_ENV = "HCRM_SCANNER_PAIR_CODE_TTL_SECONDS"
+_PAIR_CODE_TTL_DEFAULT = 600
+
+
+def pairing_code_expiry(now: datetime | None = None) -> datetime:
+    """The deadline stored on EVERY pairing-code mint (R9).
+
+    Register and reclaim both store this in
+    ``Terminal.pairing_code_expires_at``; :func:`_pair_terminal` refuses
+    codes past it (byte-identical 401 — no "right but late" oracle) and
+    clears the deadline on success. A NULL column is the legacy shape:
+    codes minted before this schema never expire.
+    """
+    ttl = int(os.environ.get(_PAIR_CODE_TTL_ENV, _PAIR_CODE_TTL_DEFAULT))
+    return (now or utcnow()) + timedelta(seconds=ttl)
+
+
+def _require_json(request: Request) -> None:
+    """Require JSON before credential work (the /pair/auto CSRF gate)."""
+    content_type = request.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        raise coded_detail(
+            "json_required",
+            {"status": "json_required",
+             "message": ERRORS["json_required"].message},
+        )
+
+
+def _agent_status(terminal: Terminal, now: datetime) -> AgentStatusOut:
+    """Heartbeat-only agent truth; register/ingest never imply liveness."""
+    fresh = int(os.environ.get("HCRM_SCANNER_HEARTBEAT_FRESH_SECONDS",
+                               HEARTBEAT_FRESH_SECONDS))
+    seen = terminal.agent_seen_at
+    age = (now - seen).total_seconds() if seen is not None else None
+    online = (age is not None
+              and 0 <= age <= fresh)
+    return AgentStatusOut(
+        online=online,
+        device_status=terminal.device_status,
+        personality=terminal.personality,
+    )
+
+
+#: Registration invites (P1, R8): staff-minted single-use admission for a
+#: non-loopback register. 16 Crockford chars (80 bits), hash-only, shown once.
+#: Env read at CALL time (the SCANNER_EVENT_TTL_SECONDS precedent).
+_INVITE_CODE_LEN = 16
+_INVITE_TTL_ENV = "HCRM_SCANNER_INVITE_TTL_SECONDS"
+_INVITE_TTL_DEFAULT = 86400
+_INVITE_MAX_ENV = "HCRM_SCANNER_INVITE_MAX_OPEN"
+_INVITE_MAX_DEFAULT = 10
+
+
+def _mint_invite_code() -> str:
+    return "".join(secrets.choice(_PAIRING_ALPHABET)
+                   for _ in range(_INVITE_CODE_LEN))
+
+
+def _invite_ttl() -> int:
+    return int(os.environ.get(_INVITE_TTL_ENV, _INVITE_TTL_DEFAULT))
+
+
+def _invite_max_open() -> int:
+    return int(os.environ.get(_INVITE_MAX_ENV, _INVITE_MAX_DEFAULT))
+
+
+#: Non-loopback register throttle (R7): a SLIDING window per client IP,
+#: counted AFTER the admission gate, loopback exempt. Clock and counter are
+#: module attributes read at call time so tests drive the window without
+#: sleeping. In-process only — a multi-worker deployment would need a shared
+#: store (documented limitation; the admission gate, not this, is the security
+#: boundary). Behind a reverse proxy every laptop shares the proxy's IP, so
+#: they all share ONE bucket (the key is request.client.host).
+_REGISTER_RATE_MAX_ENV = "HCRM_SCANNER_REGISTER_RATE_MAX"
+_REGISTER_RATE_MAX_DEFAULT = 20
+_REGISTER_RATE_WINDOW_ENV = "HCRM_SCANNER_REGISTER_RATE_WINDOW_SECONDS"
+_REGISTER_RATE_WINDOW_DEFAULT = 600
+_register_rate_clock = time.monotonic
+_register_rate_hits: dict[str, list[float]] = {}
+
+
+def _register_rate_limit(ip: str) -> int | None:
+    """Record one admitted non-loopback attempt; return Retry-After seconds
+    when the sliding window is full, else None. The window slides no further
+    than its oldest hit: Retry-After is the seconds until that hit ages out."""
+    max_hits = int(os.environ.get(_REGISTER_RATE_MAX_ENV,
+                                  _REGISTER_RATE_MAX_DEFAULT))
+    window = int(os.environ.get(_REGISTER_RATE_WINDOW_ENV,
+                                _REGISTER_RATE_WINDOW_DEFAULT))
+    now = _register_rate_clock()
+    hits = [t for t in _register_rate_hits.get(ip, []) if now - t < window]
+    if len(hits) >= max_hits:
+        _register_rate_hits[ip] = hits
+        return max(1, int(window - (now - hits[0])) + 1)
+    hits.append(now)
+    _register_rate_hits[ip] = hits
+    return None
+
+
+def _bad_invite() -> HTTPException:
+    """The ONE 403 for an unknown/expired/consumed invite — byte-identical
+    bodies so the three cases are indistinguishable (no enumeration oracle).
+    The atomic hash-keyed conditional UPDATE is the real single-use guard;
+    no constant-time compare is claimed (R8)."""
+    return coded_detail(
+        "bad_invite",
+        {"status": "bad_invite", "message": ERRORS["bad_invite"].message},
+    )
+
+
+def _register_conflict_error(session: Session,
+                             payload: TerminalRegisterIn) -> HTTPException:
+    """Map a commit-time IntegrityError (the race backstop) to the right 409.
+
+    The read-only checks already ran; a constraint can only fire here if a
+    concurrent register committed between our read and our commit. Re-read
+    after rollback and name the winner — never a 500 (R1)."""
+    if session.exec(select(Terminal).where(
+            Terminal.terminal_id == payload.terminal_id)).first() is not None:
+        return coded_detail(
+            "terminal_already_registered",
+            {"status": "already_registered",
+             "message": ERRORS["terminal_already_registered"].message.format(
+                 terminal=repr(payload.terminal_id),
+                 terminal_url=payload.terminal_id)},
+            terminal=repr(payload.terminal_id),
+            terminal_url=payload.terminal_id,
+        )
+    if payload.machine_key is not None:
+        key_owner = session.exec(select(Terminal).where(
+            Terminal.machine_key == payload.machine_key)).first()
+        if key_owner is not None:
+            return coded_detail(
+                "machine_key_in_use",
+                {"status": "machine_key_in_use",
+                 "message": ERRORS["machine_key_in_use"].message.format(
+                     terminal=repr(key_owner.terminal_id),
+                     terminal_url=key_owner.terminal_id)},
+                terminal=repr(key_owner.terminal_id),
+                terminal_url=key_owner.terminal_id,
+            )
+    secret_owner = session.exec(select(Terminal).where(
+        Terminal.secret_hash == token_hash(payload.secret))).first()
+    if secret_owner is not None:
+        return coded_detail(
+            "secret_in_use",
+            {"status": "secret_in_use",
+             "message": ERRORS["secret_in_use"].message.format(
+                 owner=repr(secret_owner.terminal_id))},
+            owner=repr(secret_owner.terminal_id),
+        )
+    return coded_detail("internal_error",
+                        {"status": "internal_error",
+                         "message": ERRORS["internal_error"].message})
+
+
 def _presented_credential(request: Request, header_name: str,
                            fallback: str | None = None) -> str | None:
     """The credential a request presents, in either accepted form.
@@ -225,6 +396,67 @@ def _prune(session: Session, terminal_id: str) -> None:
     )
 
 
+@router.post("/invites", response_model=TerminalInviteOut,
+             status_code=status.HTTP_201_CREATED)
+def mint_invite(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    session: Session = Depends(get_session),
+):
+    """Mint a single-use registration invite (staff bearer OR loopback).
+
+    The portable admission credential (P1): a laptop that is not the server
+    registers with one of these instead of opening HCRM_SCANNER_REGISTER_ANY.
+    16 Crockford chars (80 bits), shown ONCE, only its SHA-256 stored (the
+    session-token doctrine). ``created_by`` names the minting staff user
+    (NULL for a loopback mint). Expired rows are pruned on mint (the _prune
+    precedent) and never read as authority; max-open caps live invites.
+    JSON content-type required (415) — it mints a credential (the /pair/auto
+    anti-CSRF precedent). No log line or error ever carries the code.
+    """
+    created_by = None
+    if not _is_loopback(request):
+        user = get_current_user(request, credentials, session)  # 401 anonymous
+        if user.role not in ("staff", "admin"):
+            raise coded_detail(
+                "invite_staff_only",
+                {"status": "staff_required",
+                 "message": ERRORS["invite_staff_only"].message},
+            )
+        created_by = user.email
+    content_type = request.headers.get("content-type", "")
+    if not content_type.split(";", 1)[0].strip().lower() == "application/json":
+        raise coded_detail(
+            "json_required",
+            {"status": "json_required",
+             "message": ERRORS["json_required"].message},
+        )
+    now = utcnow()
+    session.exec(delete(ScannerInvite).where(ScannerInvite.expires_at <= now))
+    open_invites = session.exec(
+        select(ScannerInvite).where(
+            ScannerInvite.consumed_at.is_(None),  # type: ignore[union-attr]
+            ScannerInvite.expires_at > now,
+        )
+    ).all()
+    if len(open_invites) >= _invite_max_open():
+        raise coded_detail(
+            "invite_limit",
+            {"status": "invite_limit",
+             "message": ERRORS["invite_limit"].message},
+        )
+    code = _mint_invite_code()
+    expires_at = now + timedelta(seconds=_invite_ttl())
+    session.add(ScannerInvite(
+        invite_hash=token_hash(code),
+        created_at=now,
+        expires_at=expires_at,
+        created_by=created_by,
+    ))
+    session.commit()
+    return TerminalInviteOut(invite_code=code, expires_at=expires_at)
+
+
 @router.post("/terminals", response_model=TerminalRegisterOut,
              status_code=status.HTTP_201_CREATED)
 def register_terminal(
@@ -234,19 +466,53 @@ def register_terminal(
 ):
     """Register a terminal (the daemon, at first start).
 
-    Loopback-gated by default: the kiosk and the server are the same host
-    in the default deployment, and an open register would let any LAN peer
-    mint terminals. The response carries the single-use pairing code —
-    shown exactly once (the daemon prints it); only its hash is stored.
-    Re-registering an existing terminal_id is a 409, not a rotate: the
-    recovery path for a lost secret is DELETE (staff or loopback) + register.
+    Admission (R2, in this exact order): loopback OR
+    HCRM_SCANNER_REGISTER_ANY=1 OR a valid unconsumed unexpired invite. The
+    invite is VALIDATED at the gate but consumed only at step 4 — so a 409
+    conflict never burns it, and an unadmitted caller learns nothing about
+    which terminals exist (the gate fires before any existence check). The
+    response carries the single-use pairing code, shown once; only its hash
+    is stored. Re-registering an existing terminal_id is a 409, not a rotate.
+    The minted code expires after HCRM_SCANNER_PAIR_CODE_TTL_SECONDS (default
+    600 s): on the same-host kiosk, click the pill within 10 minutes of
+    --register or re-run --register for a fresh code.
     """
-    if not (_is_loopback(request) or _register_open()):
-        raise coded_detail(
+    loopback = _is_loopback(request)
+    # 1. Admission gate — validate the invite, do NOT consume it here.
+    invite_row = None
+    if payload.invite is not None:
+        invite_row = session.exec(
+            select(ScannerInvite).where(
+                ScannerInvite.invite_hash == token_hash(payload.invite))
+        ).first()
+    invite_valid = (invite_row is not None
+                    and invite_row.consumed_at is None
+                    and invite_row.expires_at > utcnow())
+    if not (loopback or _register_open() or invite_valid):
+        # An invite was presented but is unknown/expired/consumed → bad_invite;
+        # no invite at all → the legacy loopback-only refusal. Both fire BEFORE
+        # any terminal lookup, so neither leaks existence to an unadmitted caller.
+        raise _bad_invite() if payload.invite is not None else coded_detail(
             "register_loopback_only",
             {"status": "loopback_only",
              "message": ERRORS["register_loopback_only"].message},
         )
+    # 2. Rate limit — non-loopback only, counted AFTER admission (R7).
+    if not loopback:
+        ip = request.client.host if request.client else "unknown"
+        retry_after = _register_rate_limit(ip)
+        if retry_after is not None:
+            raise coded_detail(
+                "register_rate_limited",
+                {"status": "rate_limited",
+                 "message": ERRORS["register_rate_limited"].message.format(
+                     seconds=retry_after)},
+                headers={"Retry-After": str(retry_after)},
+                seconds=retry_after,
+            )
+    # 3. Conflict checks (admitted callers only), terminal_id → machine_key →
+    #    secret. Each names its owner (the secret_in_use precedent). Read-only:
+    #    a 409 here leaves the invite unconsumed.
     existing = session.exec(
         select(Terminal).where(Terminal.terminal_id == payload.terminal_id)
     ).first()
@@ -260,6 +526,21 @@ def register_terminal(
             terminal=repr(payload.terminal_id),
             terminal_url=payload.terminal_id,
         )
+    if payload.machine_key is not None:
+        key_owner = session.exec(
+            select(Terminal).where(
+                Terminal.machine_key == payload.machine_key)
+        ).first()
+        if key_owner is not None and key_owner.terminal_id != payload.terminal_id:
+            raise coded_detail(
+                "machine_key_in_use",
+                {"status": "machine_key_in_use",
+                 "message": ERRORS["machine_key_in_use"].message.format(
+                     terminal=repr(key_owner.terminal_id),
+                     terminal_url=key_owner.terminal_id)},
+                terminal=repr(key_owner.terminal_id),
+                terminal_url=key_owner.terminal_id,
+            )
     secret_owner = session.exec(
         select(Terminal).where(Terminal.secret_hash == token_hash(payload.secret))
     ).first()
@@ -267,8 +548,8 @@ def register_terminal(
         # The secret identifies the terminal at ingest (lookup BY hash) —
         # two terminals sharing one (a copied daemon config) would route
         # every scan of both kiosks into the FIRST terminal's queue,
-        # silently. Fail loudly instead; register is loopback-gated, so
-        # naming the owner is no leak.
+        # silently. Fail loudly instead; register is gated, so naming the
+        # owner is no leak.
         raise coded_detail(
             "secret_in_use",
             {"status": "secret_in_use",
@@ -276,17 +557,120 @@ def register_terminal(
                  owner=repr(secret_owner.terminal_id))},
             owner=repr(secret_owner.terminal_id),
         )
+    # 4. Consume the invite — ONLY when it is the admission basis (R12). A
+    #    register admitted by loopback or HCRM_SCANNER_REGISTER_ANY must not
+    #    spend a presented invite (it was redundant). The atomic hash-keyed
+    #    conditional UPDATE (R1/R8): rowcount != 1 means a racing register
+    #    spent it first → bad_invite; the insert below never runs. Same
+    #    autobegun transaction as the insert.
+    if invite_row is not None and not (loopback or _register_open()):
+        result = session.exec(
+            update(ScannerInvite)
+            .where(ScannerInvite.invite_hash == token_hash(payload.invite),
+                   ScannerInvite.consumed_at.is_(None))  # type: ignore[union-attr]
+            .values(consumed_at=utcnow())
+        )
+        if result.rowcount != 1:
+            raise _bad_invite()
+    # 5. Insert + ONE commit. The unique indexes are the race backstop: a
+    #    concurrent winner surfaces as IntegrityError → rollback (the invite
+    #    consume rolls back too) → the matching 409, never a 500 (R1).
     code = _mint_pairing_code()
     now = utcnow()
     session.add(Terminal(
         terminal_id=payload.terminal_id,
         secret_hash=token_hash(payload.secret),
         pairing_code_hash=token_hash(code),
+        machine_key=payload.machine_key,
         created_at=now,
         last_seen_at=now,
+        # Every mint stores a deadline (R9) — see pairing_code_expiry().
+        pairing_code_expires_at=pairing_code_expiry(now),
     ))
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise _register_conflict_error(session, payload)
+    return TerminalRegisterOut(pairing_code=code)
+
+
+@router.post("/terminals/{terminal_id}/reclaim",
+             response_model=TerminalRegisterOut)
+def reclaim_terminal(
+    terminal_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> TerminalRegisterOut:
+    """Rotate a terminal's pairing code and revoke its current read token.
+
+    This is the self-healing path for ``409 already_paired``: the terminal
+    secret, never a staff session, authorizes a fresh single-use code. The
+    previously paired browser's next poll returns 401 BY DESIGN, and the SPA
+    automatically unpairs that browser. Repeat calls kill earlier codes too.
+    Unknown secrets and path/secret mismatches are indistinguishable.
+    """
+    _require_json(request)
+    secret = _presented_credential(request, "X-Scanner-Secret")
+    terminal = _terminal_by_credential(session, Terminal.secret_hash, secret)
+    if terminal.terminal_id != terminal_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILED)
+    code = _mint_pairing_code()
+    now = utcnow()
+    result = session.exec(
+        update(Terminal)
+        .where(Terminal.id == terminal.id,
+               Terminal.secret_hash == terminal.secret_hash)
+        .values(pairing_code_hash=token_hash(code),
+                pairing_code_expires_at=pairing_code_expiry(now),
+                token_hash=None)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILED)
     session.commit()
     return TerminalRegisterOut(pairing_code=code)
+
+
+@router.post("/terminals/{terminal_id}/heartbeat",
+             status_code=status.HTTP_204_NO_CONTENT)
+async def heartbeat_terminal(
+    terminal_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> Response:
+    """Record agent liveness and the last measured device state.
+
+    ``agent_seen_at`` is written ONLY here and drives the poll's online bit;
+    ``last_seen_at`` retains its broader daemon-activity meaning. An absent
+    device updates status but never clears either timestamp or browser token.
+    """
+    _require_json(request)
+    # Parse explicitly so the 415 content-type gate runs BEFORE FastAPI's
+    # body validation (which would otherwise answer text/plain with 422).
+    try:
+        payload = HeartbeatIn.model_validate_json(await request.body())
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+    secret = _presented_credential(request, "X-Scanner-Secret")
+    terminal = _terminal_by_credential(session, Terminal.secret_hash, secret)
+    if terminal.terminal_id != terminal_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILED)
+    now = utcnow()
+    result = session.exec(
+        update(Terminal)
+        .where(Terminal.id == terminal.id,
+               Terminal.secret_hash == terminal.secret_hash)
+        .values(last_seen_at=now,
+                agent_seen_at=now,
+                device_status=payload.device_status,
+                personality=payload.personality)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_FAILED)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
@@ -307,7 +691,12 @@ def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
     ).first()
     code_hash = token_hash(code)
     if (terminal is None or terminal.pairing_code_hash is None
-            or not hmac.compare_digest(code_hash, terminal.pairing_code_hash)):
+            or not hmac.compare_digest(code_hash, terminal.pairing_code_hash)
+            # Pairing-code TTL (R9): an expired code gets the SAME 401 as a
+            # wrong one — byte-identical, so "right but late" is
+            # indistinguishable from "never right" (no timing oracle).
+            or (terminal.pairing_code_expires_at is not None
+                and terminal.pairing_code_expires_at <= utcnow())):
         raise coded_detail(
             "bad_pairing",
             {"status": "bad_pairing", "message": ERRORS["bad_pairing"].message},
@@ -317,7 +706,10 @@ def _pair_terminal(session: Session, terminal_id: str, code: str) -> str:
         update(Terminal)
         .where(Terminal.terminal_id == terminal_id,
                Terminal.token_hash.is_(None))  # type: ignore[union-attr]
-        .values(token_hash=token_hash(raw))
+        .values(token_hash=token_hash(raw),
+                # Spent is spent: clear the deadline the moment the code
+                # dies (R9) — the row stops advertising a moot TTL.
+                pairing_code_expires_at=None)
     )
     if result.rowcount != 1:
         # Someone else paired this terminal between our read and the
@@ -545,6 +937,7 @@ def poll_events(
     return ScanEventsOut(
         events=[ScanEventOut(seq=e.seq, code=e.code, kind=e.kind) for e in events],
         latest_seq=latest_seq,
+        agent=_agent_status(terminal, now),
     )
 
 

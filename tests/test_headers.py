@@ -50,7 +50,10 @@ def test_hardening_headers_on_every_response_including_404():
         r = client.get(path)
         assert r.headers["X-Content-Type-Options"] == "nosniff", path
         assert r.headers["X-Frame-Options"] == "DENY", path
-        assert r.headers["Referrer-Policy"] == "same-origin", path
+        # P3: strict-origin — the loopback agent's /pair popup guard admits
+        # the cross-origin navigation by its Referer ORIGIN; same-origin
+        # would strip it and 403 every pairing popup (see apply_security_headers).
+        assert r.headers["Referrer-Policy"] == "strict-origin", path
 
 
 # --- W2.4: the docs exemption is a bounded predicate, not a bare prefix -------
@@ -105,7 +108,7 @@ def test_unhandled_500_carries_hardening_headers(boom_route):
     assert r.status_code == 500, r.status_code
     assert r.headers["X-Content-Type-Options"] == "nosniff"
     assert r.headers["X-Frame-Options"] == "DENY"
-    assert r.headers["Referrer-Policy"] == "same-origin"
+    assert r.headers["Referrer-Policy"] == "strict-origin"
     csp = r.headers["Content-Security-Policy"]
     assert "script-src 'self' 'unsafe-eval'" in csp
     assert r.json() == {"detail": "Internal server error"}

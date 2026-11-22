@@ -93,8 +93,11 @@ import sqlite3
 import struct
 import sys
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote, urlencode, urlsplit
 
 # Allow `python scripts/scanner_daemon.py` from anywhere (the
 # scanner_bridge bootstrap pattern): the repo root makes `scripts.*` and
@@ -597,7 +600,7 @@ def run_loop(on_scan, *, node=None, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
              opener=None, ioctl=None, closer=None,
              scan_reader=read_scans, on_unmapped=None,
              regrab_delay: float = 2.0, sleep=time.sleep,
-             stop=None, log=_log) -> None:
+             stop=None, log=_log, on_state=None) -> None:
     """The daemon's device lifecycle: discover → grab → decode → on_scan.
 
     On device loss (unplug, controller death, EOF) the loop closes
@@ -622,6 +625,8 @@ def run_loop(on_scan, *, node=None, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
         first = False
         if target is None:
             vid, pid = vid_pid
+            if on_state is not None:
+                on_state("absent", None, None)
             log(f"no {vid:04x}:{pid:04x} event device — retrying in "
                 f"{regrab_delay:g}s")
             sleep(regrab_delay)
@@ -632,8 +637,16 @@ def run_loop(on_scan, *, node=None, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
             with GrabbedDevice(target, vid_pid=vid_pid, sysfs_root=sysfs_root,
                                opener=opener, ioctl=ioctl, closer=closer) as dev:
                 log(f"grabbed {target}")
+                if on_state is not None:
+                    on_state("present", target, _personality_label(vid_pid))
                 _pump(dev, on_scan, scan_reader, on_unmapped)
+        except GrabPermissionError:
+            if on_state is not None:
+                on_state("no-permission", target, _personality_label(vid_pid))
+            raise
         except DeviceLostError as exc:
+            if on_state is not None:
+                on_state("absent", None, None)
             log(f"device lost ({exc}); re-discovering in {regrab_delay:g}s")
             sleep(regrab_delay)
             if stop is not None and stop():
@@ -808,12 +821,49 @@ def load_config(path) -> dict | None:
     return cfg
 
 
-def save_config(path, terminal_id: str, secret: str) -> None:
-    """Write the config 0600 — it holds a write credential for the API."""
+def derive_machine_key(config: dict | None = None, *,
+                       machine_id_path: str = "/etc/machine-id") -> str:
+    """The laptop's stable identity: sha256(/etc/machine-id)[:16].
+
+    Never derived from the hostname or the network. When the machine-id file
+    is absent (macOS/dev), fall back to a persisted random 16-hex value in the
+    config; with neither, mint a fresh one (the caller persists it via
+    save_config). Injectable path so tests run with no /etc/machine-id.
+    """
+    try:
+        raw = Path(machine_id_path).read_text().strip()
+    except OSError:
+        raw = ""
+    if raw:
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    existing = (config or {}).get("machine_key")
+    if (isinstance(existing, str) and len(existing) == 16
+            and all(c in "0123456789abcdef" for c in existing)):
+        return existing
+    return secrets.token_hex(8)
+
+
+def save_config(path, terminal_id: str, secret: str, *,
+                machine_key: str | None = None,
+                server_url: str | None = None,
+                site_origin: str | None = None) -> None:
+    """Write the config 0600 — it holds a write credential for the API.
+
+    The legacy two keys stay byte-compatible; the portable path additionally
+    stores machine_key/server_url/site_origin (each only when provided). The
+    invite is NEVER written here. load_config tolerates the extra keys' absence.
+    """
+    cfg = {"terminal_id": terminal_id, "secret": secret}
+    if machine_key is not None:
+        cfg["machine_key"] = machine_key
+    if server_url is not None:
+        cfg["server_url"] = server_url
+    if site_origin is not None:
+        cfg["site_origin"] = site_origin
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, json.dumps({"terminal_id": terminal_id,
-                                 "secret": secret}, indent=2).encode())
+        os.write(fd, json.dumps(cfg, indent=2).encode())
     finally:
         os.close(fd)
 
@@ -840,14 +890,16 @@ def default_pairing_file() -> Path:
         _PAIRING_FILE_ENV, os.path.join(data_dir, _PAIRING_FILE_NAME)))
 
 
-def save_pairing_file(path, terminal_id: str, code: str) -> None:
+def save_pairing_file(path, terminal_id: str, code: str, *,
+                      expires_at: float | None = None) -> None:
     """Write the one-click pairing offer 0600, ATOMICALLY.
 
     A browser click can land at any moment, so a partially-written file
     must never be observable: write a 0600 tempfile in the same directory
     and os.replace() it into place (replace preserves the temp's mode).
-    Exactly the two keys the server validates — no secret, no token, ever:
-    the offer file is a single-use code, not a credential store.
+    The legacy two keys stay byte-compatible; portable offers additionally
+    carry ``expires_at`` (Unix seconds) for restart-safe TTL checks. Never a
+    secret or token: the file is a single-use code, not a credential store.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)  # app.database does the same
@@ -855,8 +907,10 @@ def save_pairing_file(path, terminal_id: str, code: str) -> None:
                                 prefix=".scanner-pairing-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as out:  # mkstemp is 0600
-            out.write(json.dumps({"terminal_id": terminal_id,
-                                  "pairing_code": code}, indent=2))
+            offer = {"terminal_id": terminal_id, "pairing_code": code}
+            if expires_at is not None:
+                offer["expires_at"] = expires_at
+            out.write(json.dumps(offer, indent=2))
             out.flush()
             os.fsync(out.fileno())
         os.replace(tmp, path)
@@ -883,6 +937,371 @@ def load_pairing_file(path):
         return json.loads(Path(path).read_text())
     except (OSError, ValueError):
         return None
+
+
+# --- loopback popup agent (P2) -----------------------------------------------
+
+class NonceStore:
+    """Bounded, in-memory, single-use popup nonces (120 s maximum)."""
+
+    def __init__(self, *, ttl: float = 120.0, cap: int = 1024,
+                 clock=time.monotonic):
+        if not 0 < ttl <= 120:
+            raise ValueError("nonce TTL must be in (0, 120]")
+        self.ttl = float(ttl)
+        self.cap = cap
+        self.clock = clock
+        self._items: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def _prune(self, now: float, *, for_issue: bool = False) -> None:
+        expired = [nonce for nonce, deadline in self._items.items()
+                   if deadline <= now]
+        for nonce in expired:
+            self._items.pop(nonce, None)
+        if for_issue:
+            while len(self._items) >= self.cap:
+                oldest = min(self._items, key=self._items.get)
+                self._items.pop(oldest, None)
+
+    def issue(self) -> str:
+        with self._lock:
+            now = self.clock()
+            self._prune(now, for_issue=True)
+            nonce = secrets.token_urlsafe(16)
+            while nonce in self._items:
+                nonce = secrets.token_urlsafe(16)
+            self._items[nonce] = now + self.ttl
+            return nonce
+
+    def consume(self, nonce: str) -> bool:
+        with self._lock:
+            now = self.clock()
+            self._prune(now)
+            deadline = self._items.pop(nonce, None)
+            return deadline is not None and deadline > now
+
+
+class OfferStore:
+    """Memory-first pairing-code store with a TTL'd atomic file fallback."""
+
+    def __init__(self, path, terminal_id: str, *, clock=time.monotonic,
+                 wall_clock=time.time, ttl: float = 600.0):
+        self.path = Path(path)
+        self.terminal_id = terminal_id
+        self.clock = clock
+        self.wall_clock = wall_clock
+        self.ttl = ttl
+        self._code = None
+        self._expires = None
+        self._lock = threading.Lock()
+
+    def put(self, code: str) -> None:
+        if not isinstance(code, str) or len(code) != 8:
+            raise ValueError("invalid pairing code shape")
+        expires = self.clock() + self.ttl
+        expires_wall = self.wall_clock() + self.ttl
+        with self._lock:
+            # Persist first: a failed atomic write never advertises a memory-only
+            # offer that a restart could silently lose.
+            save_pairing_file(self.path, self.terminal_id, code,
+                              expires_at=expires_wall)
+            self._code, self._expires = code, expires
+
+    def get(self) -> str | None:
+        with self._lock:
+            if self._code is not None and self._expires > self.clock():
+                return self._code
+            offer = load_pairing_file(self.path)
+            if not isinstance(offer, dict):
+                return None
+            if offer.get("terminal_id") != self.terminal_id:
+                return None
+            code = offer.get("pairing_code")
+            if not isinstance(code, str) or len(code) != 8:
+                return None
+            expires = offer.get("expires_at")
+            if expires is not None:
+                try:
+                    expired = float(expires) <= self.wall_clock()
+                except (TypeError, ValueError):
+                    return None
+                if expired:
+                    return None
+            return code
+
+    def available(self) -> bool:
+        return self.get() is not None
+
+
+class _LocalThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+
+def _origin_of(url: str) -> str | None:
+    """Canonical scheme://host[:port] for exact Origin/Referer comparison."""
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return None
+        host = parts.hostname
+        if not host:
+            return None
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return None
+    default = 80 if parts.scheme == "http" else 443
+    netloc = host if port in (None, default) else f"{host}:{port}"
+    return f"{parts.scheme}://{netloc}"
+
+
+def _script_json(value) -> str:
+    """JSON safe to inline in a script element (not merely HTML-escape)."""
+    return (json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+            .replace("&", "\\u0026").replace("<", "\\u003c")
+            .replace(">", "\\u003e").replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
+
+
+class _AgentRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+        """Never put nonce-bearing URLs or offers into an access log."""
+
+    def do_GET(self):
+        self.server.agent._dispatch(self)
+
+
+def _device_not_configured():
+    """Mimo replaces this with Heartbeater.snapshot in main()."""
+    raise RuntimeError("Heartbeater is not configured")
+
+
+class LocalAgentServer:
+    """Loopback-only popup/status server with origin-pinned offers."""
+
+    def __init__(self, port: int, *, config: dict, offers: OfferStore,
+                 nonces: NonceStore, device, post, stop_event=None, log=_log):
+        self.requested_port = port
+        self.port = port
+        self.config = dict(config)
+        self.offers = offers
+        self.nonces = nonces
+        self.device = device
+        self.post = post
+        self.stop_event = stop_event or threading.Event()
+        self.log = log
+        self._http = None
+        self._thread = None
+
+    def start(self) -> bool:
+        try:
+            self._http = _LocalThreadingHTTPServer(
+                ("127.0.0.1", self.requested_port), _AgentRequestHandler)
+        except OSError as exc:
+            self.log(f"local popup port 127.0.0.1:{self.requested_port} "
+                     f"is already in use ({exc.strerror or exc}); continuing "
+                     "without local server (grab continues)")
+            self._http = None
+            return False
+        self.port = self._http.server_address[1]
+        self._http.agent = self
+        self._thread = threading.Thread(
+            target=self._http.serve_forever, name="scanner-local-http",
+            daemon=True)
+        self._thread.start()
+        return True
+
+    def close(self) -> None:
+        http, thread = self._http, self._thread
+        self._http = self._thread = None
+        if http is not None:
+            http.shutdown()
+            http.server_close()
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+    @staticmethod
+    def _send(handler, status: int, body: bytes, content_type: str,
+              *, close=False, extra_headers=None):
+        handler.send_response(status)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        if close:
+            handler.send_header("Connection", "close")
+            handler.close_connection = True
+        for name, value in (extra_headers or {}).items():
+            handler.send_header(name, value)
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    def _json(self, handler, status: int, payload: dict, *, close=False,
+              extra_headers=None):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self._send(handler, status, body, "application/json", close=close,
+                   extra_headers=extra_headers)
+
+    def _html(self, handler, status: int, html: str, *, nonce: str | None = None,
+              close=False):
+        headers = {"Referrer-Policy": "no-referrer"}
+        if nonce is not None:
+            headers["Content-Security-Policy"] = (
+                f"default-src 'none'; script-src 'nonce-{nonce}'; "
+                "connect-src 'self'; base-uri 'none'")
+        self._send(handler, status, html.encode(),
+                   "text/html; charset=utf-8", close=close,
+                   extra_headers=headers)
+
+    def _dispatch(self, handler) -> None:
+        # Guard order (R1/R2): peer -> Host -> route -> Origin -> nonce.
+        peer = handler.client_address[0]
+        if peer not in ("127.0.0.1", "::1"):
+            self._json(handler, 403, {"error": "loopback_only"}, close=True)
+            return
+        expected_hosts = {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
+        if handler.headers.get("Host", "").lower() not in expected_hosts:
+            self._json(handler, 403, {"error": "bad_host"}, close=True)
+            return
+        path = urlsplit(handler.path).path
+        if handler.command != "GET":
+            self._json(handler, 405, {"error": "method_not_allowed"},
+                       extra_headers={"Allow": "GET"})
+            return
+        if path == "/status":
+            self._status(handler)
+            return
+        if path == "/pair":
+            self._pair(handler)
+            return
+        self._json(handler, 404, {"error": "not_found"})
+
+    def _snapshot(self, handler):
+        try:
+            return self.device()
+        except (OSError, RuntimeError):
+            self._json(handler, 503, {"error": "device_unavailable"})
+            return None
+
+    def _status(self, handler) -> None:
+        device = self._snapshot(handler)
+        if device is None:
+            return
+        self._json(handler, 200, {
+            "ok": True,
+            "terminal_id": self.config.get("terminal_id"),
+            "server_url": self.config.get("server_url"),
+            "device": device,
+            "pairing_code_available": self.offers.available(),
+            "agent_version": "1",
+        })
+
+    def _origin_allowed(self, handler) -> bool:
+        expected = _origin_of(self.config.get("site_origin", ""))
+        if expected is None:
+            return False
+        origin = handler.headers.get("Origin")
+        if origin is not None:
+            return origin == expected
+        referer = handler.headers.get("Referer")
+        return bool(referer and _origin_of(referer) == expected)
+
+    def _pair(self, handler) -> None:
+        if not self._origin_allowed(handler):
+            self._html(handler, 403,
+                       "<!doctype html><p>Origin refused — open pairing "
+                       "from the configured site.</p>")
+            return
+        query = urlsplit(handler.path).query
+        params = dict(part.split("=", 1) if "=" in part else (part, "")
+                      for part in query.split("&") if part)
+        nonce = params.get("nonce")
+        if nonce is None:
+            fresh = self.nonces.issue()
+            self._send(handler, 307, b"", "text/plain; charset=utf-8",
+                       extra_headers={"Location": "/pair?" + urlencode({
+                           "nonce": fresh,
+                           "reclaim": params.get("reclaim", "0")})})
+            return
+        if not self.nonces.consume(nonce):
+            self._html(handler, 403,
+                       "<!doctype html><p>Pairing link expired or already "
+                       "used — press the pill again.</p>")
+            return
+        reclaim = params.get("reclaim", "0")
+        if reclaim not in ("0", "1"):
+            self._json(handler, 400, {"error": "bad_reclaim"})
+            return
+        device = self._snapshot(handler)
+        if device is None:
+            return
+        code = self.offers.get() if reclaim == "0" else self._reclaim_code()
+        reason = None if code else ("reclaim_failed" if reclaim == "1"
+                                    else "no_offer")
+        payload = {
+            "type": "hcrm.agent.offer",
+            "nonce": nonce,
+            "terminal_id": self.config.get("terminal_id"),
+            "pairing_code": code,
+            "status": {"device": device["status"],
+                       "personality": device["personality"],
+                       "node": device["node"]},
+            "reason": reason,
+        }
+        self._html(handler, 200, self._render_pair(payload), nonce=nonce)
+
+    def _reclaim_code(self) -> str | None:
+        terminal_id = self.config.get("terminal_id")
+        secret = self.config.get("secret")
+        base_url = self.config.get("server_url")
+        if not terminal_id or not secret or not base_url:
+            return None
+        if self.stop_event.is_set():
+            return None
+        try:
+            result = self.post(
+                base_url.rstrip("/") + "/api/scanner/terminals/"
+                + quote(terminal_id, safe="") + "/reclaim",
+                {"X-Scanner-Secret": secret}, {})
+            code = result["pairing_code"]
+            self.offers.put(code)
+            return code
+        except (PostError, OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _render_pair(self, payload: dict) -> str:
+        offer = _script_json(payload)
+        origin = _script_json(self.config.get("site_origin"))
+        nonce = payload["nonce"]
+        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{nonce}'; connect-src 'self'; base-uri 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Scanner pairing</title></head>
+<body><p id="message">Pair this laptop's scanner.</p><script nonce="{nonce}">
+"use strict"; const OFFER = {offer}; const SITE_ORIGIN = {origin};
+const message = document.getElementById("message");
+function closeWindow() {{ window.close(); }}
+if (!window.opener) {{
+  message.textContent = "Open this page from the site's scanner pill.";
+  closeWindow();
+}} else {{
+  window.opener.postMessage(OFFER, SITE_ORIGIN);
+  if (OFFER.reason === "no_offer") {{ message.textContent = "No offer is available."; closeWindow(); }}
+  else if (OFFER.reason === "reclaim_failed") {{ message.textContent = "Reclaim failed."; closeWindow(); }}
+  else {{
+    const deadline = setTimeout(closeWindow, 20000);
+    window.addEventListener("message", (event) => {{
+      if (event.source !== window.opener || event.origin !== SITE_ORIGIN) return;
+      const data = event.data;
+      if (!data || data.type !== "hcrm-paired" || data.nonce !== OFFER.nonce) return;
+      clearTimeout(deadline);
+      closeWindow();
+    }});
+  }}
+}}
+</script></body></html>"""
 
 
 def _is_foreign_identity(config, hostname) -> bool:
@@ -932,15 +1351,22 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def register_terminal(post, base_url: str, terminal_id: str, secret: str) -> str:
+def register_terminal(post, base_url: str, terminal_id: str, secret: str, *,
+                      invite: str | None = None,
+                      machine_key: str | None = None) -> str:
     """POST /api/scanner/terminals → the single-use pairing code.
 
     Raises PostError (409 already-registered etc.): main turns that into a
-    loud exit with the server's own recovery message.
+    loud exit with the server's own recovery message. invite/machine_key ride
+    the body only on the portable path; the legacy body is unchanged.
     """
-    body = post(base_url.rstrip("/") + "/api/scanner/terminals", {},
-                {"terminal_id": terminal_id, "secret": secret})
-    return body["pairing_code"]
+    body = {"terminal_id": terminal_id, "secret": secret}
+    if invite is not None:
+        body["invite"] = invite
+    if machine_key is not None:
+        body["machine_key"] = machine_key
+    resp = post(base_url.rstrip("/") + "/api/scanner/terminals", {}, body)
+    return resp["pairing_code"]
 
 
 REGISTER_RETRY_DELAY = 2.0
@@ -948,7 +1374,8 @@ REGISTER_RETRY_DELAY = 2.0
 
 def register_with_retry(post, base_url, terminal_id, secret, *,
                         wait=0.0, delay=REGISTER_RETRY_DELAY,
-                        clock=time.monotonic, sleep=time.sleep, log=_log):
+                        clock=time.monotonic, sleep=time.sleep, log=_log,
+                        invite=None, machine_key=None):
     """register_terminal with a bounded, transient-only retry budget.
 
     The deadline is monotonic and includes the time a failing POST spent, so
@@ -962,7 +1389,8 @@ def register_with_retry(post, base_url, terminal_id, secret, *,
     attempt = 1
     while True:
         try:
-            return register_terminal(post, base_url, terminal_id, secret)
+            return register_terminal(post, base_url, terminal_id, secret,
+                                     invite=invite, machine_key=machine_key)
         except PostError as exc:
             # isinstance FIRST: a non-integer status (legacy callers pass
             # strings) would make PostError.transient's ``status >= 500``
@@ -1001,6 +1429,21 @@ def default_config_file() -> Path:
     data_dir = os.environ.get(
         "HCRM_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data"))
     return Path(os.path.join(data_dir, "scanner.json"))
+
+
+def portable_config_file() -> Path:
+    """The PORTABLE config default (R6): $HCRM_SCANNER_CONFIG, else
+    $XDG_CONFIG_HOME/hcrm/scanner.json, else ~/.config/hcrm/scanner.json.
+
+    Only the new portable path (--register --invite) defaults here; the legacy
+    same-host flow keeps --config / default_config_file() (the repo data dir).
+    """
+    env = os.environ.get("HCRM_SCANNER_CONFIG")
+    if env:
+        return Path(env)
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "hcrm" / "scanner.json"
 
 
 def default_db_file() -> Path:
@@ -1476,7 +1919,14 @@ def _registration_recovery(exc: "PostError", terminal_id: str | None,
                     f"--register --forward {base}")
     pill = ("in the kiosk browser ON THIS HOST, click the 'no scanner' pill "
             "— that mints this host's read token")
-    if exc.status == 409 and "secret_in_use" in text:
+    if exc.status == 409 and "machine_key_in_use" in text:
+        steps = [diagnose,
+                 "this laptop's machine key is already registered to another "
+                 "terminal — press the pill again (the popup's reclaim reuses "
+                 "it automatically), or delete the stale registration — "
+                 f"VERIFY FIRST: {delete_cmd}",
+                 register_cmd]
+    elif exc.status == 409 and "secret_in_use" in text:
         steps = [diagnose,
                  "this config's secret belongs to ANOTHER terminal (a copied "
                  f"config) — move it aside: mv {config_path} {config_path}.old-host",
@@ -1529,6 +1979,173 @@ def _forward_events_url(base_url: str) -> str:
     return base_url.rstrip("/") + "/api/scanner/events"
 
 
+def _port_number(text: str) -> int:
+    try:
+        port = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be in 0..65535")
+    return port
+
+
+# --- heartbeat: honest device-state reporting (P2, R4) -----------------------
+
+_PERSONALITIES = {
+    (0x065A, 0xA001): "hid-a001",
+    (0x065A, 0xA002): "cdc-acm-a002",
+    (0x065A, 0x0009): "serial-0009",
+}
+
+
+def _personality_label(vid_pid: tuple[int, int]) -> str | None:
+    return _PERSONALITIES.get(tuple(vid_pid))
+
+
+def _device_probe(*, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
+                  sysfs_root: str | Path = _SYSFS_INPUT_CLASS,
+                  opener=None, ioctl=None, closer=None) -> dict:
+    """Honest device state: node exists+openable → present; node exists but
+    open/grab hits EACCES/EPERM → no-permission (NEVER absent); else absent.
+    Reuses probe_grab's transient (always-released) grab probe, so it never
+    steals the running daemon's grab — a held grab reads as present."""
+    node = discover_event_device(vid_pid, sysfs_root)
+    personality = _personality_label(vid_pid)
+    if node is None:
+        return {"status": "absent", "node": None, "personality": None}
+    result = probe_grab(node, opener=opener, ioctl=ioctl, closer=closer)
+    if result in ("free", "held"):
+        return {"status": "present", "node": node, "personality": personality}
+    if result == "no-permission":
+        return {"status": "no-permission", "node": node,
+                "personality": personality}
+    return {"status": "absent", "node": None, "personality": None}
+
+
+class Heartbeater:
+    """Background device-state heartbeat (P2, R4).
+
+    Owns the device state. The grab thread calls update() on transition; the
+    heartbeat thread's beat_once() refreshes from the probe and POSTs
+    {device_status, personality} with X-Scanner-Secret at start, on every state
+    change, and every interval. Never raises into the grab loop; no network
+    call under a lock; logs once per state change then stays quiet; a 401 logs
+    ONE actionable warning, stops heartbeating, and never exits the process.
+    """
+
+    def __init__(self, post, base_url, terminal_id, secret, *, interval=None,
+                 stop_event=None, clock=time.monotonic, sleep=time.sleep,
+                 probe=None, log=_log):
+        self.post = post
+        self.url = (base_url.rstrip("/")
+                    + f"/api/scanner/terminals/{terminal_id}/heartbeat")
+        self.terminal_id = terminal_id
+        self.secret = secret
+        if interval is None:
+            interval = os.environ.get("HCRM_SCANNER_HEARTBEAT_SECONDS", 30)
+        try:
+            self.interval = max(5, int(interval))
+        except (TypeError, ValueError):
+            self.interval = 30
+            log(f"heartbeat: invalid interval {interval!r} — using the "
+                f"default 30s")
+        self.stop_event = (stop_event if stop_event is not None
+                           else threading.Event())
+        self.clock = clock
+        self.sleep = sleep
+        self.probe = probe if probe is not None else _device_probe
+        self.log = log
+        self._lock = threading.Lock()
+        self._state = {"status": "absent", "node": None, "personality": None}
+        self._revoked = False
+        self._last_log_key = None
+        self._wake = threading.Event()
+        self._thread = None
+
+    def snapshot(self) -> dict:
+        """Thread-safe copy of the current device state (the popup reads it)."""
+        with self._lock:
+            return dict(self._state)
+
+    def update(self, status, node, personality=None) -> None:
+        """Grab-thread hook: set the state on transition and wake an immediate
+        beat. No network here (the beat runs on the heartbeat thread)."""
+        with self._lock:
+            changed = (self._state["status"] != status
+                       or self._state["node"] != node
+                       or self._state["personality"] != personality)
+            self._state = {"status": status, "node": node,
+                           "personality": personality}
+        if changed:
+            self._wake.set()
+
+    def beat_once(self) -> None:
+        """THE test seam: probe → store → POST. Swallows every failure."""
+        if self._revoked or self.stop_event.is_set():
+            return
+        try:
+            probed = self.probe()
+        except Exception:
+            probed = None
+        if isinstance(probed, dict):
+            with self._lock:
+                self._state = {"status": probed.get("status", "absent"),
+                               "node": probed.get("node"),
+                               "personality": probed.get("personality")}
+        with self._lock:
+            state = dict(self._state)
+        body = {"device_status": state["status"],
+                "personality": state["personality"]}
+        try:
+            self.post(self.url, {"X-Scanner-Secret": self.secret}, body)
+            self._last_log_key = None      # recovered: re-arm failure logging
+        except PostError as exc:
+            if exc.status == 401:
+                if not self._revoked:
+                    self._revoked = True
+                    self.log("heartbeat: the server rejected this terminal's "
+                             "secret (401) — identity revoked; scanning "
+                             "continues, heartbeating stopped. Recovery: "
+                             "re-register (--register) or DELETE + re-register.")
+                return
+            self._log_failure(state, str(exc))
+        except Exception as exc:
+            self._log_failure(state, str(exc))
+
+    def _log_failure(self, state, text) -> None:
+        key = (state["status"], text)
+        if key != self._last_log_key:
+            self._last_log_key = key
+            self.log(f"heartbeat: device {state['status']} — POST failed "
+                     f"({text}); retrying quietly")
+
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            self.beat_once()
+            deadline = self.clock() + self.interval
+            while not self.stop_event.is_set() and not self._wake.is_set():
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    break
+                self.sleep(min(0.5, remaining))
+            self._wake.clear()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run,
+                                        name="hcrm-heartbeat", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """stop_event.set + join(<=2s). Called from main's teardown, NEVER
+        from a request handler (R4)."""
+        self.stop_event.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join(2)
+
+
 def _nonnegative_seconds(text: str) -> float:
     """argparse type for --register-wait: a finite, non-negative float."""
     try:
@@ -1543,7 +2160,7 @@ def _nonnegative_seconds(text: str) -> float:
 def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
          closer=None, scan_reader=None, lock_path=None,
          sysfs_root=None, clock=None, db_path=None, http_get=None,
-         hostname=None) -> int:
+         hostname=None, device=None, machine_id_path="/etc/machine-id") -> int:
     """The daemon entrypoint (round 4, T5).
 
     Modes:
@@ -1634,7 +2251,32 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                              "and keep running). One-click offer-file drift "
                              "is reported but never fatal, gate or not. Also "
                              "HCRM_SCANNER_REQUIRE_HOST_IDENTITY=1")
+    parser.add_argument("--local-port", type=_port_number, default=None,
+                        help="serve the loopback popup on 127.0.0.1:PORT "
+                             "(0 = ephemeral; off unless this or --site-origin "
+                             "is given; portable default 47631)")
+    parser.add_argument("--site-origin", metavar="ORIGIN",
+                        help="site origin allowed to receive the popup offer "
+                             "(scheme://host[:port]); also enables portable "
+                             "popup serving")
+    parser.add_argument("--server", metavar="URL", default=None,
+                        help="portable registration/pairing/forward target "
+                             "(default: --forward); one base_url source of truth")
+    parser.add_argument("--invite", metavar="CODE", default=None,
+                        help="staff-minted registration invite (portable path); "
+                             "defaults the config to the XDG path; never logged")
+    parser.add_argument("--heartbeat-interval", metavar="SECONDS", default=None,
+                        help="device-state heartbeat interval (default "
+                             "$HCRM_SCANNER_HEARTBEAT_SECONDS or 30; minimum 5; "
+                             "a non-numeric value clamps to 30 with a warning)")
     args = parser.parse_args(argv)
+    if args.invite and not args.site_origin:
+        parser.error("--site-origin is required with --invite")
+    if args.site_origin and _origin_of(args.site_origin) is None:
+        parser.error("--site-origin must be scheme://host[:port]")
+    if args.invite and not args.server:
+        parser.error("--server is required with --invite")
+    base_url = args.server or args.forward
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep
     tick = clock if clock is not None else time.monotonic
@@ -1646,6 +2288,10 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
 
     previous = {}
     installed = []
+    stop_event = threading.Event()
+    local_server = None
+    offers = None
+    hb = None
     try:
         # Signals: raise _Stopped from anywhere (including a blocking read)
         # so the with-blocks unwind and the fd closes. Installed in BOTH
@@ -1685,15 +2331,18 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 print(line, flush=True)
             return code
 
+        if not args.config and args.invite:
+            args.config = str(portable_config_file())   # R6: XDG default, portable only
         if not args.config:
             parser.error("--config is required (or pass --dry-run / "
-                         "--find-scanner)")
+                         "--find-scanner / --register --invite)")
 
         terminal_hint = args.terminal_id
         with DaemonLock(lock_path):
             config = load_config(args.config)
             if config is None:
-                terminal_id = args.terminal_id or socket.gethostname()
+                terminal_id = args.terminal_id or (
+                    hostname if hostname is not None else socket.gethostname())
                 secret = secrets.token_urlsafe(32)
             else:
                 terminal_id, secret = config["terminal_id"], config["secret"]
@@ -1726,22 +2375,41 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                     _log(_REFUSE_HOST_IDENTITY)
                     return 1
             if args.register or config is None:
+                portable = args.invite is not None
+                machine_key = (derive_machine_key(
+                    config, machine_id_path=machine_id_path)
+                    if portable else None)
                 try:
                     code = register_with_retry(
-                        post_fn, args.forward, terminal_id, secret,
+                        post_fn, base_url, terminal_id, secret,
+                        invite=args.invite, machine_key=machine_key,
                         wait=args.register_wait, sleep=nap,
                         clock=tick, log=_log)
                 except (_Stopped, KeyboardInterrupt):
                     # Stopped while waiting out the retry budget: a clean
                     # exit (fd/grab untouched — registration precedes both).
                     return 0
-                save_config(args.config, terminal_id, secret)
+                if portable:
+                    # R3: the offer lives BESIDE the XDG config, never in the
+                    # repo data dir; OfferStore.put persists code+expiry atomically.
+                    save_config(args.config, terminal_id, secret,
+                                machine_key=machine_key, server_url=base_url,
+                                site_origin=_origin_of(args.site_origin))
+                    pairing_path = (Path(args.pairing_file) if args.pairing_file
+                                    else Path(args.config).with_name(
+                                        "scanner-pairing.json"))
+                else:
+                    save_config(args.config, terminal_id, secret)
+                    pairing_path = args.pairing_file or default_pairing_file()
                 # Write-then-announce, and FATAL on failure: with the code
                 # no longer printed by default, the offer file is its only
                 # copy — losing it silently would strand the registration.
-                pairing_path = args.pairing_file or default_pairing_file()
                 try:
-                    save_pairing_file(pairing_path, terminal_id, code)
+                    if portable:
+                        offers = OfferStore(pairing_path, terminal_id, clock=tick)
+                        offers.put(code)
+                    else:
+                        save_pairing_file(pairing_path, terminal_id, code)
                 except OSError as exc:
                     print(f"scanner_daemon: could not write the pairing "
                           f"file {pairing_path}: {exc}\n"
@@ -1762,9 +2430,58 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 _log("registration complete (--register-only) — not grabbing")
                 return 0
 
+            # R2: local serving is opt-in, so every legacy invocation stays off.
+            site_origin = (args.site_origin
+                           or (config or {}).get("site_origin"))
+            env_port = os.environ.get("HCRM_SCANNER_LOCAL_PORT")
+            local_port = (args.local_port if args.local_port is not None
+                          else _port_number(env_port) if env_port
+                          else 47631 if site_origin else None)
+            if local_port is not None:
+                runtime_config = dict(config or {})
+                runtime_config.update({
+                    "terminal_id": terminal_id,
+                    "secret": secret,
+                    "server_url": (getattr(args, "server", None)
+                                   or runtime_config.get("server_url")
+                                   or args.forward),
+                    "site_origin": (site_origin
+                                    or runtime_config.get("site_origin")),
+                })
+                if args.site_origin:
+                    offer_path = (Path(args.pairing_file) if args.pairing_file
+                                  else Path(args.config).with_name(
+                                      "scanner-pairing.json"))
+                else:
+                    offer_path = (Path(args.pairing_file) if args.pairing_file
+                                  else default_pairing_file())
+                # R4: the Heartbeater owns device state; the popup reads its
+                # snapshot. Started only on the portable path (this block is
+                # unreachable under --register-only/--find-scanner/--dry-run).
+                hb = Heartbeater(
+                    post_fn, runtime_config["server_url"], terminal_id, secret,
+                    interval=args.heartbeat_interval, stop_event=stop_event,
+                    clock=tick, sleep=nap,
+                    probe=lambda: _device_probe(
+                        sysfs_root=grab_kwargs.get("sysfs_root",
+                                                   _SYSFS_INPUT_CLASS),
+                        opener=opener, ioctl=ioctl, closer=closer),
+                    log=_log)
+                local_server = LocalAgentServer(
+                    local_port, config=runtime_config,
+                    offers=offers if offers is not None else OfferStore(
+                        offer_path, terminal_id, clock=tick),
+                    nonces=NonceStore(clock=tick),
+                    device=device or hb.snapshot,
+                    post=post_fn, stop_event=stop_event, log=_log)
+                hb.start()
+                grab_kwargs["on_state"] = hb.update
+                local_server.start()
+                grab_kwargs["stop"] = stop_event.is_set
+
             spool = Spool(args.spool or (str(args.config) + ".spool"),
                           log=_log)
-            forwarder = Forwarder(post_fn, _forward_events_url(args.forward),
+            forwarder = Forwarder(post_fn, _forward_events_url(base_url),
                                   secret, spool, log=_log)
             if spool.pending():
                 _log(f"replaying {len(spool.pending())} spooled scan(s)")
@@ -1773,6 +2490,12 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 run_loop(forwarder.handle, **grab_kwargs)
             except (_Stopped, KeyboardInterrupt):
                 pass
+            finally:
+                stop_event.set()
+                if hb is not None:
+                    hb.stop()          # R4: join(<=2) BEFORE server_close
+                if local_server is not None:
+                    local_server.close()
             forwarder.drain()  # best-effort: flush what a stop left behind
         return 0
     except GrabError as exc:
@@ -1794,7 +2517,7 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
         return 1
     except PostError as exc:
         for line in _registration_recovery(
-                exc, terminal_hint or socket.gethostname(), args.forward,
+                exc, terminal_hint or socket.gethostname(), base_url,
                 args.config):
             print(line, file=sys.stderr)
         return 1
