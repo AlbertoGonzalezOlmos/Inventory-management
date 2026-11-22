@@ -2153,6 +2153,7 @@ Vue.createApp({
       this._pairAttempt = null;    // {id, port, nonce, popup, offerUsed}
       this._pairWatchdog = null;
       this._pairSeq = 0;
+      this._pairPopupTried = false;   // did THIS click attempt the popup?
       this.scannerFeed = "unpaired";
       this.scannerDetail = null;
       this.pairPhase = "";
@@ -2184,6 +2185,7 @@ Vue.createApp({
             () => this._feedPoll(), HcrmScanFeed.POLL_INTERVAL_MS);
           break;
         case "stopPoll":
+          this._pairPopupTried = false;   // unpair: the next click starts clean
           this._endPairAttempt(false);   // unpair: watchdog off, popup closed
           if (this._feedTimer) {
             clearInterval(this._feedTimer);
@@ -2330,6 +2332,9 @@ Vue.createApp({
           } catch (_) { /* cross-origin focus can throw; harmless */ }
           return;
         }
+        // This click attempts the popup path: the popup owns the failure
+        // explanation even if the window dies before /pair/auto answers.
+        this._pairPopupTried = true;
         this._feedDispatch({ type: "popup", reclaim: 0 });
         return this.autoPair();
       }
@@ -2346,6 +2351,13 @@ Vue.createApp({
       if (this.pairBusy) return;   // the badgeLogin double-fire precedent
       this.pairBusy = true;
       const attempt = this._pairAttempt;   // the popup session of this click
+      // Consume the click's popup signal BEFORE the await: the popup path
+      // owns this click's failure explanation even when the window died
+      // immediately (blocked / refused / closed) — the reducer's detail
+      // and watchdog already reported no-agent / popup-blocked. Only a run
+      // with NO popup attempted keeps the legacy coded toast.
+      const popupTried = this._pairPopupTried;
+      this._pairPopupTried = false;
       try {
         const { status, data, code, vars } = await api("/scanner/pair/auto", {
           method: "POST", body: {}, raw: true,
@@ -2361,7 +2373,7 @@ Vue.createApp({
           this.pairOpen = false;
           this.showToast({ key: "scanner.paired_toast" });
           this._feedDispatch({ type: "paired", token: data.token });
-        } else if (!this._pairAttempt) {
+        } else if (!popupTried) {
           // Every pairing failure is coded (item 6), and the registry's row IS
           // the operator instruction — in the UI language. An uncoded response
           // (older server) keeps its own message, then our generic row.
@@ -2370,11 +2382,12 @@ Vue.createApp({
             ? this.errDescriptor({ status, detail, code, vars })
             : ((detail && detail.message) || this.t("scanner.pair_failed", { status })));
         }
-        // While the popup attempt is live its detail/watchdog reports the
-        // failure — a remote server has no offer file, and toasting that on
-        // every portable click would cry wolf over the working path.
+        // A popup was attempted for this click: its detail/watchdog owns
+        // the report (no-agent / popup-blocked) — a remote server's missing
+        // offer file is not the operator's problem, and a dead window must
+        // not resurrect the legacy toast.
       } catch (e) {
-        if (!this._pairAttempt) this.showToast(this.errDescriptor(e));
+        if (!popupTried) this.showToast(this.errDescriptor(e));
       } finally {
         this.pairBusy = false;
       }

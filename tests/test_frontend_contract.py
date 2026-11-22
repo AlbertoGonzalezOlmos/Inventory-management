@@ -1280,15 +1280,16 @@ def test_events_pass_the_agent_through():
 def test_same_host_auto_path_races_the_popup():
     """/pair/auto stays the same-host path, fired beside the synchronous
     popup; a late auto result never pairs or errors over a finished
-    session, and its failure toast is silent while the popup attempt is
-    live (a remote server has no offer file — that 404 is not the
-    operator's problem when the popup is the working path)."""
+    session, and its failure toast is silent whenever a popup was
+    attempted for the click — even if the window died before the response
+    (a remote server has no offer file — that 404 is not the operator's
+    problem when the popup is the working path)."""
     click = _method_body("onPillClick() {")
     assert "return this.autoPair();" in click
     auto = _method_body("async autoPair() {")
     assert "if (this._feedState.token) return;" in auto
     assert "if (attempt && this._pairAttempt !== attempt) return;" in auto
-    assert "} else if (!this._pairAttempt) {" in auto
+    assert "} else if (!popupTried) {" in auto
 
 
 def test_pair_failure_code_mapping_stays_in_the_enum():
@@ -1366,3 +1367,55 @@ def test_diagnosis_paths_stop_the_watchdog():
     assert tick.count("_feedDispatch") + tick.count("_pairFail") == 1, \
         "the tick has exactly one fire (the no-agent diagnosis)"
     assert "this._pairAttempt !== attempt" in tick
+
+
+def test_auto_failure_silent_when_popup_was_attempted():
+    """The popup path owns the click's failure explanation: onPillClick
+    marks the popup attempt BEFORE dispatching it, autoPair captures that
+    mark before the await, and the legacy failure toast (else branch AND
+    catch) gates on the captured mark — NOT on the attempt still being
+    alive. A popup that dies immediately (blocked at open / connection
+    refused / closed) clears the attempt, but the reducer's detail and
+    watchdog already reported popup-blocked / no-agent: the /pair/auto 401
+    must stay silent instead of toasting 'Unknown terminal or wrong
+    pairing code' over the popup's own diagnosis."""
+    click = _method_body("onPillClick() {")
+    assert "this._pairPopupTried = true;" in click
+    assert click.index("this._pairPopupTried = true;") \
+        < click.index('_feedDispatch({ type: "popup"'), \
+        "the mark must be set for the click that dispatches the popup"
+    auto = _method_body("async autoPair() {")
+    assert "const popupTried = this._pairPopupTried;" in auto
+    assert auto.index("const popupTried") < auto.index('api("/scanner/pair/auto"'), \
+        "the mark is captured BEFORE the await — a dead window cannot flip it"
+    assert "} else if (!popupTried) {" in auto, \
+        "the failure toast must gate on the captured mark, not attempt liveness"
+    assert "if (!popupTried) this.showToast(this.errDescriptor(e));" in auto
+    assert "} else if (!this._pairAttempt) {" not in auto, \
+        "the liveness-gated toast is the bug: a dead popup resurrected it"
+    assert "if (!this._pairAttempt) this.showToast" not in auto
+
+
+def test_auto_failure_toasts_when_no_popup_was_attempted():
+    """The legacy coded toast survives ONLY for a run where no popup was
+    attempted: the mark starts false (installScanFeed), is consumed by the
+    auto attempt that captures it, and is reset on unpair (the stopPoll
+    funnel every unpair passes through) — so a standalone /pair/auto run
+    still surfaces its coded error / scanner.pair_failed fallback."""
+    install = _method_body("installScanFeed() {")
+    assert "this._pairPopupTried = false;" in install
+    auto = _method_body("async autoPair() {")
+    assert "this._pairPopupTried = false;" in auto, \
+        "the auto attempt consumes the click's mark"
+    assert auto.index("const popupTried") \
+        < auto.index("this._pairPopupTried = false;"), \
+        "capture first, then consume — the run keeps its own signal"
+    feed = _method_body("_applyFeedEffect(effect) {")
+    stop = feed[feed.index('case "stopPoll":'):]
+    stop = stop[:stop.index('case "emitEvent":')]
+    assert "this._pairPopupTried = false;" in stop, \
+        "unpair resets the mark — the next click starts clean"
+    # The legacy toast body itself is intact inside the !popupTried branch.
+    branch = auto[auto.index("} else if (!popupTried) {"):]
+    assert "this.errDescriptor({ status, detail, code, vars })" in branch
+    assert 't("scanner.pair_failed", { status })' in branch
