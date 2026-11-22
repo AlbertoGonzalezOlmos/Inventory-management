@@ -1,0 +1,45 @@
+# HCRM scanner agent — systemd USER unit (P4: the portable laptop).
+#
+# Installed by scripts/laptop-install.sh (never by hand), which lays down:
+#   ~/.config/systemd/user/hcrm-scanner-agent.service  (this file, verbatim)
+#   ~/.config/hcrm/repo -> the checkout                (symlink, installer-managed)
+#   ~/.config/hcrm/agent.env                           (0600, installer-written)
+#   ~/.config/hcrm/scanner.json                        (written by --register)
+#
+# Why these settings:
+#   * USER unit, no root: the udev rule (scripts/udev/99-opticon-scanner.rules,
+#     GROUP=plugdev) makes the scanner nodes user-accessible; the logged-in
+#     user must be in plugdev (`id`). WantedBy=default.target starts it at
+#     login, and it dies with the session — a laptop agent, not a kiosk service.
+#   * python3, not uv: the daemon is stdlib-only and bootstraps its own
+#     sys.path from __file__, so the login environment needs no uv/venv.
+#     The repo symlink keeps this unit verbatim-installable from ANY checkout
+#     location (the installer points it at the repo root; re-runs refresh it).
+#   * EnvironmentFile is OPTIONAL (-): agent.env records the registration
+#     parameters — HCRM_SCANNER_SERVER / HCRM_SCANNER_SITE_ORIGIN, which the
+#     daemon reads back from the config --register wrote (one source of
+#     truth) — plus HCRM_SCANNER_HEARTBEAT_SECONDS, consumed directly.
+#   * Restart=on-failure + RestartSec=3: a crash comes back in seconds; a
+#     CLEAN exit (SIGTERM) stays down. During any gap the scanner reverts to
+#     keyboard-wedge into the focused window — the SPA's wedge capture is
+#     the fallback scan path, so a dead agent degrades, never breaks.
+#   * Wants=network-online.target WITHOUT After=: the daemon retries
+#     registration/heartbeat/forward on its own; ordering a user unit against
+#     the system network stack would only delay login.
+
+[Unit]
+Description=HCRM scanner agent (portable laptop, Opticon USB-HID)
+Documentation=file:%h/.config/hcrm/repo/docs/scanner-portable-design-2026-11-21.md
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/hcrm/agent.env
+ExecStart=/usr/bin/env python3 %h/.config/hcrm/repo/scripts/scanner_daemon.py --config %h/.config/hcrm/scanner.json --local-port 47631
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

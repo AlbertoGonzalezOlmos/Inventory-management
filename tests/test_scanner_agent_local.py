@@ -404,6 +404,11 @@ def test_main_site_origin_alone_starts_local_server(tmp_path, monkeypatch):
             return result
 
     monkeypatch.setattr(daemon, "LocalAgentServer", RecordingServer)
+    # The default-port path must not bind the REAL 47631: a live agent on
+    # this laptop legitimately holds it (the suite runs with no agent of
+    # its own). The documented env default keeps the flag semantics under
+    # test — site-origin ALONE enables serving — on an ephemeral port.
+    monkeypatch.setenv("HCRM_SCANNER_LOCAL_PORT", "0")
     code, _ = _run_main(tmp_path, monkeypatch,
                         extra=("--site-origin", SITE))
     assert code == 0 and started == [True]

@@ -316,6 +316,28 @@ import; `app/seed.py::backfill_embeddings()` repairs any NULL embedding at boot.
 - Connection, WSL2/`usbipd` passthrough, permissions and troubleshooting:
   **`docs/opticon-hardware.md`**.
 
+### Portable laptop install
+
+Plug the Opticon into **any laptop** and pair it with the shop in one click
+— no root daemon, no kiosk wiring (design:
+`docs/scanner-portable-design-2026-11-21.md`). Four commands:
+
+```bash
+git clone https://github.com/AlbertoGonzalezOlmos/Inventory-management.git
+cd Inventory-management
+./scripts/laptop-install.sh --server https://shop.example.com --invite INVITE_CODE
+journalctl --user -u hcrm-scanner-agent -f
+```
+
+`--invite` is a staff-minted single-use code (`POST /api/scanner/invites`);
+omit it on the shop's own laptop (loopback self-registration).
+`--site-origin` defaults to `--server`. The installer is idempotent and
+needs sudo **only** for the udev rule — everything else is `~/.config/hcrm`
+plus a systemd **user** unit (`WantedBy=default.target`, no root). After it
+finishes: re-plug the scanner, then click the **"no scanner" pill** in the
+shop browser — the loopback popup pairs and scans arrive. `--dry-run`
+prints every command and changes nothing; `--help` lists the flags.
+
 ### Barcode scanner (Opticon M-10)
 - **A plugged-in scanner that produces NOTHING at all?** Run
   `uv run python scripts/usb_host_check.py` **first** — a dead USB host
