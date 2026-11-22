@@ -600,7 +600,7 @@ def run_loop(on_scan, *, node=None, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
              opener=None, ioctl=None, closer=None,
              scan_reader=read_scans, on_unmapped=None,
              regrab_delay: float = 2.0, sleep=time.sleep,
-             stop=None, log=_log) -> None:
+             stop=None, log=_log, on_state=None) -> None:
     """The daemon's device lifecycle: discover → grab → decode → on_scan.
 
     On device loss (unplug, controller death, EOF) the loop closes
@@ -625,6 +625,8 @@ def run_loop(on_scan, *, node=None, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
         first = False
         if target is None:
             vid, pid = vid_pid
+            if on_state is not None:
+                on_state("absent", None, None)
             log(f"no {vid:04x}:{pid:04x} event device — retrying in "
                 f"{regrab_delay:g}s")
             sleep(regrab_delay)
@@ -635,8 +637,16 @@ def run_loop(on_scan, *, node=None, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
             with GrabbedDevice(target, vid_pid=vid_pid, sysfs_root=sysfs_root,
                                opener=opener, ioctl=ioctl, closer=closer) as dev:
                 log(f"grabbed {target}")
+                if on_state is not None:
+                    on_state("present", target, _personality_label(vid_pid))
                 _pump(dev, on_scan, scan_reader, on_unmapped)
+        except GrabPermissionError:
+            if on_state is not None:
+                on_state("no-permission", target, _personality_label(vid_pid))
+            raise
         except DeviceLostError as exc:
+            if on_state is not None:
+                on_state("absent", None, None)
             log(f"device lost ({exc}); re-discovering in {regrab_delay:g}s")
             sleep(regrab_delay)
             if stop is not None and stop():
@@ -1964,6 +1974,158 @@ def _port_number(text: str) -> int:
     return port
 
 
+# --- heartbeat: honest device-state reporting (P2, R4) -----------------------
+
+_PERSONALITIES = {
+    (0x065A, 0xA001): "hid-a001",
+    (0x065A, 0xA002): "cdc-acm-a002",
+    (0x065A, 0x0009): "serial-0009",
+}
+
+
+def _personality_label(vid_pid: tuple[int, int]) -> str | None:
+    return _PERSONALITIES.get(tuple(vid_pid))
+
+
+def _device_probe(*, vid_pid: tuple[int, int] = DEFAULT_VID_PID,
+                  sysfs_root: str | Path = _SYSFS_INPUT_CLASS,
+                  opener=None, ioctl=None, closer=None) -> dict:
+    """Honest device state: node exists+openable → present; node exists but
+    open/grab hits EACCES/EPERM → no-permission (NEVER absent); else absent.
+    Reuses probe_grab's transient (always-released) grab probe, so it never
+    steals the running daemon's grab — a held grab reads as present."""
+    node = discover_event_device(vid_pid, sysfs_root)
+    personality = _personality_label(vid_pid)
+    if node is None:
+        return {"status": "absent", "node": None, "personality": None}
+    result = probe_grab(node, opener=opener, ioctl=ioctl, closer=closer)
+    if result in ("free", "held"):
+        return {"status": "present", "node": node, "personality": personality}
+    if result == "no-permission":
+        return {"status": "no-permission", "node": node,
+                "personality": personality}
+    return {"status": "absent", "node": None, "personality": None}
+
+
+class Heartbeater:
+    """Background device-state heartbeat (P2, R4).
+
+    Owns the device state. The grab thread calls update() on transition; the
+    heartbeat thread's beat_once() refreshes from the probe and POSTs
+    {device_status, personality} with X-Scanner-Secret at start, on every state
+    change, and every interval. Never raises into the grab loop; no network
+    call under a lock; logs once per state change then stays quiet; a 401 logs
+    ONE actionable warning, stops heartbeating, and never exits the process.
+    """
+
+    def __init__(self, post, base_url, terminal_id, secret, *, interval=None,
+                 stop_event=None, clock=time.monotonic, sleep=time.sleep,
+                 probe=None, log=_log):
+        self.post = post
+        self.url = (base_url.rstrip("/")
+                    + f"/api/scanner/terminals/{terminal_id}/heartbeat")
+        self.terminal_id = terminal_id
+        self.secret = secret
+        if interval is None:
+            interval = os.environ.get("HCRM_SCANNER_HEARTBEAT_SECONDS", 30)
+        self.interval = max(5, int(interval))
+        self.stop_event = (stop_event if stop_event is not None
+                           else threading.Event())
+        self.clock = clock
+        self.sleep = sleep
+        self.probe = probe if probe is not None else _device_probe
+        self.log = log
+        self._lock = threading.Lock()
+        self._state = {"status": "absent", "node": None, "personality": None}
+        self._revoked = False
+        self._last_log_key = None
+        self._wake = threading.Event()
+        self._thread = None
+
+    def snapshot(self) -> dict:
+        """Thread-safe copy of the current device state (the popup reads it)."""
+        with self._lock:
+            return dict(self._state)
+
+    def update(self, status, node, personality=None) -> None:
+        """Grab-thread hook: set the state on transition and wake an immediate
+        beat. No network here (the beat runs on the heartbeat thread)."""
+        with self._lock:
+            changed = (self._state["status"] != status
+                       or self._state["node"] != node
+                       or self._state["personality"] != personality)
+            self._state = {"status": status, "node": node,
+                           "personality": personality}
+        if changed:
+            self._wake.set()
+
+    def beat_once(self) -> None:
+        """THE test seam: probe → store → POST. Swallows every failure."""
+        if self._revoked or self.stop_event.is_set():
+            return
+        try:
+            probed = self.probe()
+        except Exception:
+            probed = None
+        if isinstance(probed, dict):
+            with self._lock:
+                self._state = {"status": probed.get("status", "absent"),
+                               "node": probed.get("node"),
+                               "personality": probed.get("personality")}
+        with self._lock:
+            state = dict(self._state)
+        body = {"device_status": state["status"],
+                "personality": state["personality"]}
+        try:
+            self.post(self.url, {"X-Scanner-Secret": self.secret}, body)
+            self._last_log_key = None      # recovered: re-arm failure logging
+        except PostError as exc:
+            if exc.status == 401:
+                if not self._revoked:
+                    self._revoked = True
+                    self.log("heartbeat: the server rejected this terminal's "
+                             "secret (401) — identity revoked; scanning "
+                             "continues, heartbeating stopped. Recovery: "
+                             "re-register (--register) or DELETE + re-register.")
+                return
+            self._log_failure(state, str(exc))
+        except Exception as exc:
+            self._log_failure(state, str(exc))
+
+    def _log_failure(self, state, text) -> None:
+        key = (state["status"], text)
+        if key != self._last_log_key:
+            self._last_log_key = key
+            self.log(f"heartbeat: device {state['status']} — POST failed "
+                     f"({text}); retrying quietly")
+
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            self.beat_once()
+            deadline = self.clock() + self.interval
+            while not self.stop_event.is_set() and not self._wake.is_set():
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    break
+                self.sleep(min(0.5, remaining))
+            self._wake.clear()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run,
+                                        name="hcrm-heartbeat", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """stop_event.set + join(<=2s). Called from main's teardown, NEVER
+        from a request handler (R4)."""
+        self.stop_event.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join(2)
+
+
 def _nonnegative_seconds(text: str) -> float:
     """argparse type for --register-wait: a finite, non-negative float."""
     try:
@@ -2083,6 +2245,10 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
     parser.add_argument("--invite", metavar="CODE", default=None,
                         help="staff-minted registration invite (portable path); "
                              "defaults the config to the XDG path; never logged")
+    parser.add_argument("--heartbeat-interval", metavar="SECONDS", type=int,
+                        default=None,
+                        help="device-state heartbeat interval (default "
+                             "$HCRM_SCANNER_HEARTBEAT_SECONDS or 30; minimum 5)")
     args = parser.parse_args(argv)
     if args.invite and not args.site_origin:
         parser.error("--site-origin is required with --invite")
@@ -2103,6 +2269,7 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
     stop_event = threading.Event()
     local_server = None
     offers = None
+    hb = None
     try:
         # Signals: raise _Stopped from anywhere (including a blocking read)
         # so the with-blocks unwind and the fd closes. Installed in BOTH
@@ -2266,13 +2433,27 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 else:
                     offer_path = (Path(args.pairing_file) if args.pairing_file
                                   else default_pairing_file())
+                # R4: the Heartbeater owns device state; the popup reads its
+                # snapshot. Started only on the portable path (this block is
+                # unreachable under --register-only/--find-scanner/--dry-run).
+                hb = Heartbeater(
+                    post_fn, runtime_config["server_url"], terminal_id, secret,
+                    interval=args.heartbeat_interval, stop_event=stop_event,
+                    clock=tick, sleep=nap,
+                    probe=lambda: _device_probe(
+                        sysfs_root=grab_kwargs.get("sysfs_root",
+                                                   _SYSFS_INPUT_CLASS),
+                        opener=opener, ioctl=ioctl, closer=closer),
+                    log=_log)
                 local_server = LocalAgentServer(
                     local_port, config=runtime_config,
                     offers=offers if offers is not None else OfferStore(
                         offer_path, terminal_id, clock=tick),
                     nonces=NonceStore(clock=tick),
-                    device=device or _device_not_configured,
+                    device=device or hb.snapshot,
                     post=post_fn, stop_event=stop_event, log=_log)
+                hb.start()
+                grab_kwargs["on_state"] = hb.update
                 local_server.start()
                 grab_kwargs["stop"] = stop_event.is_set
 
@@ -2289,7 +2470,8 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 pass
             finally:
                 stop_event.set()
-                # mimo adds Heartbeater.join(2) here, before server_close.
+                if hb is not None:
+                    hb.stop()          # R4: join(<=2) BEFORE server_close
                 if local_server is not None:
                     local_server.close()
             forwarder.drain()  # best-effort: flush what a stop left behind
