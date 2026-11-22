@@ -356,6 +356,14 @@ def check_app_route(label: str, dom: str, console: list[str], liveness: str | No
     if count(r'data-scanner-feed="(?:live|off|unpaired)"', dom) < 1:
         failures.append(f"[{label}] data-scanner-feed pill missing — "
                         "the round-4 scan feed did not install")
+    # P3 (R7): a rendered failure detail must stay inside the closed R5
+    # enum — the adapter writes data-scanner-detail on the pill, and a
+    # typo'd or invented reason would silently miss its i18n row. Absent
+    # (null detail) is the healthy initial render and passes.
+    if count(r'data-scanner-detail="(?!(?:no-agent|no-device|no-permission|'
+             r'bound-elsewhere|register-denied|server-down|popup-blocked)")',
+             dom) != 0:
+        failures.append(f"[{label}] data-scanner-detail outside the R5 enum")
     if count(r'<button[^>]*class="[^"]*\bfeed-pill\b', dom) < 1:
         failures.append(f"[{label}] feed pill is not a button — it pairs "
                         "(unpaired) / manages the pairing (paired)")

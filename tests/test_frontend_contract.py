@@ -23,6 +23,7 @@ one arithmetic the whole design stands on:
   skipped untrusted events would disable the simulator.
 """
 
+import csv
 import re
 from pathlib import Path
 
@@ -1089,3 +1090,232 @@ def test_calendar_arrows_have_accessible_names():
     html = _read("index.html")
     assert ":aria-label=\"t('calendar.previous')\"" in html
     assert ":aria-label=\"t('calendar.next')\"" in html
+
+
+# --- P3 slice 3: the loopback agent popup adapter (R1/R2/R4/R5/R7) -----------
+# The reducer's DECISIONS are node-tested (tests/js/scanfeed.test.mjs) and
+# must not be re-tested here. These pins bind the app.js ADAPTER wiring a
+# DOM dump cannot see: the synchronous popup URL shape, the five R1 message
+# checks, the raw /pair form + token key, the same-window reclaim, the
+# watchdog, and the detail attribute / i18n parity.
+
+
+def test_popup_url_shape_and_nonce():
+    """R2: the SPA generates a 128-bit base64url nonce per attempt and the
+    popup URL is exactly http://127.0.0.1:<port>/pair?nonce=<N>&reclaim=0|1
+    — the nonce in the QUERY (the daemon parses urlsplit().query), never a
+    fragment, and no origin= parameter (the agent origin is pinned by R1,
+    not negotiated). The port is the 47631 constant with a window-level
+    override hook for tests/ops."""
+    app = _read("app.js")
+    assert "const SCANNER_AGENT_PORT = 47631;" in app
+    assert "window.HCRM_SCANNER_AGENT_PORT" in app, \
+        "the agent port needs its test/ops override hook"
+    assert ('"http://127.0.0.1:" + port + "/pair?nonce=" + nonce + "&reclaim=0"'
+            in app), "the fresh-attempt popup URL shape drifted"
+    assert '"/pair?nonce=" + attempt.nonce + "&reclaim=1"' in app, \
+        "the reclaim navigation must carry a NEW nonce and reclaim=1"
+    assert '"hcrm-scanner-" + attemptId' in app, \
+        "the popup window name must be per-attempt"
+    # 128-bit base64url nonce: 16 random bytes, URL-safe alphabet, unpadded.
+    assert "new Uint8Array(16)" in app
+    assert "crypto.getRandomValues(bytes)" in app
+    nonce_fn = app[app.index("function scannerPairNonce() {"):]
+    nonce_fn = nonce_fn[:nonce_fn.index("\n}")]
+    for step in ('.replace(/\\+/g, "-")', '.replace(/\\//g, "_")',
+                 '.replace(/=+$/, "")'):
+        assert step in nonce_fn, f"nonce is not base64url: missing {step}"
+    assert "#nonce=" not in app, "the nonce travels in the query, not a fragment"
+    assert "origin=" not in app, "no negotiated origin parameter (R1 pins it)"
+
+
+def test_open_is_synchronous_and_the_only_window_open():
+    """R4: window.open happens INSIDE the pill-click gesture, before any
+    await — and exactly once in the whole file. The reclaim navigates the
+    SAME WindowProxy via location.replace; a second window.open (especially
+    after the /pair await) would be popup-blocked."""
+    app = _read("app.js")
+    assert app.count("window.open(") == 1, \
+        "there must be exactly ONE window.open call site (the synchronous open)"
+    click = _method_body("onPillClick() {")
+    assert "await" not in click, "onPillClick must stay synchronous"
+    assert '_feedDispatch({ type: "popup", reclaim: 0 })' in click
+    assert click.index('_feedDispatch({ type: "popup"') < click.index("autoPair()"), \
+        "the popup dispatch (synchronous open) must precede the auto attempt"
+    exchange = _method_body("async _pairExchange(terminalId, code) {")
+    assert "window.open" not in exchange, \
+        "the post-await exchange must never open a window (R4)"
+    assert "attempt.popup.location.replace(" in _method_body("_applyFeedEffect(effect) {")
+
+
+def test_offer_origin_is_agent_not_shop():
+    """R1's five checks, all before any dispatch: the sender origin is the
+    AGENT's loopback origin (NOT location.origin — the shop), the source is
+    THIS attempt's WindowProxy, the type is hcrm.agent.offer, the nonce is
+    THIS attempt's, and the terminal/code shapes match the server's.
+    Anything else is ignored without a dispatch."""
+    handler = _method_body("_onScannerMessage(event) {")
+    assert "if (!attempt || attempt.offerUsed) return;" in handler, \
+        "no attempt (or a spent one) must ignore every message"
+    assert 'event.origin !== "http://127.0.0.1:" + attempt.port' in handler, \
+        "the origin comparison must be the AGENT origin (R1)"
+    assert "location.origin" not in handler, \
+        "comparing against the shop origin is the fatal R1 mistake"
+    assert "event.source !== attempt.popup" in handler
+    assert 'data.type !== "hcrm.agent.offer"' in handler
+    assert "data.nonce !== attempt.nonce" in handler
+    assert "/^[A-Za-z0-9._-]{1,64}$/.test(data.terminal_id)" in handler
+    # The code alphabet is the SERVER's, read from its source — no drift.
+    server = (REPO_ROOT / "app" / "routers" / "scanner.py").read_text(
+        encoding="utf-8")
+    alphabet = re.search(r'_PAIRING_ALPHABET = "([^"]+)"', server).group(1)
+    assert f"/^[{alphabet}]{{8}}$/.test(data.pairing_code)" in handler, \
+        "the pairing-code shape must be the server's alphabet, 8 chars"
+    dispatch = handler.index("_feedDispatch")
+    for check in ("event.origin", "event.source", "data.type", "data.nonce",
+                  "data.terminal_id", "data.pairing_code"):
+        assert handler.index(check) < dispatch, \
+            f"{check} must be validated BEFORE the offer dispatch"
+
+
+def test_pair_request_raw_form_token_key_and_release():
+    """The /pair exchange: raw:true (a pairing 401 is never a user-session
+    expiry), the token in the EXISTING terminal key, the existing paired
+    action (no immediate live), and the R3 release as a TARGETED
+    postMessage — never a wildcard receiver."""
+    app = _read("app.js")
+    exchange = _method_body("async _pairExchange(terminalId, code) {")
+    assert 'api("/scanner/pair"' in exchange
+    assert 'method: "POST", body: { terminal_id: terminalId, code }, raw: true,' \
+        in exchange
+    assert "localStorage.setItem(TERMINAL_TOKEN_KEY, data.token)" in exchange
+    assert '_feedDispatch({ type: "paired", token: data.token })' in exchange
+    assert "scannerFeed" not in exchange, \
+        "live is the first poll's verdict, never the pair response's"
+    end = _method_body("_endPairAttempt(release) {")
+    assert 'postMessage({ type: "hcrm-paired", nonce: attempt.nonce },' in end
+    assert '"http://127.0.0.1:" + attempt.port' in end, \
+        "the release targetOrigin is the agent origin"
+    assert not re.search(r'postMessage\([^)]*"\*"', app), \
+        "a wildcard postMessage targetOrigin would leak the release"
+    # paired funnels through startPoll, which releases + closes the popup.
+    assert "this._endPairAttempt(true);" in _method_body("_applyFeedEffect(effect) {")
+
+
+def test_409_reclaims_the_same_window_once():
+    """R4: the first /pair 409 dispatches reclaim (the reducer navigates the
+    SAME popup with a new nonce, once); a second 409 surfaces
+    bound-elsewhere. The one-reclaim CAP itself is the reducer's decision
+    (node-tested) — the adapter dispatches reclaim unconditionally."""
+    exchange = _method_body("async _pairExchange(terminalId, code) {")
+    assert "if (status === 409) {" in exchange
+    assert '_feedDispatch({ type: "reclaim" })' in exchange
+    assert 'key: "scanner.detail.bound_elsewhere"' in exchange, \
+        "the second 409 must surface the bound-elsewhere copy"
+    feed = _method_body("_applyFeedEffect(effect) {")
+    assert "if (effect.reclaim === 1) {" in feed
+    assert "attempt.popup.location.replace(" in feed
+    assert "attempt.nonce = scannerPairNonce();" in feed, \
+        "the reclaim navigation must use a NEW nonce"
+
+
+def test_watchdog_constants_ticks_and_cleanup():
+    """PAIR_WATCHDOG_MS=15000 with 250 ms ticks; closure-before-offer or a
+    silent deadline is no-agent; the timer dies on failure, unpair and
+    unmount, and the message gate is removed with it."""
+    app = _read("app.js")
+    assert "const PAIR_WATCHDOG_MS = 15000;" in app
+    assert "const PAIR_WATCHDOG_TICK_MS = 250;" in app
+    feed = _method_body("_applyFeedEffect(effect) {")
+    assert "Date.now() + PAIR_WATCHDOG_MS" in feed
+    assert "PAIR_WATCHDOG_TICK_MS);" in feed
+    tick = _method_body("_pairWatchdogTick(attempt, deadline) {")
+    assert "attempt.popup.closed || Date.now() >= deadline" in tick
+    assert '_pairFail("no-agent")' in tick
+    end = _method_body("_endPairAttempt(release) {")
+    assert "this._clearPairWatchdog();" in end
+    assert "attempt.popup.close();" in end
+    assert "this._endPairAttempt(false);" in feed, \
+        "closePopup and stopPoll (unpair) must end the attempt"
+    unmount = _method_body("unmounted() {")
+    assert 'window.removeEventListener("message", this._onAgentOffer)' in unmount
+    assert "this._endPairAttempt(false);" in unmount
+
+
+def test_detail_attribute_and_i18n_parity():
+    """R5/R7: the adapter renders data-scanner-detail on the pill (set AND
+    remove), and its reason->key switch covers EXACTLY the reducer's
+    DETAILS enum with literal scanner.detail.* rows present in en AND da."""
+    app = _read("app.js")
+    assert 'pill.setAttribute("data-scanner-detail", this.scannerDetail)' in app
+    assert 'pill.removeAttribute("data-scanner-detail")' in app
+    key_fn = _method_body("_scannerDetailKey(reason) {")
+    cases = re.findall(
+        r'case "([a-z-]+)": return "(scanner\.detail\.[a-z_]+)";', key_fn)
+    reducer = _read("scanfeed.js")
+    details = re.search(r"const DETAILS = Object\.freeze\(\[(.*?)\]\)",
+                        reducer, re.DOTALL).group(1)
+    expected = set(re.findall(r'"([a-z-]+)"', details))
+    assert {c for c, _ in cases} == expected, \
+        "the adapter's detail enum drifted from the reducer's DETAILS"
+    assert {k for _, k in cases} == {
+        "scanner.detail." + r.replace("-", "_") for r in expected}, \
+        "detail reasons must map to their underscore i18n keys"
+    with (REPO_ROOT / "i18n" / "strings.csv").open(encoding="utf-8") as f:
+        rows = {r[0]: r for r in csv.reader(f)}
+    for _, key in cases:
+        assert key in rows and rows[key][1].strip() and rows[key][2].strip(), \
+            f"{key} missing or untranslated in strings.csv"
+
+
+def test_events_pass_the_agent_through():
+    """R5's degraded rule needs the server's agent object VERBATIM in the
+    events action: undefined (old server) keeps the legacy live-on-success
+    behaviour; a present object gates live on online + present."""
+    poll = _method_body("async _feedPoll() {")
+    assert "agent: data.agent" in poll, \
+        "the poll must pass the server's agent object into the events action"
+
+
+def test_same_host_auto_path_races_the_popup():
+    """/pair/auto stays the same-host path, fired beside the synchronous
+    popup; a late auto result never pairs or errors over a finished
+    session, and its failure toast is silent while the popup attempt is
+    live (a remote server has no offer file — that 404 is not the
+    operator's problem when the popup is the working path)."""
+    click = _method_body("onPillClick() {")
+    assert "return this.autoPair();" in click
+    auto = _method_body("async autoPair() {")
+    assert "if (this._feedState.token) return;" in auto
+    assert "if (attempt && this._pairAttempt !== attempt) return;" in auto
+    assert "} else if (!this._pairAttempt) {" in auto
+
+
+def test_pair_failure_code_mapping_stays_in_the_enum():
+    """Coded /pair failures map onto the closed R5 enum (the 409 is the
+    reclaim action's job, never mapped here); an unusable offer names the
+    agent recovery, and the transport failure is server-down."""
+    app = _read("app.js")
+    fn = app[app.index("function pairDetailReason(status, code) {"):]
+    fn = fn[:fn.index("\n}")]
+    for code in ("already_paired", "machine_key_in_use", "secret_in_use"):
+        assert f'case "{code}":' in fn
+    for reason in ('return "bound-elsewhere";', 'return "register-denied";',
+                   'return "no-agent";', 'return "server-down";'):
+        assert reason in fn
+    assert 'case "bad_pairing":' in fn
+    exchange = _method_body("async _pairExchange(terminalId, code) {")
+    assert "reason: pairDetailReason(status, errCode)" in exchange
+    assert '_pairFail("server-down")' in exchange, \
+        "a /pair transport failure is server-down, not a silent hang"
+
+
+def test_pairing_channel_never_logs_payloads():
+    """The nonce, the pairing code and the token are secrets in transit:
+    no console call may appear in the pairing methods (the reducer's
+    no-payload-logging rule, adapter half)."""
+    for header in ("onPillClick() {", "_onScannerMessage(event) {",
+                   "async _pairExchange(terminalId, code) {",
+                   "_endPairAttempt(release) {", "async autoPair() {"):
+        assert "console." not in _method_body(header), \
+            f"{header} must not log pairing payloads"

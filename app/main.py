@@ -473,7 +473,12 @@ def apply_security_headers(response: Response, path: str) -> Response:
     """
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "same-origin"
+    # strict-origin, NOT same-origin (P3): the scanner pill opens the
+    # loopback agent's /pair popup cross-origin, and the daemon admits the
+    # navigation by its Referer ORIGIN (it sends no Origin header on a GET).
+    # same-origin strips the Referer entirely, so every popup would 403.
+    # strict-origin leaks only the origin, never the path or query.
+    response.headers["Referrer-Policy"] = "strict-origin"
     if "cache-control" not in response.headers:
         policy = _cache_control_for(path)
         if policy:

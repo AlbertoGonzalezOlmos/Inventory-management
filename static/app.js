@@ -24,6 +24,62 @@ const tGlobal = (id, vars) => HcrmI18n.translate(
 // node-tested in tests/js/). This file keeps only the staging cap.
 const STAGING_CAP = 50;
 
+// P3: the loopback scanner-agent popup (portable pairing). The port mirrors
+// scripts/scanner_daemon.py's HCRM_SCANNER_LOCAL_PORT default; a deployment
+// that moves the agent sets window.HCRM_SCANNER_AGENT_PORT before app.js
+// loads (the test/ops override hook — the SPA cannot read the daemon's
+// config, and a loopback fetch would die on the page CSP's connect-src).
+const SCANNER_AGENT_PORT = 47631;
+const PAIR_WATCHDOG_MS = 15000;      // no offer by the deadline => no-agent
+const PAIR_WATCHDOG_TICK_MS = 250;
+
+function scannerAgentPort() {
+  const override = Number(window.HCRM_SCANNER_AGENT_PORT);
+  return Number.isInteger(override) && override > 0 && override < 65536
+    ? override : SCANNER_AGENT_PORT;
+}
+
+/** A fresh 128-bit base64url nonce per popup attempt (R2): 16 random bytes,
+ * URL-safe alphabet, no padding. The agent echoes it in the offer and in
+ * the hcrm-paired release, so a stale or foreign offer can never match.
+ * Never logged, never stored. */
+function scannerPairNonce() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Map a coded /pair failure onto the closed R5 detail enum. The 409 is
+ * handled by the reclaim action BEFORE this is consulted (the reducer caps
+ * it at one attempt per session); the register-family codes are defensive
+ * (the SPA never registers). An unusable offer (bad_pairing: unknown
+ * terminal, spent or expired code) means the agent needs a fresh
+ * --register — the no-agent row's recovery — while the coded toast carries
+ * the exact cause. */
+function pairDetailReason(status, code) {
+  switch (code) {
+    case "already_paired":
+    case "machine_key_in_use":
+    case "secret_in_use":
+    case "terminal_already_registered":
+      return "bound-elsewhere";
+    case "bad_invite":
+    case "invite_limit":
+    case "invite_staff_only":
+    case "register_loopback_only":
+    case "register_rate_limited":
+      return "register-denied";
+    case "bad_pairing":
+      return "no-agent";
+    default:
+      if (status === 403 || status === 429) return "register-denied";
+      if (status === 409) return "bound-elsewhere";
+      return "server-down";
+  }
+}
+
 /** Build the thrown Error for a non-2xx JSON response (item 6).
  *
  * `X-Error-Code` is the server's stable copy key and `X-Error-Vars` the values
@@ -266,6 +322,11 @@ Vue.createApp({
       // wedge capture above stays installed in EVERY mode — it is the
       // fallback whenever no daemon holds the grab.
       scannerFeed: "unpaired",
+      // P3: the R5 failure detail (null or the closed enum), rendered as
+      // data-scanner-detail on the pill, and the popup phase ("" | pairing
+      // | reclaim) for the pill's title while an attempt is live.
+      scannerDetail: null,
+      pairPhase: "",
       pairOpen: false,      // the header pill's PAIRED-state popover
       pairBusy: false,      // the one-click pair in flight (a JS guard,
                             // deliberately NOT :disabled — disabling the
@@ -381,9 +442,19 @@ Vue.createApp({
       return this.t("scanner.label.unpaired");
     },
     scannerTitle() {
+      // A failure detail IS the operator instruction — it outranks the
+      // mode title; a live popup attempt says what it is doing.
+      const detail = this.scannerDetailText;
+      if (detail) return detail;
+      if (this.pairPhase === "reclaim") return this.t("scanner.reclaim");
+      if (this.pairPhase === "pairing") return this.t("scanner.pairing");
       if (this.scannerFeed === "live") return this.t("scanner.title.live");
       if (this.scannerFeed === "off") return this.t("scanner.title.off");
       return this.t("scanner.title.unpaired");
+    },
+    scannerDetailText() {
+      const key = this._scannerDetailKey(this.scannerDetail);
+      return key ? this.t(key) : "";
     },
     pairSummary() {
       if (this.scannerFeed === "off") return this.t("scanner.paired_offline");
@@ -2079,7 +2150,18 @@ Vue.createApp({
       this._feedState = HcrmScanFeed.initialFeedState();
       this._feedTimer = null;
       this._feedBusy = false;
+      this._pairAttempt = null;    // {id, port, nonce, popup, offerUsed}
+      this._pairWatchdog = null;
+      this._pairSeq = 0;
       this.scannerFeed = "unpaired";
+      this.scannerDetail = null;
+      this.pairPhase = "";
+      if (!this._onAgentOffer) {
+        // ONE message listener for the popup channel; every validation
+        // (R1: agent origin, source, type, nonce, shapes) lives inside.
+        this._onAgentOffer = (event) => this._onScannerMessage(event);
+        window.addEventListener("message", this._onAgentOffer);
+      }
       const token = localStorage.getItem(TERMINAL_TOKEN_KEY);
       if (token) this._feedDispatch({ type: "paired", token });
     },
@@ -2093,12 +2175,16 @@ Vue.createApp({
     _applyFeedEffect(effect) {
       switch (effect.type) {
         case "startPoll":
+          // Paired: release the offer window (R3) and close it, watchdog
+          // off — covers BOTH the popup's /pair and the same-host /pair/auto.
+          this._endPairAttempt(true);
           if (this._feedTimer) break;   // idempotent: re-pair never stacks timers
           this._feedPoll();            // immediate first poll, then paced
           this._feedTimer = setInterval(
             () => this._feedPoll(), HcrmScanFeed.POLL_INTERVAL_MS);
           break;
         case "stopPoll":
+          this._endPairAttempt(false);   // unpair: watchdog off, popup closed
           if (this._feedTimer) {
             clearInterval(this._feedTimer);
             this._feedTimer = null;
@@ -2125,6 +2211,74 @@ Vue.createApp({
             this.pairOpen = false;
           }
           break;
+        case "setDetail":
+          this.scannerDetail = effect.reason;
+          this._renderScannerDetail();
+          break;
+        case "openPopup": {
+          // SYNCHRONOUS window.open inside the pill-click gesture — a
+          // popup opened after an await is blocked (R4). reclaim=1
+          // navigates the SAME window; the fresh-open call below is the
+          // ONLY one in this file.
+          if (effect.reclaim === 1) {
+            const attempt = this._pairAttempt;
+            if (!attempt) { this._pairFail("popup-blocked"); break; }
+            attempt.nonce = scannerPairNonce();   // R4: a NEW nonce
+            attempt.offerUsed = false;
+            this.pairPhase = "reclaim";
+            try {
+              if (attempt.popup.closed) throw new Error("popup closed");
+              // replace() on the POPUP (cross-origin-safe): the spent
+              // nonce URL must not linger in its history. The SPA page
+              // itself is never navigated.
+              attempt.popup.location.replace("http://127.0.0.1:" + attempt.port
+                + "/pair?nonce=" + attempt.nonce + "&reclaim=1");
+            } catch (_) {
+              // The retry navigation needs a live window; without one the
+              // operator must click the pill again (a fresh gesture).
+              this._pairFail("popup-blocked");
+            }
+            break;
+          }
+          const port = scannerAgentPort();
+          const nonce = scannerPairNonce();
+          const attemptId = (this._pairSeq = (this._pairSeq || 0) + 1);
+          let popup = null;
+          try {
+            popup = window.open(
+              "http://127.0.0.1:" + port + "/pair?nonce=" + nonce + "&reclaim=0",
+              "hcrm-scanner-" + attemptId);
+          } catch (_) { popup = null; }
+          if (!popup) {
+            this._pairFail("popup-blocked");
+            break;
+          }
+          this._pairAttempt = { id: attemptId, port, nonce, popup,
+                                offerUsed: false };
+          this.pairPhase = "pairing";
+          break;
+        }
+        case "closePopup":
+          this._endPairAttempt(false);
+          break;
+        case "armWatchdog": {
+          this._clearPairWatchdog();
+          const attempt = this._pairAttempt;
+          // No attempt => the open already failed and its nested pairFailed
+          // ran; arming here would outlive the failure's clearWatchdog.
+          if (!attempt) break;
+          const deadline = Date.now() + PAIR_WATCHDOG_MS;
+          this._pairWatchdog = setInterval(
+            () => this._pairWatchdogTick(attempt, deadline),
+            PAIR_WATCHDOG_TICK_MS);
+          break;
+        }
+        case "clearWatchdog":
+          this._clearPairWatchdog();
+          break;
+        case "pairRequest":
+          this._pairExchange(effect.terminal_id, effect.code);
+          break;
       }
     },
 
@@ -2143,9 +2297,13 @@ Vue.createApp({
           return;
         }
         if (status === 200 && data) {
+          // agent passes through VERBATIM: undefined (old server) keeps
+          // the reducer's legacy rule; a present object gates live on
+          // online + device_status === "present" (R5).
           this._feedDispatch({ type: "events",
                                events: data.events || [],
-                               latest_seq: data.latest_seq || 0 });
+                               latest_seq: data.latest_seq || 0,
+                               agent: data.agent });
           return;
         }
         this._feedDispatch({ type: "pollError" });
@@ -2157,10 +2315,24 @@ Vue.createApp({
     },
 
     onPillClick() {
-      // The pill is a one-click PAIR BUTTON when unpaired (the server
-      // reads the offer file the daemon wrote — no code to type), and a
-      // disclosure toggle for the paired-state popover otherwise.
-      if (this.scannerFeed === "unpaired") return this.autoPair();
+      // The pill is a one-click PAIR BUTTON when unpaired: the loopback
+      // agent popup opens SYNCHRONOUSLY in this gesture (the reducer's
+      // openPopup effect — nothing async may precede it), and the same-host
+      // offer-file path (/pair/auto) runs beside it: whichever pairs first
+      // wins, a late auto result is dropped. Paired, the click is the
+      // disclosure toggle for the popover.
+      if (this.scannerFeed === "unpaired") {
+        if (this._pairAttempt) {
+          // A second click while the popup is live just surfaces it —
+          // never a second window (the JS double-click guard).
+          try {
+            if (!this._pairAttempt.popup.closed) this._pairAttempt.popup.focus();
+          } catch (_) { /* cross-origin focus can throw; harmless */ }
+          return;
+        }
+        this._feedDispatch({ type: "popup", reclaim: 0 });
+        return this.autoPair();
+      }
       this.pairOpen = !this.pairOpen;
     },
 
@@ -2173,10 +2345,15 @@ Vue.createApp({
       // requires.
       if (this.pairBusy) return;   // the badgeLogin double-fire precedent
       this.pairBusy = true;
+      const attempt = this._pairAttempt;   // the popup session of this click
       try {
         const { status, data, code, vars } = await api("/scanner/pair/auto", {
           method: "POST", body: {}, raw: true,
         });
+        // A late result never pairs over a finished session: the popup's
+        // /pair may already have minted the token (or the attempt died).
+        if (this._feedState.token) return;
+        if (attempt && this._pairAttempt !== attempt) return;
         if (status === 200 && data && data.token) {
           localStorage.setItem(TERMINAL_TOKEN_KEY, data.token);
           // The pill flipping to live/off IS the success feedback; say it
@@ -2184,7 +2361,7 @@ Vue.createApp({
           this.pairOpen = false;
           this.showToast({ key: "scanner.paired_toast" });
           this._feedDispatch({ type: "paired", token: data.token });
-        } else {
+        } else if (!this._pairAttempt) {
           // Every pairing failure is coded (item 6), and the registry's row IS
           // the operator instruction — in the UI language. An uncoded response
           // (older server) keeps its own message, then our generic row.
@@ -2193,8 +2370,11 @@ Vue.createApp({
             ? this.errDescriptor({ status, detail, code, vars })
             : ((detail && detail.message) || this.t("scanner.pair_failed", { status })));
         }
+        // While the popup attempt is live its detail/watchdog reports the
+        // failure — a remote server has no offer file, and toasting that on
+        // every portable click would cry wolf over the working path.
       } catch (e) {
-        this.showToast(this.errDescriptor(e));
+        if (!this._pairAttempt) this.showToast(this.errDescriptor(e));
       } finally {
         this.pairBusy = false;
       }
@@ -2208,6 +2388,142 @@ Vue.createApp({
       // loop is Unpair → DELETE + --register → click the pill.
       this.pairOpen = false;
       this.showToast({ key: "scanner.unpaired_toast" });
+    },
+
+    /* ---------- P3: the loopback agent popup (portable pairing) ----------
+     * The reducer decides; these own the window, the R1 message gate, the
+     * watchdog and the /pair exchange. Nothing here logs or stores the
+     * nonce, the pairing code or the token beyond the existing key. */
+
+    _scannerDetailKey(reason) {
+      // Literal keys only (the CSV-reference rule): the R5 detail enum ->
+      // its scanner.detail.* row. Kept in lockstep with scanfeed.js's
+      // DETAILS by the contract suite.
+      switch (reason) {
+        case "no-agent": return "scanner.detail.no_agent";
+        case "no-device": return "scanner.detail.no_device";
+        case "no-permission": return "scanner.detail.no_permission";
+        case "bound-elsewhere": return "scanner.detail.bound_elsewhere";
+        case "register-denied": return "scanner.detail.register_denied";
+        case "server-down": return "scanner.detail.server_down";
+        case "popup-blocked": return "scanner.detail.popup_blocked";
+        default: return null;
+      }
+    },
+
+    _onScannerMessage(event) {
+      // R1: the sender is the AGENT (loopback), never the shop —
+      // comparing against the shop's own origin here is the fatal mistake.
+      // Every check must pass; everything else is ignored silently.
+      const attempt = this._pairAttempt;
+      if (!attempt || attempt.offerUsed) return;
+      if (event.origin !== "http://127.0.0.1:" + attempt.port) return;
+      if (event.source !== attempt.popup) return;
+      const data = event.data;
+      if (!data || typeof data !== "object"
+          || data.type !== "hcrm.agent.offer") return;
+      if (data.nonce !== attempt.nonce) return;
+      if (typeof data.terminal_id !== "string"
+          || !/^[A-Za-z0-9._-]{1,64}$/.test(data.terminal_id)) return;
+      if (typeof data.pairing_code !== "string"
+          || !/^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{8}$/.test(data.pairing_code)) return;
+      attempt.offerUsed = true;   // one offer per attempt (single-use code)
+      this._feedDispatch({ type: "offer", nonce: data.nonce,
+                           terminal_id: data.terminal_id,
+                           code: data.pairing_code });
+    },
+
+    async _pairExchange(terminalId, code) {
+      const attempt = this._pairAttempt;
+      let res;
+      try {
+        // raw: true — a pairing 401 is a stale offer, never a user-session
+        // expiry (the autoPair precedent). No popup is opened here: this
+        // runs after an await, where a new window would be blocked (R4).
+        res = await api("/scanner/pair", {
+          method: "POST", body: { terminal_id: terminalId, code }, raw: true,
+        });
+      } catch (_) {
+        // Transport failure: the shop server is unreachable.
+        if (this._pairAttempt === attempt) this._pairFail("server-down");
+        return;
+      }
+      if (this._pairAttempt !== attempt) return;   // session ended in flight
+      const { status, data, code: errCode, vars } = res;
+      if (status === 200 && data && data.token) {
+        localStorage.setItem(TERMINAL_TOKEN_KEY, data.token);
+        // paired => startPoll releases the popup (R3) and starts the feed;
+        // live itself is deferred to the first successful poll.
+        this._feedDispatch({ type: "paired", token: data.token });
+        return;
+      }
+      if (status === 409) {
+        // R4: the reducer caps reclaim at one per session — a second 409
+        // becomes pairFailed(bound-elsewhere) inside the reclaim action.
+        const second = this._feedState.reclaimUsed;
+        this._feedDispatch({ type: "reclaim" });
+        if (second) this.showToast({ key: "scanner.detail.bound_elsewhere" });
+        return;
+      }
+      this._feedDispatch({ type: "pairFailed",
+                           reason: pairDetailReason(status, errCode) });
+      const detail = data && data.detail;
+      this.showToast(errCode
+        ? this.errDescriptor({ status, detail, code: errCode, vars })
+        : ((detail && detail.message) || this.t("scanner.pair_failed", { status })));
+    },
+
+    _pairWatchdogTick(attempt, deadline) {
+      if (this._pairAttempt !== attempt) { this._clearPairWatchdog(); return; }
+      // Closed before any offer, or silent past the deadline: no agent
+      // answered. (After a valid offer the reducer has cleared this timer;
+      // /pair keeps running even if the window closes.)
+      if (attempt.popup.closed || Date.now() >= deadline) {
+        this._pairFail("no-agent");
+      }
+    },
+
+    _clearPairWatchdog() {
+      if (this._pairWatchdog) {
+        clearInterval(this._pairWatchdog);
+        this._pairWatchdog = null;
+      }
+    },
+
+    _endPairAttempt(release) {
+      this._clearPairWatchdog();
+      this.pairPhase = "";
+      const attempt = this._pairAttempt;
+      this._pairAttempt = null;
+      if (!attempt) return;
+      if (release) {
+        // R3: tell the agent page we paired so it stops waiting. The
+        // targetOrigin is the AGENT's origin, never "*"; the page checks
+        // the sender against its configured site origin in turn.
+        try {
+          attempt.popup.postMessage({ type: "hcrm-paired", nonce: attempt.nonce },
+            "http://127.0.0.1:" + attempt.port);
+        } catch (_) { /* already gone */ }
+      }
+      try { attempt.popup.close(); } catch (_) { /* already gone */ }
+    },
+
+    _pairFail(reason) {
+      this._feedDispatch({ type: "pairFailed", reason });
+      const key = this._scannerDetailKey(reason);
+      if (key) this.showToast({ key });
+    },
+
+    _renderScannerDetail() {
+      // The attribute lives on the pill (the markup is unchanged); Vue
+      // never bound it, so a re-render cannot clobber it. null removes it.
+      const pill = document.querySelector(".feed-pill");
+      if (!pill) return;
+      if (this.scannerDetail) {
+        pill.setAttribute("data-scanner-detail", this.scannerDetail);
+      } else {
+        pill.removeAttribute("data-scanner-detail");
+      }
     },
 
     /* ---------- kiosk logoff countdown (Task 4's server deadline) ---------- */
@@ -3104,5 +3420,16 @@ Vue.createApp({
       }
     });
     this.$nextTick(() => this.observeSentinel());
+  },
+
+  unmounted() {
+    // Teardown symmetry for installScanFeed: the message gate, the pair
+    // watchdog and the poll timer never outlive the component.
+    if (this._onAgentOffer) {
+      window.removeEventListener("message", this._onAgentOffer);
+      this._onAgentOffer = null;
+    }
+    this._endPairAttempt(false);
+    if (this._feedTimer) { clearInterval(this._feedTimer); this._feedTimer = null; }
   },
 }).mount("#app");
