@@ -93,8 +93,11 @@ import sqlite3
 import struct
 import sys
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote, urlencode, urlsplit
 
 # Allow `python scripts/scanner_daemon.py` from anywhere (the
 # scanner_bridge bootstrap pattern): the repo root makes `scripts.*` and
@@ -840,14 +843,16 @@ def default_pairing_file() -> Path:
         _PAIRING_FILE_ENV, os.path.join(data_dir, _PAIRING_FILE_NAME)))
 
 
-def save_pairing_file(path, terminal_id: str, code: str) -> None:
+def save_pairing_file(path, terminal_id: str, code: str, *,
+                      expires_at: float | None = None) -> None:
     """Write the one-click pairing offer 0600, ATOMICALLY.
 
     A browser click can land at any moment, so a partially-written file
     must never be observable: write a 0600 tempfile in the same directory
     and os.replace() it into place (replace preserves the temp's mode).
-    Exactly the two keys the server validates — no secret, no token, ever:
-    the offer file is a single-use code, not a credential store.
+    The legacy two keys stay byte-compatible; portable offers additionally
+    carry ``expires_at`` (Unix seconds) for restart-safe TTL checks. Never a
+    secret or token: the file is a single-use code, not a credential store.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)  # app.database does the same
@@ -855,8 +860,10 @@ def save_pairing_file(path, terminal_id: str, code: str) -> None:
                                 prefix=".scanner-pairing-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as out:  # mkstemp is 0600
-            out.write(json.dumps({"terminal_id": terminal_id,
-                                  "pairing_code": code}, indent=2))
+            offer = {"terminal_id": terminal_id, "pairing_code": code}
+            if expires_at is not None:
+                offer["expires_at"] = expires_at
+            out.write(json.dumps(offer, indent=2))
             out.flush()
             os.fsync(out.fileno())
         os.replace(tmp, path)
@@ -883,6 +890,356 @@ def load_pairing_file(path):
         return json.loads(Path(path).read_text())
     except (OSError, ValueError):
         return None
+
+
+# --- loopback popup agent (P2) -----------------------------------------------
+
+class NonceStore:
+    """Bounded, in-memory, single-use popup nonces (120 s maximum)."""
+
+    def __init__(self, *, ttl: float = 120.0, cap: int = 1024,
+                 clock=time.monotonic):
+        if not 0 < ttl <= 120:
+            raise ValueError("nonce TTL must be in (0, 120]")
+        self.ttl = float(ttl)
+        self.cap = cap
+        self.clock = clock
+        self._items: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def _prune(self, now: float, *, for_issue: bool = False) -> None:
+        expired = [nonce for nonce, deadline in self._items.items()
+                   if deadline <= now]
+        for nonce in expired:
+            self._items.pop(nonce, None)
+        if for_issue:
+            while len(self._items) >= self.cap:
+                oldest = min(self._items, key=self._items.get)
+                self._items.pop(oldest, None)
+
+    def issue(self) -> str:
+        with self._lock:
+            now = self.clock()
+            self._prune(now, for_issue=True)
+            nonce = secrets.token_urlsafe(16)
+            while nonce in self._items:
+                nonce = secrets.token_urlsafe(16)
+            self._items[nonce] = now + self.ttl
+            return nonce
+
+    def consume(self, nonce: str) -> bool:
+        with self._lock:
+            now = self.clock()
+            self._prune(now)
+            deadline = self._items.pop(nonce, None)
+            return deadline is not None and deadline > now
+
+
+class OfferStore:
+    """Memory-first pairing-code store with a TTL'd atomic file fallback."""
+
+    def __init__(self, path, terminal_id: str, *, clock=time.monotonic,
+                 wall_clock=time.time, ttl: float = 600.0):
+        self.path = Path(path)
+        self.terminal_id = terminal_id
+        self.clock = clock
+        self.wall_clock = wall_clock
+        self.ttl = ttl
+        self._code = None
+        self._expires = None
+        self._lock = threading.Lock()
+
+    def put(self, code: str) -> None:
+        if not isinstance(code, str) or len(code) != 8:
+            raise ValueError("invalid pairing code shape")
+        expires = self.clock() + self.ttl
+        expires_wall = self.wall_clock() + self.ttl
+        with self._lock:
+            # Persist first: a failed atomic write never advertises a memory-only
+            # offer that a restart could silently lose.
+            save_pairing_file(self.path, self.terminal_id, code,
+                              expires_at=expires_wall)
+            self._code, self._expires = code, expires
+
+    def get(self) -> str | None:
+        with self._lock:
+            if self._code is not None and self._expires > self.clock():
+                return self._code
+            offer = load_pairing_file(self.path)
+            if not isinstance(offer, dict):
+                return None
+            if offer.get("terminal_id") != self.terminal_id:
+                return None
+            code = offer.get("pairing_code")
+            if not isinstance(code, str) or len(code) != 8:
+                return None
+            expires = offer.get("expires_at")
+            if expires is not None:
+                try:
+                    expired = float(expires) <= self.wall_clock()
+                except (TypeError, ValueError):
+                    return None
+                if expired:
+                    return None
+            return code
+
+    def available(self) -> bool:
+        return self.get() is not None
+
+
+class _LocalThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+
+def _origin_of(url: str) -> str | None:
+    """Canonical scheme://host[:port] for exact Origin/Referer comparison."""
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return None
+        host = parts.hostname
+        if not host:
+            return None
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return None
+    default = 80 if parts.scheme == "http" else 443
+    netloc = host if port in (None, default) else f"{host}:{port}"
+    return f"{parts.scheme}://{netloc}"
+
+
+def _script_json(value) -> str:
+    """JSON safe to inline in a script element (not merely HTML-escape)."""
+    return (json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+            .replace("&", "\\u0026").replace("<", "\\u003c")
+            .replace(">", "\\u003e").replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
+
+
+class _AgentRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+        """Never put nonce-bearing URLs or offers into an access log."""
+
+    def do_GET(self):
+        self.server.agent._dispatch(self)
+
+
+def _device_not_configured():
+    """Mimo replaces this with Heartbeater.snapshot in main()."""
+    raise RuntimeError("Heartbeater is not configured")
+
+
+class LocalAgentServer:
+    """Loopback-only popup/status server with origin-pinned offers."""
+
+    def __init__(self, port: int, *, config: dict, offers: OfferStore,
+                 nonces: NonceStore, device, post, stop_event=None, log=_log):
+        self.requested_port = port
+        self.port = port
+        self.config = dict(config)
+        self.offers = offers
+        self.nonces = nonces
+        self.device = device
+        self.post = post
+        self.stop_event = stop_event or threading.Event()
+        self.log = log
+        self._http = None
+        self._thread = None
+
+    def start(self) -> bool:
+        try:
+            self._http = _LocalThreadingHTTPServer(
+                ("127.0.0.1", self.requested_port), _AgentRequestHandler)
+        except OSError as exc:
+            self.log(f"local popup port 127.0.0.1:{self.requested_port} "
+                     f"is already in use ({exc.strerror or exc}); continuing "
+                     "without local server (grab continues)")
+            self._http = None
+            return False
+        self.port = self._http.server_address[1]
+        self._http.agent = self
+        self._thread = threading.Thread(
+            target=self._http.serve_forever, name="scanner-local-http",
+            daemon=True)
+        self._thread.start()
+        return True
+
+    def close(self) -> None:
+        http, thread = self._http, self._thread
+        self._http = self._thread = None
+        if http is not None:
+            http.shutdown()
+            http.server_close()
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+    @staticmethod
+    def _send(handler, status: int, body: bytes, content_type: str,
+              *, close=False, extra_headers=None):
+        handler.send_response(status)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        if close:
+            handler.send_header("Connection", "close")
+            handler.close_connection = True
+        for name, value in (extra_headers or {}).items():
+            handler.send_header(name, value)
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    def _json(self, handler, status: int, payload: dict, *, close=False,
+              extra_headers=None):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self._send(handler, status, body, "application/json", close=close,
+                   extra_headers=extra_headers)
+
+    def _html(self, handler, status: int, html: str, *, nonce: str | None = None,
+              close=False):
+        headers = {"Referrer-Policy": "no-referrer"}
+        if nonce is not None:
+            headers["Content-Security-Policy"] = (
+                f"default-src 'none'; script-src 'nonce-{nonce}'; "
+                "connect-src 'self'; base-uri 'none'")
+        self._send(handler, status, html.encode(),
+                   "text/html; charset=utf-8", close=close,
+                   extra_headers=headers)
+
+    def _dispatch(self, handler) -> None:
+        # Guard order (R1/R2): peer -> Host -> route -> Origin -> nonce.
+        peer = handler.client_address[0]
+        if peer not in ("127.0.0.1", "::1"):
+            self._json(handler, 403, {"error": "loopback_only"}, close=True)
+            return
+        expected_hosts = {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
+        if handler.headers.get("Host", "").lower() not in expected_hosts:
+            self._json(handler, 403, {"error": "bad_host"}, close=True)
+            return
+        path = urlsplit(handler.path).path
+        if handler.command != "GET":
+            self._json(handler, 405, {"error": "method_not_allowed"},
+                       extra_headers={"Allow": "GET"})
+            return
+        if path == "/status":
+            self._status(handler)
+            return
+        if path == "/pair":
+            self._pair(handler)
+            return
+        self._json(handler, 404, {"error": "not_found"})
+
+    def _snapshot(self, handler):
+        try:
+            return self.device()
+        except (OSError, RuntimeError):
+            self._json(handler, 503, {"error": "device_unavailable"})
+            return None
+
+    def _status(self, handler) -> None:
+        device = self._snapshot(handler)
+        if device is None:
+            return
+        self._json(handler, 200, {
+            "ok": True,
+            "terminal_id": self.config.get("terminal_id"),
+            "server_url": self.config.get("server_url"),
+            "device": device,
+            "pairing_code_available": self.offers.available(),
+            "agent_version": "1",
+        })
+
+    def _origin_allowed(self, handler) -> bool:
+        expected = _origin_of(self.config.get("site_origin", ""))
+        if expected is None:
+            return False
+        origin = handler.headers.get("Origin")
+        if origin is not None:
+            return origin == expected
+        referer = handler.headers.get("Referer")
+        return bool(referer and _origin_of(referer) == expected)
+
+    def _pair(self, handler) -> None:
+        if not self._origin_allowed(handler):
+            self._html(handler, 403,
+                       "<!doctype html><p>Origin refused — open pairing "
+                       "from the configured site.</p>")
+            return
+        query = urlsplit(handler.path).query
+        params = dict(part.split("=", 1) if "=" in part else (part, "")
+                      for part in query.split("&") if part)
+        nonce = params.get("nonce")
+        if nonce is None:
+            fresh = self.nonces.issue()
+            self._send(handler, 307, b"", "text/plain; charset=utf-8",
+                       extra_headers={"Location": "/pair?" + urlencode({
+                           "nonce": fresh,
+                           "reclaim": params.get("reclaim", "0")})})
+            return
+        if not self.nonces.consume(nonce):
+            self._html(handler, 403,
+                       "<!doctype html><p>Pairing link expired or already "
+                       "used — press the pill again.</p>")
+            return
+        reclaim = params.get("reclaim", "0")
+        if reclaim not in ("0", "1"):
+            self._json(handler, 400, {"error": "bad_reclaim"})
+            return
+        device = self._snapshot(handler)
+        if device is None:
+            return
+        code = self.offers.get() if reclaim == "0" else self._reclaim_code()
+        reason = None if code else ("reclaim_failed" if reclaim == "1"
+                                    else "no_offer")
+        payload = {
+            "type": "hcrm.agent.offer",
+            "nonce": nonce,
+            "terminal_id": self.config.get("terminal_id"),
+            "pairing_code": code,
+            "status": {"device": device["status"],
+                       "personality": device["personality"],
+                       "node": device["node"]},
+            "reason": reason,
+        }
+        self._html(handler, 200, self._render_pair(payload), nonce=nonce)
+
+    def _reclaim_code(self) -> str | None:
+        terminal_id = self.config.get("terminal_id")
+        secret = self.config.get("secret")
+        base_url = self.config.get("server_url")
+        if not terminal_id or not secret or not base_url:
+            return None
+        if self.stop_event.is_set():
+            return None
+        try:
+            result = self.post(
+                base_url.rstrip("/") + "/api/scanner/terminals/"
+                + quote(terminal_id, safe="") + "/reclaim",
+                {"X-Scanner-Secret": secret}, {})
+            code = result["pairing_code"]
+            self.offers.put(code)
+            return code
+        except (PostError, OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _render_pair(self, payload: dict) -> str:
+        offer = _script_json(payload)
+        origin = _script_json(self.config.get("site_origin"))
+        nonce = payload["nonce"]
+        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{nonce}'; connect-src 'self'; base-uri 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Scanner pairing</title></head>
+<body><p id="message">Pair this laptop's scanner.</p><script nonce="{nonce}">
+"use strict"; const OFFER = {offer}; const SITE_ORIGIN = {origin};
+const message = document.getElementById("message");
+if (!window.opener) {{ message.textContent = "Open this page from the site's scanner pill."; }}
+else {{ window.opener.postMessage(OFFER, SITE_ORIGIN);
+  if (!OFFER.reason) setTimeout(() => window.close(), 250);
+  else message.textContent = OFFER.reason === "no_offer" ? "No offer is available." : "Reclaim failed."; }}
+</script></body></html>"""
 
 
 def _is_foreign_identity(config, hostname) -> bool:
@@ -1529,6 +1886,16 @@ def _forward_events_url(base_url: str) -> str:
     return base_url.rstrip("/") + "/api/scanner/events"
 
 
+def _port_number(text: str) -> int:
+    try:
+        port = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be in 0..65535")
+    return port
+
+
 def _nonnegative_seconds(text: str) -> float:
     """argparse type for --register-wait: a finite, non-negative float."""
     try:
@@ -1543,7 +1910,7 @@ def _nonnegative_seconds(text: str) -> float:
 def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
          closer=None, scan_reader=None, lock_path=None,
          sysfs_root=None, clock=None, db_path=None, http_get=None,
-         hostname=None) -> int:
+         hostname=None, device=None) -> int:
     """The daemon entrypoint (round 4, T5).
 
     Modes:
@@ -1634,6 +2001,14 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                              "and keep running). One-click offer-file drift "
                              "is reported but never fatal, gate or not. Also "
                              "HCRM_SCANNER_REQUIRE_HOST_IDENTITY=1")
+    parser.add_argument("--local-port", type=_port_number, default=None,
+                        help="serve the loopback popup on 127.0.0.1:PORT "
+                             "(0 = ephemeral; off unless this or --site-origin "
+                             "is given; portable default 47631)")
+    parser.add_argument("--site-origin", metavar="ORIGIN",
+                        help="site origin allowed to receive the popup offer "
+                             "(scheme://host[:port]); also enables portable "
+                             "popup serving")
     args = parser.parse_args(argv)
     post_fn = post or _http_post
     nap = sleep if sleep is not None else time.sleep
@@ -1646,6 +2021,8 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
 
     previous = {}
     installed = []
+    stop_event = threading.Event()
+    local_server = None
     try:
         # Signals: raise _Stopped from anywhere (including a blocking read)
         # so the with-blocks unwind and the fd closes. Installed in BOTH
@@ -1762,6 +2139,40 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 _log("registration complete (--register-only) — not grabbing")
                 return 0
 
+            # R2: local serving is opt-in, so every legacy invocation stays off.
+            site_origin = (args.site_origin
+                           or (config or {}).get("site_origin"))
+            env_port = os.environ.get("HCRM_SCANNER_LOCAL_PORT")
+            local_port = (args.local_port if args.local_port is not None
+                          else _port_number(env_port) if env_port
+                          else 47631 if site_origin else None)
+            if local_port is not None:
+                runtime_config = dict(config or {})
+                runtime_config.update({
+                    "terminal_id": terminal_id,
+                    "secret": secret,
+                    "server_url": (getattr(args, "server", None)
+                                   or runtime_config.get("server_url")
+                                   or args.forward),
+                    "site_origin": (site_origin
+                                    or runtime_config.get("site_origin")),
+                })
+                if args.site_origin:
+                    offer_path = (Path(args.pairing_file) if args.pairing_file
+                                  else Path(args.config).with_name(
+                                      "scanner-pairing.json"))
+                else:
+                    offer_path = (Path(args.pairing_file) if args.pairing_file
+                                  else default_pairing_file())
+                local_server = LocalAgentServer(
+                    local_port, config=runtime_config,
+                    offers=OfferStore(offer_path, terminal_id, clock=tick),
+                    nonces=NonceStore(clock=tick),
+                    device=device or _device_not_configured,
+                    post=post_fn, stop_event=stop_event, log=_log)
+                local_server.start()
+                grab_kwargs["stop"] = stop_event.is_set
+
             spool = Spool(args.spool or (str(args.config) + ".spool"),
                           log=_log)
             forwarder = Forwarder(post_fn, _forward_events_url(args.forward),
@@ -1773,6 +2184,11 @@ def main(argv=None, *, post=None, sleep=None, opener=None, ioctl=None,
                 run_loop(forwarder.handle, **grab_kwargs)
             except (_Stopped, KeyboardInterrupt):
                 pass
+            finally:
+                stop_event.set()
+                # mimo adds Heartbeater.join(2) here, before server_close.
+                if local_server is not None:
+                    local_server.close()
             forwarder.drain()  # best-effort: flush what a stop left behind
         return 0
     except GrabError as exc:
